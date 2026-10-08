@@ -1,0 +1,26 @@
+create or replace function public.has_permission(_user_id uuid, _permission text) returns boolean language sql stable security definer set search_path = public as $$ select exists (select 1 from public.user_roles where user_id = _user_id and role in ('ceo','pastor_presidente')) or exists (select 1 from public.user_permissions where user_id = _user_id and permission = _permission) $$;
+alter policy "ceo manages roles" on public.user_roles using (public.has_role(auth.uid(), 'ceo') or (public.has_role(auth.uid(), 'pastor_presidente') and role not in ('ceo','pastor_presidente'))) with check (public.has_role(auth.uid(), 'ceo') or (public.has_role(auth.uid(), 'pastor_presidente') and role not in ('ceo','pastor_presidente')));
+alter policy "ceo manages perms" on public.user_permissions using (public.has_permission(auth.uid(),'manage_permissions')) with check (public.has_permission(auth.uid(),'manage_permissions'));
+create or replace function public.assign_church_role(_user_id uuid, _role public.app_role) returns void language plpgsql security definer set search_path = public as $$ begin
+if not (public.has_role(auth.uid(),'ceo') or public.has_role(auth.uid(),'pastor_presidente')) then raise exception 'Acesso negado'; end if;
+if _user_id = auth.uid() or exists(select 1 from public.user_roles where user_id = _user_id and role='ceo') or _role='ceo' then raise exception 'O cargo CEO não pode ser alterado'; end if;
+if not public.has_role(auth.uid(),'ceo') and (_role='pastor_presidente' or exists(select 1 from public.user_roles where user_id=_user_id and role='pastor_presidente')) then raise exception 'Somente o CEO pode atribuir Pastor Presidente'; end if;
+delete from public.user_roles where user_id=_user_id; insert into public.user_roles(user_id,role) values(_user_id,_role);
+end; $$;
+revoke all on function public.assign_church_role(uuid,public.app_role) from public,anon; grant execute on function public.assign_church_role(uuid,public.app_role) to authenticated;
+alter table public.member_invites add column unlimited boolean not null default false, add column use_count integer not null default 0;
+create or replace function public.check_invite(_code text) returns boolean language sql stable security definer set search_path=public as $$ select exists(select 1 from public.member_invites where code=upper(_code) and (unlimited or (used_at is null and expires_at>now()))) $$;
+create or replace function public.use_invite(_code text) returns boolean language plpgsql security definer set search_path=public as $$ declare n int; begin update public.member_invites set used_by=auth.uid(),used_at=now(),use_count=use_count+1 where code=upper(_code) and (unlimited or (used_at is null and expires_at>now())) and auth.uid() is not null; get diagnostics n=row_count; return n>0; end; $$;
+create table public.site_content (id text primary key default 'main' check(id='main'), content jsonb not null default '{}'::jsonb, updated_at timestamptz not null default now());
+grant select on public.site_content to anon,authenticated; grant insert,update on public.site_content to authenticated; grant all on public.site_content to service_role;
+alter table public.site_content enable row level security;
+create policy "public site read" on public.site_content for select to anon,authenticated using(true);
+create policy "leadership site insert" on public.site_content for insert to authenticated with check(public.has_role(auth.uid(),'ceo') or public.has_role(auth.uid(),'pastor_presidente'));
+create policy "leadership site update" on public.site_content for update to authenticated using(public.has_role(auth.uid(),'ceo') or public.has_role(auth.uid(),'pastor_presidente')) with check(public.has_role(auth.uid(),'ceo') or public.has_role(auth.uid(),'pastor_presidente'));
+create table public.prayer_requests (id uuid primary key default gen_random_uuid(),user_id uuid not null default auth.uid(),subject text not null check(length(subject) between 1 and 150),message text not null check(length(message) between 1 and 5000),status text not null default 'recebido' check(status in ('recebido','em_oracao','concluido')),created_at timestamptz not null default now());
+grant select,insert,update,delete on public.prayer_requests to authenticated; grant all on public.prayer_requests to service_role;
+alter table public.prayer_requests enable row level security;
+create policy "prayers own and leadership read" on public.prayer_requests for select to authenticated using(user_id=auth.uid() or public.has_role(auth.uid(),'ceo') or public.has_role(auth.uid(),'pastor_presidente') or public.has_role(auth.uid(),'admin'));
+create policy "members request prayer" on public.prayer_requests for insert to authenticated with check(user_id=auth.uid() and status='recebido');
+create policy "leadership prayer update" on public.prayer_requests for update to authenticated using(public.has_role(auth.uid(),'ceo') or public.has_role(auth.uid(),'pastor_presidente') or public.has_role(auth.uid(),'admin')) with check(public.has_role(auth.uid(),'ceo') or public.has_role(auth.uid(),'pastor_presidente') or public.has_role(auth.uid(),'admin'));
+create policy "prayers own delete" on public.prayer_requests for delete to authenticated using(user_id=auth.uid() or public.has_role(auth.uid(),'ceo') or public.has_role(auth.uid(),'pastor_presidente'));

@@ -1,0 +1,1 @@
+alter policy "ceo manages perms" on public.user_permissions using (public.has_role(auth.uid(),'ceo') or public.has_role(auth.uid(),'pastor_presidente')) with check (public.has_role(auth.uid(),'ceo') or public.has_role(auth.uid(),'pastor_presidente'));
