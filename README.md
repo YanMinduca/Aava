@@ -1,24 +1,23 @@
-# Exact Screenshot
+# Aava
 
-Implement exactly the screenshot and nothing else
+Site da Comunidade Aava.
 
-This project was built with [Lovable](https://lovable.dev).
+## Desenvolvimento
 
-## Build with Lovable
+```bash
+npm install
+cp .env.example .env   # preencha com as chaves do SEU projeto Supabase
+npm run dev            # http://localhost:8080
+```
 
-Continue developing this project in the [Lovable editor](https://lovable.dev/projects/c948eb4a-b203-4d98-8230-f0d70d34b331).
+## Build
 
-- **Ship faster**: describe what you want to build and Lovable handles the code.
-- **Stay in sync**: every change made in Lovable is committed straight to this repository.
-- **Full ownership**: this code is yours. Push to `main` on GitHub and your changes sync back into Lovable, ready for your next prompt.
+```bash
+npm run build
+```
 
-## Development
+## Testes
 
-Prefer working locally? You need Node.js and npm — [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating).
-
-```sh
-git clone <this-repository-url>
-cd <repository-name>
-npm i
-npm run dev
+```bash
+npm test
 ```
