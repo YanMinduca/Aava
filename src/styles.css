@@ -1,10 +1,16 @@
+@import url('https://fonts.googleapis.com/css2?family=Allura&display=swap');
+
 @import "tailwindcss" source(none);
 @source "../src";
 @import "tw-animate-css";
 
+
+
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
+  --font-allura: "Allura", cursive;
   --font-display: "Manrope", system-ui, sans-serif;
   --font-sans: "Manrope", system-ui, sans-serif;
   --radius-sm: calc(var(--radius) - 4px);

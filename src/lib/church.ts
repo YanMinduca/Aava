@@ -32,6 +32,10 @@ export const PERMISSION_GROUPS: { label: string; perms: { key: string; label: st
     ],
   },
   {
+    label: "Oração",
+    perms: [{ key: "view_prayer_requests", label: "Ver pedidos de oração" }],
+  },
+  {
     label: "Configurações",
     perms: [{ key: "manage_permissions", label: "Ver usuários e permissões" }],
   },
@@ -64,23 +68,60 @@ export const APPROVAL_LABELS: Record<string, string> = {
 export const MARITAL = ["Solteiro(a)", "Casado(a)", "Divorciado(a)", "Viúvo(a)", "União estável"];
 
 export const INCOME_CATEGORIES = ["Dízimos", "Ofertas", "Doações", "Eventos", "Outras receitas"];
-export const EXPENSE_CATEGORIES = ["Aluguel", "Energia", "Água", "Internet", "Salários/Ajudas", "Manutenção", "Equipamentos", "Eventos", "Missões", "Outros gastos"];
-export const PAYMENT_METHODS = ["Pix", "Dinheiro", "Cartão de débito", "Cartão de crédito", "Transferência", "Boleto", "Outro"];
+export const EXPENSE_CATEGORIES = [
+  "Aluguel",
+  "Energia",
+  "Água",
+  "Internet",
+  "Salários/Ajudas",
+  "Manutenção",
+  "Equipamentos",
+  "Eventos",
+  "Missões",
+  "Outros gastos",
+];
+export const PAYMENT_METHODS = [
+  "Pix",
+  "Dinheiro",
+  "Cartão de débito",
+  "Cartão de crédito",
+  "Transferência",
+  "Boleto",
+  "Outro",
+];
 
 export const brl = (n: number) => n.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
-export const dateBR = (d?: string | null) => (d ? d.slice(0, 10).split("-").reverse().join("/") : "—");
-export const MONTHS = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"];
+export const dateBR = (d?: string | null) =>
+  d ? d.slice(0, 10).split("-").reverse().join("/") : "—";
+export const MONTHS = [
+  "Janeiro",
+  "Fevereiro",
+  "Março",
+  "Abril",
+  "Maio",
+  "Junho",
+  "Julho",
+  "Agosto",
+  "Setembro",
+  "Outubro",
+  "Novembro",
+  "Dezembro",
+];
 
 export function ageFrom(birth?: string | null) {
   if (!birth) return null;
   const b = new Date(birth + "T00:00:00");
   const n = new Date();
   let a = n.getFullYear() - b.getFullYear();
-  if (n.getMonth() < b.getMonth() || (n.getMonth() === b.getMonth() && n.getDate() < b.getDate())) a--;
+  if (n.getMonth() < b.getMonth() || (n.getMonth() === b.getMonth() && n.getDate() < b.getDate()))
+    a--;
   return a >= 0 ? a : null;
 }
 
 export function formatCpf(v: string) {
   const d = v.replace(/\D/g, "").slice(0, 11);
-  return d.replace(/(\d{3})(\d)/, "$1.$2").replace(/(\d{3})(\d)/, "$1.$2").replace(/(\d{3})(\d{1,2})$/, "$1-$2");
+  return d
+    .replace(/(\d{3})(\d)/, "$1.$2")
+    .replace(/(\d{3})(\d)/, "$1.$2")
+    .replace(/(\d{3})(\d{1,2})$/, "$1-$2");
 }
