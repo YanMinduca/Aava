@@ -1,0 +1,1517 @@
+diff --git a/drizzle/migrations/0006_member_address_and_tithes.sql b/drizzle/migrations/0006_member_address_and_tithes.sql
+new file mode 100644
+index 0000000..e517b0d
+--- /dev/null
++++ b/drizzle/migrations/0006_member_address_and_tithes.sql
+@@ -0,0 +1,37 @@
++-- Member address fields, baptism church and tithe history.
++alter table public.members
++  add column if not exists neighborhood text,
++  add column if not exists city text,
++  add column if not exists zip_code text,
++  add column if not exists baptism_church text;
++
++create table if not exists public.tithes (
++  id uuid primary key default gen_random_uuid(),
++  member_id uuid not null references public.members(id) on delete cascade,
++  amount numeric(12,2) not null check (amount > 0),
++  paid_on date not null default current_date,
++  reference_month date,
++  payment_method text,
++  notes text,
++  created_by uuid default auth.uid(),
++  created_at timestamptz not null default now()
++);
++create index if not exists tithes_member_paid_idx on public.tithes (member_id, paid_on desc);
++alter table public.tithes enable row level security;
++
++drop policy if exists "tithes view" on public.tithes;
++drop policy if exists "tithes create" on public.tithes;
++drop policy if exists "tithes edit" on public.tithes;
++drop policy if exists "tithes delete" on public.tithes;
++drop policy if exists "tithes own read" on public.tithes;
++
++create policy "tithes view" on public.tithes for select to authenticated
++  using (public.has_permission(auth.uid(), 'view_finance'));
++create policy "tithes create" on public.tithes for insert to authenticated
++  with check (public.has_permission(auth.uid(), 'create_financial_transaction'));
++create policy "tithes edit" on public.tithes for update to authenticated
++  using (public.has_permission(auth.uid(), 'edit_financial_transaction'));
++create policy "tithes delete" on public.tithes for delete to authenticated
++  using (public.has_permission(auth.uid(), 'delete_financial_transaction'));
++create policy "tithes own read" on public.tithes for select to authenticated
++  using (exists (select 1 from public.members m where m.id = tithes.member_id and m.user_id = auth.uid()));
+diff --git a/drizzle/migrations/meta/_journal.json b/drizzle/migrations/meta/_journal.json
+index 693801f..78759ca 100644
+--- a/drizzle/migrations/meta/_journal.json
++++ b/drizzle/migrations/meta/_journal.json
+@@ -43,6 +43,13 @@
+       "when": 1791460000000,
+       "tag": "0005_prayer_request_visibility_permission",
+       "breakpoints": true
++    },
++    {
++      "idx": 6,
++      "version": "7",
++      "when": 1791546000000,
++      "tag": "0006_member_address_and_tithes",
++      "breakpoints": true
+     }
+   ]
+ }
+diff --git a/src/components/members/MemberForm.tsx b/src/components/members/MemberForm.tsx
+index 6ab3e10..7e0995d 100644
+--- a/src/components/members/MemberForm.tsx
++++ b/src/components/members/MemberForm.tsx
+@@ -8,7 +8,7 @@ import { Label } from "@/components/ui/label";
+ import { Switch } from "@/components/ui/switch";
+ import { Textarea } from "@/components/ui/textarea";
+ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+-import { MARITAL, MEMBER_STATUS, ageFrom, formatCpf } from "@/lib/church";
++import { MARITAL, MEMBER_STATUS, ageFrom, formatCep, formatCpf } from "@/lib/church";
+ 
+ export type MemberDraft = TablesInsert<"members"> & { id?: string };
+ 
+@@ -16,6 +16,7 @@ export const emptyMember: MemberDraft = {
+   full_name: "", email: "", phone: "", birth_date: null, address: "", cpf: "", rg: "", marital_status: null,
+   joined_on: null, affiliated_on: null, baptized: false, baptism_date: null, ministry: "", department: "", church_role: "",
+   status: "membro", photo_path: null,
++  neighborhood: "", city: "", zip_code: "", baptism_church: "",
+ };
+ 
+ export function usePhotoUrl(path?: string | null) {
+@@ -85,6 +86,25 @@ export function MemberForm({
+     set({ photo_path: path });
+   }
+ 
++  // Preenche rua, bairro e cidade a partir do CEP (ViaCEP). Se falhar, o usuário digita manualmente.
++  async function fillFromCep(cep: string) {
++    try {
++      const res = await fetch(`https://viacep.com.br/ws/${cep.replace(/\D/g, "")}/json/`);
++      if (!res.ok) return;
++      const d = (await res.json()) as { erro?: boolean; logradouro?: string; bairro?: string; localidade?: string };
++      if (d.erro) return;
++      onChange({
++        ...value,
++        zip_code: cep,
++        address: value.address || d.logradouro || "",
++        neighborhood: value.neighborhood || d.bairro || "",
++        city: value.city || d.localidade || "",
++      });
++    } catch {
++      /* sem internet ou serviço fora do ar: segue manual */
++    }
++  }
++
+   const txt = (k: keyof MemberDraft) => ({
+     value: (value[k] as string | null | undefined) ?? "",
+     onChange: (e: React.ChangeEvent<HTMLInputElement>) => set({ [k]: e.target.value } as Partial<MemberDraft>),
+@@ -112,7 +132,6 @@ export function MemberForm({
+         <F label="RG"><Input {...txt("rg")} /></F>
+         <F label="Telefone"><Input {...txt("phone")} placeholder="(12) 90000-0000" /></F>
+         <F label="E-mail"><Input type="email" {...txt("email")} /></F>
+-        <F label="Endereço" full><Input {...txt("address")} /></F>
+         <F label="Estado civil">
+           <Select value={value.marital_status ?? ""} onValueChange={(v) => set({ marital_status: v })}>
+             <SelectTrigger><SelectValue placeholder="Selecione" /></SelectTrigger>
+@@ -121,14 +140,37 @@ export function MemberForm({
+         </F>
+       </Section>
+ 
++      <Section title="Endereço">
++        <F label="CEP">
++          <Input
++            inputMode="numeric"
++            placeholder="00000-000"
++            value={value.zip_code ?? ""}
++            onChange={(e) => {
++              const cep = formatCep(e.target.value);
++              set({ zip_code: cep });
++              if (cep.length === 9) void fillFromCep(cep);
++            }}
++          />
++        </F>
++        <F label="Endereço (rua e número)"><Input {...txt("address")} /></F>
++        <F label="Bairro"><Input {...txt("neighborhood")} /></F>
++        <F label="Cidade"><Input {...txt("city")} /></F>
++      </Section>
++
+       <Section title="Dados da igreja">
+         <F label="Data de entrada na igreja"><Input {...dt("joined_on")} /></F>
+         {mode === "admin" && <F label="Data de filiação"><Input {...dt("affiliated_on")} /></F>}
+         <div className="flex items-center gap-3 pt-6">
+-          <Switch checked={!!value.baptized} onCheckedChange={(v) => set({ baptized: v, baptism_date: v ? (value.baptism_date ?? null) : null })} />
++          <Switch checked={!!value.baptized} onCheckedChange={(v) => set({ baptized: v, baptism_date: v ? (value.baptism_date ?? null) : null, baptism_church: v ? (value.baptism_church ?? "") : "" })} />
+           <Label>Batizado?</Label>
+         </div>
+         {value.baptized && <F label="Data do batismo"><Input {...dt("baptism_date")} /></F>}
++        {value.baptized && (
++          <F label="Igreja onde se batizou" full>
++            <Input {...txt("baptism_church")} placeholder="Nome da igreja e cidade" />
++          </F>
++        )}
+         {mode === "admin" && (
+           <>
+             <F label="Ministério"><Input {...txt("ministry")} /></F>
+diff --git a/src/components/tithes/MyTithes.tsx b/src/components/tithes/MyTithes.tsx
+new file mode 100644
+index 0000000..c80677f
+--- /dev/null
++++ b/src/components/tithes/MyTithes.tsx
+@@ -0,0 +1,40 @@
++import { useQuery } from "@tanstack/react-query";
++import { supabase } from "@/integrations/supabase/client";
++import { brl } from "@/lib/church";
++import { TitheTable } from "./TitheTable";
++import type { TitheRow } from "./TitheDialog";
++
++/** Histórico de dízimos do próprio membro (somente leitura). */
++export function MyTithes({ memberId }: { memberId: string }) {
++  const q = useQuery({
++    queryKey: ["tithes", "mine", memberId],
++    queryFn: async () => {
++      const { data, error } = await supabase
++        .from("tithes")
++        .select("*")
++        .eq("member_id", memberId)
++        .order("paid_on", { ascending: false });
++      if (error) throw error;
++      return data as TitheRow[];
++    },
++  });
++  const rows = q.data ?? [];
++  const year = String(new Date().getFullYear());
++  const totalYear = rows
++    .filter((t) => t.paid_on.startsWith(year))
++    .reduce((s, t) => s + Number(t.amount), 0);
++
++  return (
++    <section className="mt-10">
++      <div className="flex flex-wrap items-baseline justify-between gap-2">
++        <h2 className="text-2xl text-foreground">Meus dízimos</h2>
++        <p className="text-sm text-muted-foreground">
++          Total em {year}: <span className="font-semibold text-foreground">{brl(totalYear)}</span>
++        </p>
++      </div>
++      <div className="mt-4">
++        <TitheTable rows={rows} loading={q.isLoading} />
++      </div>
++    </section>
++  );
++}
+diff --git a/src/components/tithes/TitheDialog.tsx b/src/components/tithes/TitheDialog.tsx
+new file mode 100644
+index 0000000..2acd3ba
+--- /dev/null
++++ b/src/components/tithes/TitheDialog.tsx
+@@ -0,0 +1,220 @@
++import { useEffect, useState } from "react";
++import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
++import { toast } from "sonner";
++import { supabase } from "@/integrations/supabase/client";
++import type { Tables } from "@/integrations/supabase/types";
++import { Button } from "@/components/ui/button";
++import { Input } from "@/components/ui/input";
++import { Label } from "@/components/ui/label";
++import { Textarea } from "@/components/ui/textarea";
++import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
++import {
++  Select,
++  SelectContent,
++  SelectItem,
++  SelectTrigger,
++  SelectValue,
++} from "@/components/ui/select";
++import { PAYMENT_METHODS, parseMoney } from "@/lib/church";
++
++export type TitheRow = Tables<"tithes"> & { members?: { id: string; full_name: string } | null };
++
++type Draft = {
++  id?: string;
++  member_id: string;
++  amount: string;
++  paid_on: string;
++  reference_month: string; // formato YYYY-MM (campo <input type="month">)
++  payment_method: string;
++  notes: string;
++};
++
++const today = () => new Date().toISOString().slice(0, 10);
++
++function toDraft(t: TitheRow | null, memberId?: string): Draft {
++  if (t) {
++    return {
++      id: t.id,
++      member_id: t.member_id,
++      amount: String(t.amount).replace(".", ","),
++      paid_on: t.paid_on,
++      reference_month: t.reference_month?.slice(0, 7) ?? t.paid_on.slice(0, 7),
++      payment_method: t.payment_method ?? "",
++      notes: t.notes ?? "",
++    };
++  }
++  return {
++    member_id: memberId ?? "",
++    amount: "",
++    paid_on: today(),
++    reference_month: today().slice(0, 7),
++    payment_method: "",
++    notes: "",
++  };
++}
++
++/**
++ * Cria ou edita um dízimo.
++ * - `memberId` fixo (perfil do membro): o membro não pode ser trocado.
++ * - sem `memberId` (tela geral de dízimos): mostra a lista para escolher o membro.
++ */
++export function TitheDialog({
++  open,
++  onClose,
++  tithe,
++  memberId,
++  memberName,
++}: {
++  open: boolean;
++  onClose: () => void;
++  tithe: TitheRow | null;
++  memberId?: string;
++  memberName?: string;
++}) {
++  const qc = useQueryClient();
++  const [d, setD] = useState<Draft>(() => toDraft(tithe, memberId));
++
++  useEffect(() => {
++    if (open) setD(toDraft(tithe, memberId));
++  }, [open, tithe, memberId]);
++
++  const members = useQuery({
++    queryKey: ["members-options"],
++    enabled: open && !memberId,
++    queryFn: async () => {
++      const { data, error } = await supabase
++        .from("members")
++        .select("id, full_name")
++        .neq("approval_status", "pendente")
++        .order("full_name");
++      if (error) throw error;
++      return data;
++    },
++  });
++
++  const save = useMutation({
++    mutationFn: async () => {
++      const amount = parseMoney(d.amount);
++      if (!d.member_id) throw new Error("Escolha o membro.");
++      if (!Number.isFinite(amount) || amount <= 0)
++        throw new Error("Informe um valor maior que zero.");
++      if (!d.paid_on) throw new Error("Informe a data do dízimo.");
++      const payload = {
++        member_id: d.member_id,
++        amount,
++        paid_on: d.paid_on,
++        reference_month: d.reference_month ? `${d.reference_month}-01` : null,
++        payment_method: d.payment_method || null,
++        notes: d.notes.trim() || null,
++      };
++      const { error } = d.id
++        ? await supabase.from("tithes").update(payload).eq("id", d.id)
++        : await supabase.from("tithes").insert(payload);
++      if (error) throw error;
++    },
++    onSuccess: () => {
++      toast.success(d.id ? "Dízimo atualizado" : "Dízimo registrado");
++      qc.invalidateQueries({ queryKey: ["tithes"] });
++      onClose();
++    },
++    onError: (e: Error) => toast.error(e.message),
++  });
++
++  return (
++    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
++      <DialogContent className="max-w-lg">
++        <DialogHeader>
++          <DialogTitle>{d.id ? "Editar dízimo" : "Registrar dízimo"}</DialogTitle>
++        </DialogHeader>
++        <form
++          className="space-y-4"
++          onSubmit={(e) => {
++            e.preventDefault();
++            save.mutate();
++          }}
++        >
++          <div className="space-y-1.5">
++            <Label>Membro *</Label>
++            {memberId ? (
++              <Input disabled value={memberName ?? ""} />
++            ) : (
++              <Select value={d.member_id} onValueChange={(v) => setD({ ...d, member_id: v })}>
++                <SelectTrigger>
++                  <SelectValue
++                    placeholder={members.isLoading ? "Carregando..." : "Selecione o membro"}
++                  />
++                </SelectTrigger>
++                <SelectContent>
++                  {(members.data ?? []).map((m) => (
++                    <SelectItem key={m.id} value={m.id}>
++                      {m.full_name}
++                    </SelectItem>
++                  ))}
++                </SelectContent>
++              </Select>
++            )}
++          </div>
++
++          <div className="grid gap-4 sm:grid-cols-2">
++            <div className="space-y-1.5">
++              <Label>Valor (R$) *</Label>
++              <Input
++                inputMode="decimal"
++                placeholder="0,00"
++                value={d.amount}
++                onChange={(e) => setD({ ...d, amount: e.target.value })}
++              />
++            </div>
++            <div className="space-y-1.5">
++              <Label>Data do dízimo *</Label>
++              <Input
++                type="date"
++                value={d.paid_on}
++                onChange={(e) => setD({ ...d, paid_on: e.target.value })}
++              />
++            </div>
++            <div className="space-y-1.5">
++              <Label>Mês de referência</Label>
++              <Input
++                type="month"
++                value={d.reference_month}
++                onChange={(e) => setD({ ...d, reference_month: e.target.value })}
++              />
++            </div>
++            <div className="space-y-1.5">
++              <Label>Forma de pagamento</Label>
++              <Select
++                value={d.payment_method}
++                onValueChange={(v) => setD({ ...d, payment_method: v })}
++              >
++                <SelectTrigger>
++                  <SelectValue placeholder="Selecione" />
++                </SelectTrigger>
++                <SelectContent>
++                  {PAYMENT_METHODS.map((m) => (
++                    <SelectItem key={m} value={m}>
++                      {m}
++                    </SelectItem>
++                  ))}
++                </SelectContent>
++              </Select>
++            </div>
++          </div>
++
++          <div className="space-y-1.5">
++            <Label>Observação</Label>
++            <Textarea
++              rows={2}
++              value={d.notes}
++              onChange={(e) => setD({ ...d, notes: e.target.value })}
++            />
++          </div>
++
++          <Button type="submit" className="w-full" disabled={save.isPending}>
++            {d.id ? "Salvar alterações" : "Registrar dízimo"}
++          </Button>
++        </form>
++      </DialogContent>
++    </Dialog>
++  );
++}
+diff --git a/src/components/tithes/TitheTable.tsx b/src/components/tithes/TitheTable.tsx
+new file mode 100644
+index 0000000..eac2022
+--- /dev/null
++++ b/src/components/tithes/TitheTable.tsx
+@@ -0,0 +1,123 @@
++import { Link } from "@tanstack/react-router";
++import { useMutation, useQueryClient } from "@tanstack/react-query";
++import { Pencil, Trash2 } from "lucide-react";
++import { toast } from "sonner";
++import { supabase } from "@/integrations/supabase/client";
++import { Button } from "@/components/ui/button";
++import { brl, dateBR, monthRefLabel } from "@/lib/church";
++import type { TitheRow } from "./TitheDialog";
++
++export function useDeleteTithe() {
++  const qc = useQueryClient();
++  return useMutation({
++    mutationFn: async (id: string) => {
++      const { error } = await supabase.from("tithes").delete().eq("id", id);
++      if (error) throw error;
++    },
++    onSuccess: () => {
++      toast.success("Dízimo excluído");
++      qc.invalidateQueries({ queryKey: ["tithes"] });
++    },
++    onError: (e: Error) => toast.error(e.message),
++  });
++}
++
++export function TitheTable({
++  rows,
++  showMember,
++  onEdit,
++  onDelete,
++  loading,
++}: {
++  rows: TitheRow[];
++  showMember?: boolean;
++  onEdit?: (t: TitheRow) => void;
++  onDelete?: (t: TitheRow) => void;
++  loading?: boolean;
++}) {
++  const cols = 4 + (showMember ? 1 : 0) + (onEdit || onDelete ? 1 : 0);
++  return (
++    <div className="overflow-x-auto rounded-2xl border bg-card">
++      <table className="w-full text-sm">
++        <thead className="border-b text-left text-muted-foreground">
++          <tr>
++            <th className="p-4 font-medium">Data</th>
++            {showMember && <th className="p-4 font-medium">Membro</th>}
++            <th className="p-4 font-medium">Referente a</th>
++            <th className="p-4 font-medium">Forma</th>
++            <th className="p-4 text-right font-medium">Valor</th>
++            {(onEdit || onDelete) && <th className="p-4" />}
++          </tr>
++        </thead>
++        <tbody>
++          {loading && (
++            <tr>
++              <td className="p-4 text-muted-foreground" colSpan={cols}>
++                Carregando...
++              </td>
++            </tr>
++          )}
++          {!loading && rows.length === 0 && (
++            <tr>
++              <td className="p-6 text-center text-muted-foreground" colSpan={cols}>
++                Nenhum dízimo registrado neste período.
++              </td>
++            </tr>
++          )}
++          {rows.map((t) => (
++            <tr key={t.id} className="border-b last:border-0">
++              <td className="whitespace-nowrap p-4 text-foreground">{dateBR(t.paid_on)}</td>
++              {showMember && (
++                <td className="p-4">
++                  {t.members ? (
++                    <Link
++                      to="/painel/membro/$id"
++                      params={{ id: t.member_id }}
++                      className="font-medium text-foreground hover:text-primary hover:underline"
++                    >
++                      {t.members.full_name}
++                    </Link>
++                  ) : (
++                    <span className="text-muted-foreground">—</span>
++                  )}
++                </td>
++              )}
++              <td className="p-4 text-muted-foreground">{monthRefLabel(t.reference_month)}</td>
++              <td className="p-4 text-muted-foreground">
++                {t.payment_method ?? "—"}
++                {t.notes && <p className="text-xs">{t.notes}</p>}
++              </td>
++              <td className="whitespace-nowrap p-4 text-right font-medium text-foreground">
++                {brl(Number(t.amount))}
++              </td>
++              {(onEdit || onDelete) && (
++                <td className="whitespace-nowrap p-4 text-right">
++                  {onEdit && (
++                    <Button
++                      size="icon"
++                      variant="ghost"
++                      onClick={() => onEdit(t)}
++                      aria-label="Editar dízimo"
++                    >
++                      <Pencil className="h-4 w-4" />
++                    </Button>
++                  )}
++                  {onDelete && (
++                    <Button
++                      size="icon"
++                      variant="ghost"
++                      onClick={() => onDelete(t)}
++                      aria-label="Excluir dízimo"
++                    >
++                      <Trash2 className="h-4 w-4" />
++                    </Button>
++                  )}
++                </td>
++              )}
++            </tr>
++          ))}
++        </tbody>
++      </table>
++    </div>
++  );
++}
+diff --git a/src/integrations/supabase/types.ts b/src/integrations/supabase/types.ts
+index 4c3c995..f4d1462 100644
+--- a/src/integrations/supabase/types.ts
++++ b/src/integrations/supabase/types.ts
+@@ -171,10 +171,12 @@ export type Database = {
+           address: string | null
+           affiliated_on: string | null
+           approval_status: string
++          baptism_church: string | null
+           baptism_date: string | null
+           baptized: boolean
+           birth_date: string | null
+           church_role: string | null
++          city: string | null
+           cpf: string | null
+           created_at: string
+           department: string | null
+@@ -184,6 +186,7 @@ export type Database = {
+           joined_on: string | null
+           marital_status: string | null
+           ministry: string | null
++          neighborhood: string | null
+           notes: string | null
+           phone: string | null
+           photo_path: string | null
+@@ -191,15 +194,18 @@ export type Database = {
+           status: string
+           updated_at: string
+           user_id: string | null
++          zip_code: string | null
+         }
+         Insert: {
+           address?: string | null
+           affiliated_on?: string | null
+           approval_status?: string
++          baptism_church?: string | null
+           baptism_date?: string | null
+           baptized?: boolean
+           birth_date?: string | null
+           church_role?: string | null
++          city?: string | null
+           cpf?: string | null
+           created_at?: string
+           department?: string | null
+@@ -209,6 +215,7 @@ export type Database = {
+           joined_on?: string | null
+           marital_status?: string | null
+           ministry?: string | null
++          neighborhood?: string | null
+           notes?: string | null
+           phone?: string | null
+           photo_path?: string | null
+@@ -216,15 +223,18 @@ export type Database = {
+           status?: string
+           updated_at?: string
+           user_id?: string | null
++          zip_code?: string | null
+         }
+         Update: {
+           address?: string | null
+           affiliated_on?: string | null
+           approval_status?: string
++          baptism_church?: string | null
+           baptism_date?: string | null
+           baptized?: boolean
+           birth_date?: string | null
+           church_role?: string | null
++          city?: string | null
+           cpf?: string | null
+           created_at?: string
+           department?: string | null
+@@ -234,6 +244,7 @@ export type Database = {
+           joined_on?: string | null
+           marital_status?: string | null
+           ministry?: string | null
++          neighborhood?: string | null
+           notes?: string | null
+           phone?: string | null
+           photo_path?: string | null
+@@ -241,6 +252,7 @@ export type Database = {
+           status?: string
+           updated_at?: string
+           user_id?: string | null
++          zip_code?: string | null
+         }
+         Relationships: []
+       }
+@@ -343,6 +355,50 @@ export type Database = {
+         }
+         Relationships: []
+       }
++      tithes: {
++        Row: {
++          amount: number
++          created_at: string
++          created_by: string | null
++          id: string
++          member_id: string
++          notes: string | null
++          paid_on: string
++          payment_method: string | null
++          reference_month: string | null
++        }
++        Insert: {
++          amount: number
++          created_at?: string
++          created_by?: string | null
++          id?: string
++          member_id: string
++          notes?: string | null
++          paid_on?: string
++          payment_method?: string | null
++          reference_month?: string | null
++        }
++        Update: {
++          amount?: number
++          created_at?: string
++          created_by?: string | null
++          id?: string
++          member_id?: string
++          notes?: string | null
++          paid_on?: string
++          payment_method?: string | null
++          reference_month?: string | null
++        }
++        Relationships: [
++          {
++            foreignKeyName: "tithes_member_id_fkey"
++            columns: ["member_id"]
++            isOneToOne: false
++            referencedRelation: "members"
++            referencedColumns: ["id"]
++          },
++        ]
++      }
+       user_permissions: {
+         Row: {
+           id: string
+diff --git a/src/lib/church.ts b/src/lib/church.ts
+index 11d871f..e8d4424 100644
+--- a/src/lib/church.ts
++++ b/src/lib/church.ts
+@@ -125,3 +125,23 @@ export function formatCpf(v: string) {
+     .replace(/(\d{3})(\d)/, "$1.$2")
+     .replace(/(\d{3})(\d{1,2})$/, "$1-$2");
+ }
++
++export function formatCep(v: string) {
++  const d = v.replace(/\D/g, "").slice(0, 8);
++  return d.length > 5 ? `${d.slice(0, 5)}-${d.slice(5)}` : d;
++}
++
++/** Converte "1.234,56", "150,5" ou "150.50" em número. Retorna NaN se não der. */
++export function parseMoney(v: string) {
++  const t = v.trim().replace(/[^\d.,]/g, "");
++  if (!t) return NaN;
++  const normalized = t.includes(",") ? t.replace(/\./g, "").replace(",", ".") : t;
++  return Number(normalized);
++}
++
++/** "2026-03-01" -> "Março/2026" */
++export function monthRefLabel(d?: string | null) {
++  if (!d) return "—";
++  const [y, m] = d.slice(0, 7).split("-");
++  return `${MONTHS[Number(m) - 1] ?? m}/${y}`;
++}
+diff --git a/src/routeTree.gen.ts b/src/routeTree.gen.ts
+index 088a7c0..2db10be 100644
+--- a/src/routeTree.gen.ts
++++ b/src/routeTree.gen.ts
+@@ -20,6 +20,7 @@ import { Route as QuemSomosRouteImport } from './routes/quem-somos'
+ import { Route as AuthenticatedPainelRouteImport } from './routes/_authenticated/painel'
+ import { Route as ConviteCodeRouteImport } from './routes/convite.$code'
+ import { Route as AuthenticatedPainelIndexRouteImport } from './routes/_authenticated/painel.index'
++import { Route as AuthenticatedPainelDizimosRouteImport } from './routes/_authenticated/painel.dizimos'
+ import { Route as AuthenticatedPainelFinanceiroRouteImport } from './routes/_authenticated/painel.financeiro'
+ import { Route as AuthenticatedPainelMembrosRouteImport } from './routes/_authenticated/painel.membros'
+ import { Route as AuthenticatedPainelMeuCadastroRouteImport } from './routes/_authenticated/painel.meu-cadastro'
+@@ -27,6 +28,7 @@ import { Route as AuthenticatedPainelOracaoRouteImport } from './routes/_authent
+ import { Route as AuthenticatedPainelPermissoesRouteImport } from './routes/_authenticated/painel.permissoes'
+ import { Route as AuthenticatedPainelRelatorioRouteImport } from './routes/_authenticated/painel.relatorio'
+ import { Route as AuthenticatedPainelSiteRouteImport } from './routes/_authenticated/painel.site'
++import { Route as AuthenticatedPainelMembroIdRouteImport } from './routes/_authenticated/painel.membro.$id'
+ 
+ const IndexRoute = IndexRouteImport.update({
+   id: '/',
+@@ -83,6 +85,12 @@ const AuthenticatedPainelIndexRoute =
+     path: '/',
+     getParentRoute: () => AuthenticatedPainelRoute,
+   } as any)
++const AuthenticatedPainelDizimosRoute =
++  AuthenticatedPainelDizimosRouteImport.update({
++    id: '/dizimos',
++    path: '/dizimos',
++    getParentRoute: () => AuthenticatedPainelRoute,
++  } as any)
+ const AuthenticatedPainelFinanceiroRoute =
+   AuthenticatedPainelFinanceiroRouteImport.update({
+     id: '/financeiro',
+@@ -124,6 +132,12 @@ const AuthenticatedPainelSiteRoute = AuthenticatedPainelSiteRouteImport.update({
+   path: '/site',
+   getParentRoute: () => AuthenticatedPainelRoute,
+ } as any)
++const AuthenticatedPainelMembroIdRoute =
++  AuthenticatedPainelMembroIdRouteImport.update({
++    id: '/membro/$id',
++    path: '/membro/$id',
++    getParentRoute: () => AuthenticatedPainelRoute,
++  } as any)
+ 
+ export interface FileRoutesByFullPath {
+   '/': typeof IndexRoute
+@@ -135,6 +149,7 @@ export interface FileRoutesByFullPath {
+   '/quem-somos': typeof QuemSomosRoute
+   '/painel': typeof AuthenticatedPainelRouteWithChildren
+   '/convite/$code': typeof ConviteCodeRoute
++  '/painel/dizimos': typeof AuthenticatedPainelDizimosRoute
+   '/painel/financeiro': typeof AuthenticatedPainelFinanceiroRoute
+   '/painel/membros': typeof AuthenticatedPainelMembrosRoute
+   '/painel/meu-cadastro': typeof AuthenticatedPainelMeuCadastroRoute
+@@ -143,6 +158,7 @@ export interface FileRoutesByFullPath {
+   '/painel/relatorio': typeof AuthenticatedPainelRelatorioRoute
+   '/painel/site': typeof AuthenticatedPainelSiteRoute
+   '/painel/': typeof AuthenticatedPainelIndexRoute
++  '/painel/membro/$id': typeof AuthenticatedPainelMembroIdRoute
+ }
+ export interface FileRoutesByTo {
+   '/': typeof IndexRoute
+@@ -153,6 +169,7 @@ export interface FileRoutesByTo {
+   '/oracao': typeof OracaoRoute
+   '/quem-somos': typeof QuemSomosRoute
+   '/convite/$code': typeof ConviteCodeRoute
++  '/painel/dizimos': typeof AuthenticatedPainelDizimosRoute
+   '/painel/financeiro': typeof AuthenticatedPainelFinanceiroRoute
+   '/painel/membros': typeof AuthenticatedPainelMembrosRoute
+   '/painel/meu-cadastro': typeof AuthenticatedPainelMeuCadastroRoute
+@@ -161,6 +178,7 @@ export interface FileRoutesByTo {
+   '/painel/relatorio': typeof AuthenticatedPainelRelatorioRoute
+   '/painel/site': typeof AuthenticatedPainelSiteRoute
+   '/painel': typeof AuthenticatedPainelIndexRoute
++  '/painel/membro/$id': typeof AuthenticatedPainelMembroIdRoute
+ }
+ export interface FileRoutesById {
+   __root__: typeof rootRouteImport
+@@ -174,6 +192,7 @@ export interface FileRoutesById {
+   '/quem-somos': typeof QuemSomosRoute
+   '/_authenticated/painel': typeof AuthenticatedPainelRouteWithChildren
+   '/convite/$code': typeof ConviteCodeRoute
++  '/_authenticated/painel/dizimos': typeof AuthenticatedPainelDizimosRoute
+   '/_authenticated/painel/financeiro': typeof AuthenticatedPainelFinanceiroRoute
+   '/_authenticated/painel/membros': typeof AuthenticatedPainelMembrosRoute
+   '/_authenticated/painel/meu-cadastro': typeof AuthenticatedPainelMeuCadastroRoute
+@@ -182,6 +201,7 @@ export interface FileRoutesById {
+   '/_authenticated/painel/relatorio': typeof AuthenticatedPainelRelatorioRoute
+   '/_authenticated/painel/site': typeof AuthenticatedPainelSiteRoute
+   '/_authenticated/painel/': typeof AuthenticatedPainelIndexRoute
++  '/_authenticated/painel/membro/$id': typeof AuthenticatedPainelMembroIdRoute
+ }
+ export interface FileRouteTypes {
+   fileRoutesByFullPath: FileRoutesByFullPath
+@@ -195,6 +215,7 @@ export interface FileRouteTypes {
+     | '/quem-somos'
+     | '/painel'
+     | '/convite/$code'
++    | '/painel/dizimos'
+     | '/painel/financeiro'
+     | '/painel/membros'
+     | '/painel/meu-cadastro'
+@@ -203,6 +224,7 @@ export interface FileRouteTypes {
+     | '/painel/relatorio'
+     | '/painel/site'
+     | '/painel/'
++    | '/painel/membro/$id'
+   fileRoutesByTo: FileRoutesByTo
+   to:
+     | '/'
+@@ -213,6 +235,7 @@ export interface FileRouteTypes {
+     | '/oracao'
+     | '/quem-somos'
+     | '/convite/$code'
++    | '/painel/dizimos'
+     | '/painel/financeiro'
+     | '/painel/membros'
+     | '/painel/meu-cadastro'
+@@ -221,6 +244,7 @@ export interface FileRouteTypes {
+     | '/painel/relatorio'
+     | '/painel/site'
+     | '/painel'
++    | '/painel/membro/$id'
+   id:
+     | '__root__'
+     | '/'
+@@ -233,6 +257,7 @@ export interface FileRouteTypes {
+     | '/quem-somos'
+     | '/_authenticated/painel'
+     | '/convite/$code'
++    | '/_authenticated/painel/dizimos'
+     | '/_authenticated/painel/financeiro'
+     | '/_authenticated/painel/membros'
+     | '/_authenticated/painel/meu-cadastro'
+@@ -241,6 +266,7 @@ export interface FileRouteTypes {
+     | '/_authenticated/painel/relatorio'
+     | '/_authenticated/painel/site'
+     | '/_authenticated/painel/'
++    | '/_authenticated/painel/membro/$id'
+   fileRoutesById: FileRoutesById
+ }
+ export interface RootRouteChildren {
+@@ -334,6 +360,13 @@ declare module '@tanstack/react-router' {
+       preLoaderRoute: typeof AuthenticatedPainelIndexRouteImport
+       parentRoute: typeof AuthenticatedPainelRoute
+     }
++    '/_authenticated/painel/dizimos': {
++      id: '/_authenticated/painel/dizimos'
++      path: '/dizimos'
++      fullPath: '/painel/dizimos'
++      preLoaderRoute: typeof AuthenticatedPainelDizimosRouteImport
++      parentRoute: typeof AuthenticatedPainelRoute
++    }
+     '/_authenticated/painel/financeiro': {
+       id: '/_authenticated/painel/financeiro'
+       path: '/financeiro'
+@@ -383,10 +416,18 @@ declare module '@tanstack/react-router' {
+       preLoaderRoute: typeof AuthenticatedPainelSiteRouteImport
+       parentRoute: typeof AuthenticatedPainelRoute
+     }
++    '/_authenticated/painel/membro/$id': {
++      id: '/_authenticated/painel/membro/$id'
++      path: '/membro/$id'
++      fullPath: '/painel/membro/$id'
++      preLoaderRoute: typeof AuthenticatedPainelMembroIdRouteImport
++      parentRoute: typeof AuthenticatedPainelRoute
++    }
+   }
+ }
+ 
+ interface AuthenticatedPainelRouteChildren {
++  AuthenticatedPainelDizimosRoute: typeof AuthenticatedPainelDizimosRoute
+   AuthenticatedPainelFinanceiroRoute: typeof AuthenticatedPainelFinanceiroRoute
+   AuthenticatedPainelMembrosRoute: typeof AuthenticatedPainelMembrosRoute
+   AuthenticatedPainelMeuCadastroRoute: typeof AuthenticatedPainelMeuCadastroRoute
+@@ -395,9 +436,11 @@ interface AuthenticatedPainelRouteChildren {
+   AuthenticatedPainelRelatorioRoute: typeof AuthenticatedPainelRelatorioRoute
+   AuthenticatedPainelSiteRoute: typeof AuthenticatedPainelSiteRoute
+   AuthenticatedPainelIndexRoute: typeof AuthenticatedPainelIndexRoute
++  AuthenticatedPainelMembroIdRoute: typeof AuthenticatedPainelMembroIdRoute
+ }
+ 
+ const AuthenticatedPainelRouteChildren: AuthenticatedPainelRouteChildren = {
++  AuthenticatedPainelDizimosRoute: AuthenticatedPainelDizimosRoute,
+   AuthenticatedPainelFinanceiroRoute: AuthenticatedPainelFinanceiroRoute,
+   AuthenticatedPainelMembrosRoute: AuthenticatedPainelMembrosRoute,
+   AuthenticatedPainelMeuCadastroRoute: AuthenticatedPainelMeuCadastroRoute,
+@@ -406,6 +449,7 @@ const AuthenticatedPainelRouteChildren: AuthenticatedPainelRouteChildren = {
+   AuthenticatedPainelRelatorioRoute: AuthenticatedPainelRelatorioRoute,
+   AuthenticatedPainelSiteRoute: AuthenticatedPainelSiteRoute,
+   AuthenticatedPainelIndexRoute: AuthenticatedPainelIndexRoute,
++  AuthenticatedPainelMembroIdRoute: AuthenticatedPainelMembroIdRoute,
+ }
+ 
+ const AuthenticatedPainelRouteWithChildren =
+diff --git a/src/routes/_authenticated/painel.dizimos.tsx b/src/routes/_authenticated/painel.dizimos.tsx
+new file mode 100644
+index 0000000..c8936a4
+--- /dev/null
++++ b/src/routes/_authenticated/painel.dizimos.tsx
+@@ -0,0 +1,185 @@
++import { createFileRoute } from "@tanstack/react-router";
++import { useQuery } from "@tanstack/react-query";
++import { useMemo, useState } from "react";
++import { Download, Plus, Search } from "lucide-react";
++import { supabase } from "@/integrations/supabase/client";
++import { useAccess } from "@/hooks/use-access";
++import { Button } from "@/components/ui/button";
++import { Input } from "@/components/ui/input";
++import {
++  Select,
++  SelectContent,
++  SelectItem,
++  SelectTrigger,
++  SelectValue,
++} from "@/components/ui/select";
++import { TitheDialog, type TitheRow } from "@/components/tithes/TitheDialog";
++import { TitheTable, useDeleteTithe } from "@/components/tithes/TitheTable";
++import { MONTHS, brl, dateBR, monthRefLabel } from "@/lib/church";
++import { siteMeta } from "@/lib/site-query";
++
++export const Route = createFileRoute("/_authenticated/painel/dizimos")({
++  head: () => siteMeta("Dízimos — Comunidade Aava", "Histórico de dízimos dos membros."),
++  component: TithesPage,
++});
++
++function TithesPage() {
++  const { can, isLoading: loadingAccess } = useAccess();
++  const now = new Date();
++  const [year, setYear] = useState(now.getFullYear());
++  const [month, setMonth] = useState("todos");
++  const [search, setSearch] = useState("");
++  const [dialog, setDialog] = useState<{ open: boolean; tithe: TitheRow | null }>({
++    open: false,
++    tithe: null,
++  });
++  const del = useDeleteTithe();
++
++  const q = useQuery({
++    queryKey: ["tithes", "all", year],
++    enabled: can("view_finance"),
++    queryFn: async () => {
++      const { data, error } = await supabase
++        .from("tithes")
++        .select("*, members(id, full_name)")
++        .gte("paid_on", `${year}-01-01`)
++        .lte("paid_on", `${year}-12-31`)
++        .order("paid_on", { ascending: false });
++      if (error) throw error;
++      return data as TitheRow[];
++    },
++  });
++
++  const rows = useMemo(() => {
++    const term = search.trim().toLowerCase();
++    return (q.data ?? []).filter(
++      (t) =>
++        (month === "todos" || t.paid_on.slice(5, 7) === month) &&
++        (!term || (t.members?.full_name ?? "").toLowerCase().includes(term)),
++    );
++  }, [q.data, month, search]);
++
++  if (loadingAccess) return null;
++  if (!can("view_finance"))
++    return <p className="text-muted-foreground">Você não tem acesso a esta área.</p>;
++
++  const total = rows.reduce((s, t) => s + Number(t.amount), 0);
++  const givers = new Set(rows.map((t) => t.member_id)).size;
++  const average = rows.length ? total / rows.length : 0;
++  const years = Array.from({ length: 6 }, (_, i) => now.getFullYear() - i);
++
++  function exportCsv() {
++    const head = ["Data", "Membro", "Referente a", "Forma de pagamento", "Valor", "Observação"];
++    const lines = rows.map((t) => [
++      dateBR(t.paid_on),
++      t.members?.full_name ?? "",
++      monthRefLabel(t.reference_month),
++      t.payment_method ?? "",
++      Number(t.amount).toFixed(2).replace(".", ","),
++      t.notes ?? "",
++    ]);
++    const csv = [head, ...lines]
++      .map((r) => r.map((c) => String(c).replace(/[;\n]/g, " ")).join(";"))
++      .join("\n");
++    const a = document.createElement("a");
++    a.href = URL.createObjectURL(new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" }));
++    a.download = `dizimos-${year}${month === "todos" ? "" : `-${month}`}.csv`;
++    a.click();
++  }
++
++  return (
++    <div>
++      <div className="flex flex-wrap items-center justify-between gap-4">
++        <h1 className="text-3xl text-foreground">Dízimos</h1>
++        <div className="flex gap-2">
++          {can("export_financial_reports") && (
++            <Button variant="outline" onClick={exportCsv}>
++              <Download className="h-4 w-4" /> CSV
++            </Button>
++          )}
++          {can("create_financial_transaction") && (
++            <Button onClick={() => setDialog({ open: true, tithe: null })}>
++              <Plus className="h-4 w-4" /> Registrar dízimo
++            </Button>
++          )}
++        </div>
++      </div>
++
++      <div className="mt-6 flex flex-wrap gap-3">
++        <div className="relative w-full max-w-xs">
++          <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
++          <Input
++            className="pl-9"
++            placeholder="Buscar por membro"
++            value={search}
++            onChange={(e) => setSearch(e.target.value)}
++          />
++        </div>
++        <Select value={String(year)} onValueChange={(v) => setYear(Number(v))}>
++          <SelectTrigger className="w-28">
++            <SelectValue />
++          </SelectTrigger>
++          <SelectContent>
++            {years.map((y) => (
++              <SelectItem key={y} value={String(y)}>
++                {y}
++              </SelectItem>
++            ))}
++          </SelectContent>
++        </Select>
++        <Select value={month} onValueChange={setMonth}>
++          <SelectTrigger className="w-44">
++            <SelectValue />
++          </SelectTrigger>
++          <SelectContent>
++            <SelectItem value="todos">Todos os meses</SelectItem>
++            {MONTHS.map((m, i) => (
++              <SelectItem key={m} value={String(i + 1).padStart(2, "0")}>
++                {m}
++              </SelectItem>
++            ))}
++          </SelectContent>
++        </Select>
++      </div>
++
++      <dl className="mt-6 grid gap-4 sm:grid-cols-3">
++        <div className="rounded-2xl border bg-card p-5">
++          <dt className="text-sm text-muted-foreground">Total no período</dt>
++          <dd className="mt-1 text-2xl font-semibold text-foreground">{brl(total)}</dd>
++        </div>
++        <div className="rounded-2xl border bg-card p-5">
++          <dt className="text-sm text-muted-foreground">Membros que contribuíram</dt>
++          <dd className="mt-1 text-2xl font-semibold text-foreground">{givers}</dd>
++        </div>
++        <div className="rounded-2xl border bg-card p-5">
++          <dt className="text-sm text-muted-foreground">Valor médio por lançamento</dt>
++          <dd className="mt-1 text-2xl font-semibold text-foreground">{brl(average)}</dd>
++        </div>
++      </dl>
++
++      <div className="mt-6">
++        <TitheTable
++          rows={rows}
++          showMember
++          loading={q.isLoading}
++          {...(can("edit_financial_transaction")
++            ? { onEdit: (t: TitheRow) => setDialog({ open: true, tithe: t }) }
++            : {})}
++          {...(can("delete_financial_transaction")
++            ? {
++                onDelete: (t: TitheRow) =>
++                  confirm(`Excluir o dízimo de ${t.members?.full_name ?? "este membro"}?`) &&
++                  del.mutate(t.id),
++              }
++            : {})}
++        />
++      </div>
++
++      <TitheDialog
++        open={dialog.open}
++        tithe={dialog.tithe}
++        onClose={() => setDialog({ open: false, tithe: null })}
++      />
++    </div>
++  );
++}
+diff --git a/src/routes/_authenticated/painel.membro.$id.tsx b/src/routes/_authenticated/painel.membro.$id.tsx
+new file mode 100644
+index 0000000..f3e5640
+--- /dev/null
++++ b/src/routes/_authenticated/painel.membro.$id.tsx
+@@ -0,0 +1,320 @@
++import { createFileRoute, Link } from "@tanstack/react-router";
++import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
++import { useMemo, useState } from "react";
++import { ArrowLeft, Pencil, Plus } from "lucide-react";
++import { toast } from "sonner";
++import { supabase } from "@/integrations/supabase/client";
++import { useAccess } from "@/hooks/use-access";
++import { Badge } from "@/components/ui/badge";
++import { Button } from "@/components/ui/button";
++import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
++import {
++  Select,
++  SelectContent,
++  SelectItem,
++  SelectTrigger,
++  SelectValue,
++} from "@/components/ui/select";
++import { MemberAvatar, MemberForm, type MemberDraft } from "@/components/members/MemberForm";
++import { TitheDialog, type TitheRow } from "@/components/tithes/TitheDialog";
++import { TitheTable, useDeleteTithe } from "@/components/tithes/TitheTable";
++import { APPROVAL_LABELS, MEMBER_STATUS, ageFrom, brl, dateBR } from "@/lib/church";
++import { siteMeta } from "@/lib/site-query";
++
++export const Route = createFileRoute("/_authenticated/painel/membro/$id")({
++  head: () =>
++    siteMeta("Perfil do membro — Comunidade Aava", "Dados e histórico de dízimos do membro."),
++  component: MemberProfile,
++});
++
++function Field({ label, children }: { label: string; children: React.ReactNode }) {
++  return (
++    <div>
++      <dt className="text-xs text-muted-foreground">{label}</dt>
++      <dd className="mt-0.5 text-sm text-foreground">{children || "—"}</dd>
++    </div>
++  );
++}
++
++function Block({ title, children }: { title: string; children: React.ReactNode }) {
++  return (
++    <section className="rounded-2xl border bg-card p-5">
++      <h2 className="text-base font-semibold text-foreground">{title}</h2>
++      <dl className="mt-4 grid gap-x-6 gap-y-4 sm:grid-cols-2">{children}</dl>
++    </section>
++  );
++}
++
++function MemberProfile() {
++  const { id } = Route.useParams();
++  const { can, isLoading: loadingAccess } = useAccess();
++  const qc = useQueryClient();
++  const del = useDeleteTithe();
++  const [editing, setEditing] = useState<MemberDraft | null>(null);
++  const [titheDialog, setTitheDialog] = useState<{ open: boolean; tithe: TitheRow | null }>({
++    open: false,
++    tithe: null,
++  });
++  const [year, setYear] = useState("todos");
++
++  const member = useQuery({
++    queryKey: ["member", id],
++    enabled: can("view_members"),
++    queryFn: async () => {
++      const { data, error } = await supabase.from("members").select("*").eq("id", id).maybeSingle();
++      if (error) throw error;
++      return data;
++    },
++  });
++
++  const notes = useQuery({
++    queryKey: ["member-notes", id],
++    enabled: can("view_member_notes"),
++    queryFn: async () => {
++      const { data } = await supabase
++        .from("member_notes")
++        .select("notes")
++        .eq("member_id", id)
++        .maybeSingle();
++      return data?.notes ?? "";
++    },
++  });
++
++  const tithes = useQuery({
++    queryKey: ["tithes", "member", id],
++    enabled: can("view_finance"),
++    queryFn: async () => {
++      const { data, error } = await supabase
++        .from("tithes")
++        .select("*")
++        .eq("member_id", id)
++        .order("paid_on", { ascending: false });
++      if (error) throw error;
++      return data as TitheRow[];
++    },
++  });
++
++  const save = useMutation({
++    mutationFn: async (m: MemberDraft) => {
++      const { id: _id, ...rest } = m;
++      const { error } = await supabase
++        .from("members")
++        .update({ ...rest, notes: null })
++        .eq("id", id);
++      if (error) throw error;
++    },
++    onSuccess: () => {
++      toast.success("Cadastro salvo");
++      setEditing(null);
++      qc.invalidateQueries({ queryKey: ["member", id] });
++      qc.invalidateQueries({ queryKey: ["members"] });
++    },
++    onError: (e: Error) => toast.error(e.message),
++  });
++
++  const all = useMemo(() => tithes.data ?? [], [tithes.data]);
++  const years = useMemo(
++    () =>
++      Array.from(
++        new Set([String(new Date().getFullYear()), ...all.map((t) => t.paid_on.slice(0, 4))]),
++      )
++        .sort()
++        .reverse(),
++    [all],
++  );
++  const shown = year === "todos" ? all : all.filter((t) => t.paid_on.startsWith(year));
++  const sum = (l: TitheRow[]) => l.reduce((s, t) => s + Number(t.amount), 0);
++
++  if (loadingAccess) return null;
++  if (!can("view_members"))
++    return <p className="text-muted-foreground">Você não tem acesso a esta área.</p>;
++  if (member.isLoading) return <p className="text-muted-foreground">Carregando...</p>;
++
++  const m = member.data;
++  const back = (
++    <Link
++      to="/painel/membros"
++      className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"
++    >
++      <ArrowLeft className="h-4 w-4" /> Voltar para membros
++    </Link>
++  );
++  if (!m) {
++    return (
++      <div>
++        {back}
++        <p className="mt-6 text-muted-foreground">Membro não encontrado.</p>
++      </div>
++    );
++  }
++
++  const age = ageFrom(m.birth_date);
++  const cityLine = [m.neighborhood, m.city].filter(Boolean).join(" · ");
++  const thisYear = String(new Date().getFullYear());
++
++  return (
++    <div className="max-w-4xl">
++      {back}
++
++      <header className="mt-6 flex flex-wrap items-center justify-between gap-4">
++        <div className="flex items-center gap-4">
++          <MemberAvatar path={m.photo_path} size="h-20 w-20" />
++          <div>
++            <h1 className="text-3xl text-foreground">{m.full_name}</h1>
++            <div className="mt-2 flex flex-wrap items-center gap-2">
++              <Badge variant={m.status === "membro_ativo" ? "default" : "secondary"}>
++                {MEMBER_STATUS[m.status] ?? m.status}
++              </Badge>
++              {m.baptized && <Badge variant="outline">Batizado</Badge>}
++              {m.approval_status !== "aprovado" && (
++                <Badge variant="outline">
++                  {APPROVAL_LABELS[m.approval_status] ?? m.approval_status}
++                </Badge>
++              )}
++              {age !== null && <span className="text-sm text-muted-foreground">{age} anos</span>}
++            </div>
++          </div>
++        </div>
++        {can("edit_member") && (
++          <Button variant="outline" onClick={() => setEditing({ ...m })}>
++            <Pencil className="h-4 w-4" /> Editar cadastro
++          </Button>
++        )}
++      </header>
++
++      <div className="mt-8 grid gap-4 md:grid-cols-2">
++        <Block title="Dados pessoais">
++          <Field label="Data de nascimento">{dateBR(m.birth_date)}</Field>
++          <Field label="Estado civil">{m.marital_status}</Field>
++          <Field label="CPF">{m.cpf}</Field>
++          <Field label="RG">{m.rg}</Field>
++          <Field label="Telefone">{m.phone}</Field>
++          <Field label="E-mail">{m.email}</Field>
++        </Block>
++
++        <Block title="Endereço">
++          <Field label="Rua e número">{m.address}</Field>
++          <Field label="Bairro">{m.neighborhood}</Field>
++          <Field label="Cidade">{m.city}</Field>
++          <Field label="CEP">{m.zip_code}</Field>
++        </Block>
++
++        <Block title="Vida na igreja">
++          <Field label="Entrada na igreja">{dateBR(m.joined_on)}</Field>
++          <Field label="Filiação">{dateBR(m.affiliated_on)}</Field>
++          <Field label="Batizado">
++            {m.baptized ? `Sim${m.baptism_date ? `, em ${dateBR(m.baptism_date)}` : ""}` : "Não"}
++          </Field>
++          <Field label="Igreja onde se batizou">{m.baptized ? m.baptism_church : ""}</Field>
++          <Field label="Ministério">{m.ministry}</Field>
++          <Field label="Departamento">{m.department}</Field>
++          <Field label="Cargo">{m.church_role}</Field>
++        </Block>
++
++        {can("view_member_notes") && (
++          <section className="rounded-2xl border bg-card p-5">
++            <h2 className="text-base font-semibold text-foreground">Observações internas</h2>
++            <p className="mt-4 whitespace-pre-wrap text-sm text-foreground">
++              {notes.data || "Nenhuma observação."}
++            </p>
++          </section>
++        )}
++      </div>
++
++      {can("view_finance") && (
++        <section className="mt-10">
++          <div className="flex flex-wrap items-center justify-between gap-3">
++            <h2 className="text-2xl text-foreground">Histórico de dízimos</h2>
++            <div className="flex gap-2">
++              <Select value={year} onValueChange={setYear}>
++                <SelectTrigger className="w-32">
++                  <SelectValue />
++                </SelectTrigger>
++                <SelectContent>
++                  <SelectItem value="todos">Todos os anos</SelectItem>
++                  {years.map((y) => (
++                    <SelectItem key={y} value={y}>
++                      {y}
++                    </SelectItem>
++                  ))}
++                </SelectContent>
++              </Select>
++              {can("create_financial_transaction") && (
++                <Button onClick={() => setTitheDialog({ open: true, tithe: null })}>
++                  <Plus className="h-4 w-4" /> Registrar dízimo
++                </Button>
++              )}
++            </div>
++          </div>
++
++          <dl className="mt-4 grid gap-4 sm:grid-cols-3">
++            <div className="rounded-2xl border bg-card p-5">
++              <dt className="text-sm text-muted-foreground">Total em {thisYear}</dt>
++              <dd className="mt-1 text-2xl font-semibold text-foreground">
++                {brl(sum(all.filter((t) => t.paid_on.startsWith(thisYear))))}
++              </dd>
++            </div>
++            <div className="rounded-2xl border bg-card p-5">
++              <dt className="text-sm text-muted-foreground">Total geral</dt>
++              <dd className="mt-1 text-2xl font-semibold text-foreground">{brl(sum(all))}</dd>
++            </div>
++            <div className="rounded-2xl border bg-card p-5">
++              <dt className="text-sm text-muted-foreground">Último dízimo</dt>
++              <dd className="mt-1 text-2xl font-semibold text-foreground">
++                {all[0] ? dateBR(all[0].paid_on) : "—"}
++              </dd>
++            </div>
++          </dl>
++
++          <div className="mt-4">
++            <TitheTable
++              rows={shown}
++              loading={tithes.isLoading}
++              {...(can("edit_financial_transaction")
++                ? { onEdit: (t: TitheRow) => setTitheDialog({ open: true, tithe: t }) }
++                : {})}
++              {...(can("delete_financial_transaction")
++                ? { onDelete: (t: TitheRow) => confirm("Excluir este dízimo?") && del.mutate(t.id) }
++                : {})}
++            />
++          </div>
++        </section>
++      )}
++
++      <TitheDialog
++        open={titheDialog.open}
++        tithe={titheDialog.tithe}
++        memberId={m.id}
++        memberName={m.full_name}
++        onClose={() => setTitheDialog({ open: false, tithe: null })}
++      />
++
++      <Dialog open={!!editing} onOpenChange={(o) => !o && setEditing(null)}>
++        <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
++          <DialogHeader>
++            <DialogTitle>Editar cadastro</DialogTitle>
++          </DialogHeader>
++          {editing && (
++            <form
++              onSubmit={(e) => {
++                e.preventDefault();
++                save.mutate(editing);
++              }}
++              className="space-y-6"
++            >
++              <MemberForm
++                mode="admin"
++                value={editing}
++                onChange={setEditing}
++                photoFolder={editing.user_id ?? "admin"}
++              />
++              <Button type="submit" className="w-full" disabled={save.isPending}>
++                Salvar cadastro
++              </Button>
++            </form>
++          )}
++        </DialogContent>
++      </Dialog>
++    </div>
++  );
++}
+diff --git a/src/routes/_authenticated/painel.membros.tsx b/src/routes/_authenticated/painel.membros.tsx
+index 77c2ff6..1fee419 100644
+--- a/src/routes/_authenticated/painel.membros.tsx
++++ b/src/routes/_authenticated/painel.membros.tsx
+@@ -1,8 +1,8 @@
+-import { createFileRoute } from "@tanstack/react-router";
++import { createFileRoute, Link } from "@tanstack/react-router";
+ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+ import { useState } from "react";
+ import { toast } from "sonner";
+-import { Plus, Pencil, Trash2, Search, Check, X, Link2, Copy, Download } from "lucide-react";
++import { Plus, Pencil, Trash2, Search, Check, X, Link2, Copy, Download, Eye } from "lucide-react";
+ import { supabase } from "@/integrations/supabase/client";
+ import { useAccess } from "@/hooks/use-access";
+ import { Switch } from "@/components/ui/switch";
+@@ -105,8 +105,8 @@ function MembersPage() {
+   );
+ 
+   function exportCsv() {
+-    const head = ["Nome", "Nascimento", "Idade", "CPF", "RG", "Telefone", "E-mail", "Endereço", "Estado civil", "Entrada", "Filiação", "Batizado", "Data batismo", "Ministério", "Departamento", "Cargo", "Status"];
+-    const rows = filtered.map((m) => [m.full_name, dateBR(m.birth_date), ageFrom(m.birth_date) ?? "", m.cpf, m.rg, m.phone, m.email, m.address, m.marital_status, dateBR(m.joined_on), dateBR(m.affiliated_on), m.baptized ? "Sim" : "Não", dateBR(m.baptism_date), m.ministry, m.department, m.church_role, MEMBER_STATUS[m.status] ?? m.status]);
++    const head = ["Nome", "Nascimento", "Idade", "CPF", "RG", "Telefone", "E-mail", "Endereço", "Bairro", "Cidade", "CEP", "Estado civil", "Entrada", "Filiação", "Batizado", "Data batismo", "Igreja do batismo", "Ministério", "Departamento", "Cargo", "Status"];
++    const rows = filtered.map((m) => [m.full_name, dateBR(m.birth_date), ageFrom(m.birth_date) ?? "", m.cpf, m.rg, m.phone, m.email, m.address, m.neighborhood, m.city, m.zip_code, m.marital_status, dateBR(m.joined_on), dateBR(m.affiliated_on), m.baptized ? "Sim" : "Não", dateBR(m.baptism_date), m.baptism_church, m.ministry, m.department, m.church_role, MEMBER_STATUS[m.status] ?? m.status]);
+     const csv = [head, ...rows].map((r) => r.map((c) => String(c ?? "").replace(/[;\n]/g, " ")).join(";")).join("\n");
+     const a = document.createElement("a");
+     a.href = URL.createObjectURL(new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" }));
+@@ -169,7 +169,7 @@ function MembersPage() {
+                         <div className="flex items-center gap-3">
+                           <MemberAvatar path={m.photo_path} />
+                           <div>
+-                            <p className="font-medium text-foreground">{m.full_name}</p>
++                            <Link to="/painel/membro/$id" params={{ id: m.id }} className="font-medium text-foreground hover:text-primary hover:underline">{m.full_name}</Link>
+                             <p className="text-xs text-muted-foreground">{age !== null ? `${age} anos` : ""}{m.baptized ? " · Batizado" : ""}</p>
+                           </div>
+                         </div>
+@@ -181,6 +181,7 @@ function MembersPage() {
+                         {m.approval_status === "recusado" && <p className="mt-1 text-xs text-destructive">Recusado</p>}
+                       </td>
+                       <td className="whitespace-nowrap p-4 text-right">
++                        <Button size="icon" variant="ghost" asChild aria-label="Ver perfil"><Link to="/painel/membro/$id" params={{ id: m.id }}><Eye className="h-4 w-4" /></Link></Button>
+                         {can("edit_member") && <Button size="icon" variant="ghost" onClick={() => openEdit({ ...m })}><Pencil className="h-4 w-4" /></Button>}
+                         {can("delete_member") && (
+                           <Button size="icon" variant="ghost" onClick={() => confirm(`Excluir ${m.full_name}?`) && remove.mutate(m.id)}><Trash2 className="h-4 w-4" /></Button>
+diff --git a/src/routes/_authenticated/painel.meu-cadastro.tsx b/src/routes/_authenticated/painel.meu-cadastro.tsx
+index f28015e..1e8b90f 100644
+--- a/src/routes/_authenticated/painel.meu-cadastro.tsx
++++ b/src/routes/_authenticated/painel.meu-cadastro.tsx
+@@ -5,6 +5,7 @@ import { toast } from "sonner";
+ import { Clock, CheckCircle2, XCircle } from "lucide-react";
+ import { supabase } from "@/integrations/supabase/client";
+ import { Button } from "@/components/ui/button";
++import { MyTithes } from "@/components/tithes/MyTithes";
+ import { MemberForm, emptyMember, type MemberDraft } from "@/components/members/MemberForm";
+ import { MEMBER_STATUS } from "@/lib/church";
+ import { siteMeta } from '@/lib/site-query';
+@@ -82,6 +83,7 @@ function MyProfile() {
+         <MemberForm mode="self" value={draft} onChange={setDraft} photoFolder={me.data.uid} />
+         <Button type="submit" size="lg" disabled={save.isPending}>{row ? "Salvar alterações" : "Enviar cadastro"}</Button>
+       </form>
++      {row?.approval_status === "aprovado" && <MyTithes memberId={row.id} />}
+     </div>
+   );
+ }
+diff --git a/src/routes/_authenticated/painel.tsx b/src/routes/_authenticated/painel.tsx
+index 33a38ad..5e0fed8 100644
+--- a/src/routes/_authenticated/painel.tsx
++++ b/src/routes/_authenticated/painel.tsx
+@@ -4,6 +4,7 @@ import {
+   LayoutDashboard,
+   Users,
+   Wallet,
++  HandCoins,
+   ShieldCheck,
+   LogOut,
+   Globe,
+@@ -38,6 +39,7 @@ function PanelLayout() {
+     },
+     { to: "/painel/membros", label: "Membros", icon: Users, show: can("view_members") },
+     { to: "/painel/financeiro", label: "Financeiro", icon: Wallet, show: can("view_finance") },
++    { to: "/painel/dizimos", label: "Dízimos", icon: HandCoins, show: can("view_finance") },
+     {
+       to: "/painel/permissoes",
+       label: "Usuários e permissões",

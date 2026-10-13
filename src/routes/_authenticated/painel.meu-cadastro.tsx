@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { Clock, CheckCircle2, XCircle } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
+import { MyTithes } from "@/components/tithes/MyTithes";
 import { MemberForm, emptyMember, type MemberDraft } from "@/components/members/MemberForm";
 import { MEMBER_STATUS } from "@/lib/church";
 import { siteMeta } from '@/lib/site-query';
@@ -82,6 +83,7 @@ function MyProfile() {
         <MemberForm mode="self" value={draft} onChange={setDraft} photoFolder={me.data.uid} />
         <Button type="submit" size="lg" disabled={save.isPending}>{row ? "Salvar alterações" : "Enviar cadastro"}</Button>
       </form>
+      {row?.approval_status === "aprovado" && <MyTithes memberId={row.id} />}
     </div>
   );
 }

@@ -8,7 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { MARITAL, MEMBER_STATUS, ageFrom, formatCpf } from "@/lib/church";
+import { MARITAL, MEMBER_STATUS, ageFrom, formatCep, formatCpf } from "@/lib/church";
 
 export type MemberDraft = TablesInsert<"members"> & { id?: string };
 
@@ -16,6 +16,7 @@ export const emptyMember: MemberDraft = {
   full_name: "", email: "", phone: "", birth_date: null, address: "", cpf: "", rg: "", marital_status: null,
   joined_on: null, affiliated_on: null, baptized: false, baptism_date: null, ministry: "", department: "", church_role: "",
   status: "membro", photo_path: null,
+  neighborhood: "", city: "", zip_code: "", baptism_church: "",
 };
 
 export function usePhotoUrl(path?: string | null) {
@@ -85,6 +86,25 @@ export function MemberForm({
     set({ photo_path: path });
   }
 
+  // Preenche rua, bairro e cidade a partir do CEP (ViaCEP). Se falhar, o usuário digita manualmente.
+  async function fillFromCep(cep: string) {
+    try {
+      const res = await fetch(`https://viacep.com.br/ws/${cep.replace(/\D/g, "")}/json/`);
+      if (!res.ok) return;
+      const d = (await res.json()) as { erro?: boolean; logradouro?: string; bairro?: string; localidade?: string };
+      if (d.erro) return;
+      onChange({
+        ...value,
+        zip_code: cep,
+        address: value.address || d.logradouro || "",
+        neighborhood: value.neighborhood || d.bairro || "",
+        city: value.city || d.localidade || "",
+      });
+    } catch {
+      /* sem internet ou serviço fora do ar: segue manual */
+    }
+  }
+
   const txt = (k: keyof MemberDraft) => ({
     value: (value[k] as string | null | undefined) ?? "",
     onChange: (e: React.ChangeEvent<HTMLInputElement>) => set({ [k]: e.target.value } as Partial<MemberDraft>),
@@ -112,7 +132,6 @@ export function MemberForm({
         <F label="RG"><Input {...txt("rg")} /></F>
         <F label="Telefone"><Input {...txt("phone")} placeholder="(12) 90000-0000" /></F>
         <F label="E-mail"><Input type="email" {...txt("email")} /></F>
-        <F label="Endereço" full><Input {...txt("address")} /></F>
         <F label="Estado civil">
           <Select value={value.marital_status ?? ""} onValueChange={(v) => set({ marital_status: v })}>
             <SelectTrigger><SelectValue placeholder="Selecione" /></SelectTrigger>
@@ -121,14 +140,37 @@ export function MemberForm({
         </F>
       </Section>
 
+      <Section title="Endereço">
+        <F label="CEP">
+          <Input
+            inputMode="numeric"
+            placeholder="00000-000"
+            value={value.zip_code ?? ""}
+            onChange={(e) => {
+              const cep = formatCep(e.target.value);
+              set({ zip_code: cep });
+              if (cep.length === 9) void fillFromCep(cep);
+            }}
+          />
+        </F>
+        <F label="Endereço (rua e número)"><Input {...txt("address")} /></F>
+        <F label="Bairro"><Input {...txt("neighborhood")} /></F>
+        <F label="Cidade"><Input {...txt("city")} /></F>
+      </Section>
+
       <Section title="Dados da igreja">
         <F label="Data de entrada na igreja"><Input {...dt("joined_on")} /></F>
         {mode === "admin" && <F label="Data de filiação"><Input {...dt("affiliated_on")} /></F>}
         <div className="flex items-center gap-3 pt-6">
-          <Switch checked={!!value.baptized} onCheckedChange={(v) => set({ baptized: v, baptism_date: v ? (value.baptism_date ?? null) : null })} />
+          <Switch checked={!!value.baptized} onCheckedChange={(v) => set({ baptized: v, baptism_date: v ? (value.baptism_date ?? null) : null, baptism_church: v ? (value.baptism_church ?? "") : "" })} />
           <Label>Batizado?</Label>
         </div>
         {value.baptized && <F label="Data do batismo"><Input {...dt("baptism_date")} /></F>}
+        {value.baptized && (
+          <F label="Igreja onde se batizou" full>
+            <Input {...txt("baptism_church")} placeholder="Nome da igreja e cidade" />
+          </F>
+        )}
         {mode === "admin" && (
           <>
             <F label="Ministério"><Input {...txt("ministry")} /></F>

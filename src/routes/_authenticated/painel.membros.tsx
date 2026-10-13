@@ -1,8 +1,8 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
-import { Plus, Pencil, Trash2, Search, Check, X, Link2, Copy, Download } from "lucide-react";
+import { Plus, Pencil, Trash2, Search, Check, X, Link2, Copy, Download, Eye } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAccess } from "@/hooks/use-access";
 import { Switch } from "@/components/ui/switch";
@@ -105,8 +105,8 @@ function MembersPage() {
   );
 
   function exportCsv() {
-    const head = ["Nome", "Nascimento", "Idade", "CPF", "RG", "Telefone", "E-mail", "Endereço", "Estado civil", "Entrada", "Filiação", "Batizado", "Data batismo", "Ministério", "Departamento", "Cargo", "Status"];
-    const rows = filtered.map((m) => [m.full_name, dateBR(m.birth_date), ageFrom(m.birth_date) ?? "", m.cpf, m.rg, m.phone, m.email, m.address, m.marital_status, dateBR(m.joined_on), dateBR(m.affiliated_on), m.baptized ? "Sim" : "Não", dateBR(m.baptism_date), m.ministry, m.department, m.church_role, MEMBER_STATUS[m.status] ?? m.status]);
+    const head = ["Nome", "Nascimento", "Idade", "CPF", "RG", "Telefone", "E-mail", "Endereço", "Bairro", "Cidade", "CEP", "Estado civil", "Entrada", "Filiação", "Batizado", "Data batismo", "Igreja do batismo", "Ministério", "Departamento", "Cargo", "Status"];
+    const rows = filtered.map((m) => [m.full_name, dateBR(m.birth_date), ageFrom(m.birth_date) ?? "", m.cpf, m.rg, m.phone, m.email, m.address, m.neighborhood, m.city, m.zip_code, m.marital_status, dateBR(m.joined_on), dateBR(m.affiliated_on), m.baptized ? "Sim" : "Não", dateBR(m.baptism_date), m.baptism_church, m.ministry, m.department, m.church_role, MEMBER_STATUS[m.status] ?? m.status]);
     const csv = [head, ...rows].map((r) => r.map((c) => String(c ?? "").replace(/[;\n]/g, " ")).join(";")).join("\n");
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" }));
@@ -169,7 +169,7 @@ function MembersPage() {
                         <div className="flex items-center gap-3">
                           <MemberAvatar path={m.photo_path} />
                           <div>
-                            <p className="font-medium text-foreground">{m.full_name}</p>
+                            <Link to="/painel/membro/$id" params={{ id: m.id }} className="font-medium text-foreground hover:text-primary hover:underline">{m.full_name}</Link>
                             <p className="text-xs text-muted-foreground">{age !== null ? `${age} anos` : ""}{m.baptized ? " · Batizado" : ""}</p>
                           </div>
                         </div>
@@ -181,6 +181,7 @@ function MembersPage() {
                         {m.approval_status === "recusado" && <p className="mt-1 text-xs text-destructive">Recusado</p>}
                       </td>
                       <td className="whitespace-nowrap p-4 text-right">
+                        <Button size="icon" variant="ghost" asChild aria-label="Ver perfil"><Link to="/painel/membro/$id" params={{ id: m.id }}><Eye className="h-4 w-4" /></Link></Button>
                         {can("edit_member") && <Button size="icon" variant="ghost" onClick={() => openEdit({ ...m })}><Pencil className="h-4 w-4" /></Button>}
                         {can("delete_member") && (
                           <Button size="icon" variant="ghost" onClick={() => confirm(`Excluir ${m.full_name}?`) && remove.mutate(m.id)}><Trash2 className="h-4 w-4" /></Button>

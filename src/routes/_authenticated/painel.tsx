@@ -4,6 +4,7 @@ import {
   LayoutDashboard,
   Users,
   Wallet,
+  HandCoins,
   ShieldCheck,
   LogOut,
   Globe,
@@ -38,6 +39,7 @@ function PanelLayout() {
     },
     { to: "/painel/membros", label: "Membros", icon: Users, show: can("view_members") },
     { to: "/painel/financeiro", label: "Financeiro", icon: Wallet, show: can("view_finance") },
+    { to: "/painel/dizimos", label: "Dízimos", icon: HandCoins, show: can("view_finance") },
     {
       to: "/painel/permissoes",
       label: "Usuários e permissões",

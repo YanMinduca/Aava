@@ -171,10 +171,12 @@ export type Database = {
           address: string | null
           affiliated_on: string | null
           approval_status: string
+          baptism_church: string | null
           baptism_date: string | null
           baptized: boolean
           birth_date: string | null
           church_role: string | null
+          city: string | null
           cpf: string | null
           created_at: string
           department: string | null
@@ -184,6 +186,7 @@ export type Database = {
           joined_on: string | null
           marital_status: string | null
           ministry: string | null
+          neighborhood: string | null
           notes: string | null
           phone: string | null
           photo_path: string | null
@@ -191,15 +194,18 @@ export type Database = {
           status: string
           updated_at: string
           user_id: string | null
+          zip_code: string | null
         }
         Insert: {
           address?: string | null
           affiliated_on?: string | null
           approval_status?: string
+          baptism_church?: string | null
           baptism_date?: string | null
           baptized?: boolean
           birth_date?: string | null
           church_role?: string | null
+          city?: string | null
           cpf?: string | null
           created_at?: string
           department?: string | null
@@ -209,6 +215,7 @@ export type Database = {
           joined_on?: string | null
           marital_status?: string | null
           ministry?: string | null
+          neighborhood?: string | null
           notes?: string | null
           phone?: string | null
           photo_path?: string | null
@@ -216,15 +223,18 @@ export type Database = {
           status?: string
           updated_at?: string
           user_id?: string | null
+          zip_code?: string | null
         }
         Update: {
           address?: string | null
           affiliated_on?: string | null
           approval_status?: string
+          baptism_church?: string | null
           baptism_date?: string | null
           baptized?: boolean
           birth_date?: string | null
           church_role?: string | null
+          city?: string | null
           cpf?: string | null
           created_at?: string
           department?: string | null
@@ -234,6 +244,7 @@ export type Database = {
           joined_on?: string | null
           marital_status?: string | null
           ministry?: string | null
+          neighborhood?: string | null
           notes?: string | null
           phone?: string | null
           photo_path?: string | null
@@ -241,6 +252,7 @@ export type Database = {
           status?: string
           updated_at?: string
           user_id?: string | null
+          zip_code?: string | null
         }
         Relationships: []
       }
@@ -342,6 +354,50 @@ export type Database = {
           updated_at?: string
         }
         Relationships: []
+      }
+      tithes: {
+        Row: {
+          amount: number
+          created_at: string
+          created_by: string | null
+          id: string
+          member_id: string
+          notes: string | null
+          paid_on: string
+          payment_method: string | null
+          reference_month: string | null
+        }
+        Insert: {
+          amount: number
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          member_id: string
+          notes?: string | null
+          paid_on?: string
+          payment_method?: string | null
+          reference_month?: string | null
+        }
+        Update: {
+          amount?: number
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          member_id?: string
+          notes?: string | null
+          paid_on?: string
+          payment_method?: string | null
+          reference_month?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "tithes_member_id_fkey"
+            columns: ["member_id"]
+            isOneToOne: false
+            referencedRelation: "members"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       user_permissions: {
         Row: {

@@ -125,3 +125,23 @@ export function formatCpf(v: string) {
     .replace(/(\d{3})(\d)/, "$1.$2")
     .replace(/(\d{3})(\d{1,2})$/, "$1-$2");
 }
+
+export function formatCep(v: string) {
+  const d = v.replace(/\D/g, "").slice(0, 8);
+  return d.length > 5 ? `${d.slice(0, 5)}-${d.slice(5)}` : d;
+}
+
+/** Converte "1.234,56", "150,5" ou "150.50" em número. Retorna NaN se não der. */
+export function parseMoney(v: string) {
+  const t = v.trim().replace(/[^\d.,]/g, "");
+  if (!t) return NaN;
+  const normalized = t.includes(",") ? t.replace(/\./g, "").replace(",", ".") : t;
+  return Number(normalized);
+}
+
+/** "2026-03-01" -> "Março/2026" */
+export function monthRefLabel(d?: string | null) {
+  if (!d) return "—";
+  const [y, m] = d.slice(0, 7).split("-");
+  return `${MONTHS[Number(m) - 1] ?? m}/${y}`;
+}

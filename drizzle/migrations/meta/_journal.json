@@ -43,6 +43,13 @@
       "when": 1791460000000,
       "tag": "0005_prayer_request_visibility_permission",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1791546000000,
+      "tag": "0006_member_address_and_tithes",
+      "breakpoints": true
     }
   ]
 }
