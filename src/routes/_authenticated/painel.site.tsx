@@ -9,7 +9,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { contentFields, type ContentKey, type SiteContent } from "@/lib/site-content";
+import { contentFields, markdownFields, type ContentKey, type SiteContent } from "@/lib/site-content";
+import { Markdown } from "@/components/site/Markdown";
 import { siteQuery, siteMeta } from "@/lib/site-query";
 import { saveSiteContent } from "@/lib/site-editor.functions";
 
@@ -94,10 +95,29 @@ function SiteEditor() {
                 .map(([key, f]) => (
                   <div key={key} className="space-y-2">
                     <Label htmlFor={`site-${key}`}>{f[1]}</Label>
-                    {key.endsWith("Text") ||
-                    key === "heroText" ||
-                    key === "tagline" ||
-                    key === "prayerPrivacy" ? (
+                    {markdownFields.includes(key) ? (
+                      <div className="space-y-2">
+                        <Textarea
+                          id={`site-${key}`}
+                          value={c[key]}
+                          onChange={(e) => edit(key, e.target.value)}
+                          rows={6}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Formatação: <code>**negrito**</code>, <code>*itálico*</code>, <code>- item</code> para listas. Deixe uma
+                          linha em branco para criar um novo parágrafo.
+                        </p>
+                        {c[key].trim() && (
+                          <div className="rounded-lg border bg-muted/40 p-3">
+                            <p className="mb-2 text-xs font-medium text-muted-foreground">Pré-visualização</p>
+                            <Markdown className="text-sm leading-relaxed text-muted-foreground">{c[key]}</Markdown>
+                          </div>
+                        )}
+                      </div>
+                    ) : key.endsWith("Text") ||
+                      key === "heroText" ||
+                      key === "tagline" ||
+                      key === "prayerPrivacy" ? (
                       <Textarea
                         id={`site-${key}`}
                         value={c[key]}

@@ -103,6 +103,26 @@ export const contentFields = {
   navPanel: ["Navegação", "Área de membros", "Área de membros"],
 } as const;
 export type ContentKey = keyof typeof contentFields;
+
+/** Textos longos que aceitam Markdown (parágrafos, **negrito**, listas...). Para incluir outro campo, basta adicioná-lo aqui. */
+export const markdownFields: readonly ContentKey[] = [
+  "heroText",
+  "aboutText",
+  "servicesText",
+  "contactText",
+  "contributionText",
+  "prayerText",
+];
+
+/** Tira a formatação Markdown, para usar em descrições de busca (meta description). */
+export function stripMarkdown(md: string) {
+  return md
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/[*_~`>#]/g, "")
+    .replace(/^\s*[-+]\s+/gm, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 export type SiteContent = Record<ContentKey, string> & {
   photos: { url: string; caption: string }[];
   schedule: { day: string; time: string; name: string }[];

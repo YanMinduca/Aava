@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { ArrowUpRight, MapPin, Instagram, Facebook, Youtube, MessageCircle } from "lucide-react";
 import { useSiteContent } from "@/lib/site-query";
 import { safeLink } from "@/lib/site-content";
+import { Markdown } from "@/components/site/Markdown";
 import { Button } from "@/components/ui/button";
 
 export function SiteLayout({ children }: { children: ReactNode }) {
@@ -100,7 +101,7 @@ export function PageHeader({
       <div className="mx-auto max-w-7xl px-5 py-16 lg:px-10">
         <p className="text-xs font-bold text-primary">{eyebrow}</p>
         <h1 className="mt-4 text-4xl md:text-5xl">{title}</h1>
-        {text && <p className="mt-5 max-w-2xl leading-relaxed text-muted-foreground">{text}</p>}
+        {text && <Markdown className="mt-5 max-w-2xl leading-relaxed text-muted-foreground">{text}</Markdown>}
       </div>
     </section>
   );

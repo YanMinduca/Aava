@@ -1,0 +1,245 @@
+diff --git a/package.json b/package.json
+index aff183d..d21b9cf 100644
+--- a/package.json
++++ b/package.json
+@@ -61,8 +61,10 @@
+     "react-day-picker": "^9.14.0",
+     "react-dom": "^19.2.0",
+     "react-hook-form": "^7.71.2",
++    "react-markdown": "^10.1.0",
+     "react-resizable-panels": "^4.6.5",
+     "recharts": "^2.15.4",
++    "remark-breaks": "^4.0.0",
+     "sonner": "^2.0.7",
+     "tailwind-merge": "^3.5.0",
+     "tailwindcss": "^4.2.1",
+diff --git a/src/components/site/Markdown.tsx b/src/components/site/Markdown.tsx
+new file mode 100644
+index 0000000..b7e97cc
+--- /dev/null
++++ b/src/components/site/Markdown.tsx
+@@ -0,0 +1,37 @@
++import ReactMarkdown from "react-markdown";
++import remarkBreaks from "remark-breaks";
++
++/**
++ * Renderiza textos editáveis do site em Markdown.
++ * Suporta parágrafos (linha em branco), **negrito**, *itálico*, listas, citações e links.
++ * HTML cru é ignorado, então o texto é seguro. Um "Enter" simples já vira quebra de linha.
++ */
++export function Markdown({ children, className = "" }: { children: string; className?: string }) {
++  return (
++    <div className={className}>
++      <ReactMarkdown
++        remarkPlugins={[remarkBreaks]}
++        allowedElements={["p", "br", "strong", "em", "del", "ul", "ol", "li", "blockquote", "a", "h1", "h2", "h3", "h4"]}
++        unwrapDisallowed
++        components={{
++          p: ({ node: _n, ...p }) => <p className="mt-4 first:mt-0" {...p} />,
++          strong: ({ node: _n, ...p }) => <strong className="font-semibold text-foreground" {...p} />,
++          ul: ({ node: _n, ...p }) => <ul className="mt-4 list-disc space-y-1 pl-5 first:mt-0" {...p} />,
++          ol: ({ node: _n, ...p }) => <ol className="mt-4 list-decimal space-y-1 pl-5 first:mt-0" {...p} />,
++          blockquote: ({ node: _n, ...p }) => (
++            <blockquote className="mt-4 border-l-2 border-primary pl-4 italic first:mt-0" {...p} />
++          ),
++          h1: ({ node: _n, ...p }) => <p className="mt-4 text-lg font-semibold text-foreground first:mt-0" {...p} />,
++          h2: ({ node: _n, ...p }) => <p className="mt-4 text-lg font-semibold text-foreground first:mt-0" {...p} />,
++          h3: ({ node: _n, ...p }) => <p className="mt-4 font-semibold text-foreground first:mt-0" {...p} />,
++          h4: ({ node: _n, ...p }) => <p className="mt-4 font-semibold text-foreground first:mt-0" {...p} />,
++          a: ({ node: _n, ...p }) => (
++            <a className="font-medium text-primary underline underline-offset-2" target="_blank" rel="noopener noreferrer" {...p} />
++          ),
++        }}
++      >
++        {children}
++      </ReactMarkdown>
++    </div>
++  );
++}
+diff --git a/src/components/site/SiteLayout.tsx b/src/components/site/SiteLayout.tsx
+index 4448175..3154c54 100644
+--- a/src/components/site/SiteLayout.tsx
++++ b/src/components/site/SiteLayout.tsx
+@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
+ import { ArrowUpRight, MapPin, Instagram, Facebook, Youtube, MessageCircle } from "lucide-react";
+ import { useSiteContent } from "@/lib/site-query";
+ import { safeLink } from "@/lib/site-content";
++import { Markdown } from "@/components/site/Markdown";
+ import { Button } from "@/components/ui/button";
+ 
+ export function SiteLayout({ children }: { children: ReactNode }) {
+@@ -100,7 +101,7 @@ export function PageHeader({
+       <div className="mx-auto max-w-7xl px-5 py-16 lg:px-10">
+         <p className="text-xs font-bold text-primary">{eyebrow}</p>
+         <h1 className="mt-4 text-4xl md:text-5xl">{title}</h1>
+-        {text && <p className="mt-5 max-w-2xl leading-relaxed text-muted-foreground">{text}</p>}
++        {text && <Markdown className="mt-5 max-w-2xl leading-relaxed text-muted-foreground">{text}</Markdown>}
+       </div>
+     </section>
+   );
+diff --git a/src/lib/site-content.ts b/src/lib/site-content.ts
+index f428aac..cabdf4a 100644
+--- a/src/lib/site-content.ts
++++ b/src/lib/site-content.ts
+@@ -103,6 +103,26 @@ export const contentFields = {
+   navPanel: ["Navegação", "Área de membros", "Área de membros"],
+ } as const;
+ export type ContentKey = keyof typeof contentFields;
++
++/** Textos longos que aceitam Markdown (parágrafos, **negrito**, listas...). Para incluir outro campo, basta adicioná-lo aqui. */
++export const markdownFields: readonly ContentKey[] = [
++  "heroText",
++  "aboutText",
++  "servicesText",
++  "contactText",
++  "contributionText",
++  "prayerText",
++];
++
++/** Tira a formatação Markdown, para usar em descrições de busca (meta description). */
++export function stripMarkdown(md: string) {
++  return md
++    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
++    .replace(/[*_~`>#]/g, "")
++    .replace(/^\s*[-+]\s+/gm, "")
++    .replace(/\s+/g, " ")
++    .trim();
++}
+ export type SiteContent = Record<ContentKey, string> & {
+   photos: { url: string; caption: string }[];
+   schedule: { day: string; time: string; name: string }[];
+diff --git a/src/routes/_authenticated/painel.site.tsx b/src/routes/_authenticated/painel.site.tsx
+index d6de492..daed068 100644
+--- a/src/routes/_authenticated/painel.site.tsx
++++ b/src/routes/_authenticated/painel.site.tsx
+@@ -9,7 +9,8 @@ import { Input } from "@/components/ui/input";
+ import { Label } from "@/components/ui/label";
+ import { Textarea } from "@/components/ui/textarea";
+ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+-import { contentFields, type ContentKey, type SiteContent } from "@/lib/site-content";
++import { contentFields, markdownFields, type ContentKey, type SiteContent } from "@/lib/site-content";
++import { Markdown } from "@/components/site/Markdown";
+ import { siteQuery, siteMeta } from "@/lib/site-query";
+ import { saveSiteContent } from "@/lib/site-editor.functions";
+ 
+@@ -94,10 +95,29 @@ function SiteEditor() {
+                 .map(([key, f]) => (
+                   <div key={key} className="space-y-2">
+                     <Label htmlFor={`site-${key}`}>{f[1]}</Label>
+-                    {key.endsWith("Text") ||
+-                    key === "heroText" ||
+-                    key === "tagline" ||
+-                    key === "prayerPrivacy" ? (
++                    {markdownFields.includes(key) ? (
++                      <div className="space-y-2">
++                        <Textarea
++                          id={`site-${key}`}
++                          value={c[key]}
++                          onChange={(e) => edit(key, e.target.value)}
++                          rows={6}
++                        />
++                        <p className="text-xs text-muted-foreground">
++                          Formatação: <code>**negrito**</code>, <code>*itálico*</code>, <code>- item</code> para listas. Deixe uma
++                          linha em branco para criar um novo parágrafo.
++                        </p>
++                        {c[key].trim() && (
++                          <div className="rounded-lg border bg-muted/40 p-3">
++                            <p className="mb-2 text-xs font-medium text-muted-foreground">Pré-visualização</p>
++                            <Markdown className="text-sm leading-relaxed text-muted-foreground">{c[key]}</Markdown>
++                          </div>
++                        )}
++                      </div>
++                    ) : key.endsWith("Text") ||
++                      key === "heroText" ||
++                      key === "tagline" ||
++                      key === "prayerPrivacy" ? (
+                       <Textarea
+                         id={`site-${key}`}
+                         value={c[key]}
+diff --git a/src/routes/index.tsx b/src/routes/index.tsx
+index a5b02ee..bf81a29 100644
+--- a/src/routes/index.tsx
++++ b/src/routes/index.tsx
+@@ -1,3 +1,5 @@
++import { Markdown } from "@/components/site/Markdown";
++import { stripMarkdown } from "@/lib/site-content";
+ import { createFileRoute, Link } from "@tanstack/react-router";
+ import { ArrowUpRight, Heart, BookOpen, Users, Instagram } from "lucide-react";
+ import hero from "@/assets/hero.jpg";
+@@ -11,7 +13,7 @@ import { ContributionContent } from "@/components/site/ContributionContent";
+ export const Route = createFileRoute("/")({
+   loader: ({ context }) => context.queryClient.ensureQueryData(siteQuery),
+   head: ({ loaderData: c }) =>
+-    siteMeta(c?.name ?? "Comunidade Aava", c?.heroText ?? "Uma família de fé em Jacareí."),
++    siteMeta(c?.name ?? "Comunidade Aava", c?.heroText ? stripMarkdown(c.heroText) : "Uma família de fé em Jacareí."),
+   errorComponent: PageError,
+   notFoundComponent: PageError,
+   component: Home,
+@@ -31,9 +33,9 @@ function Home() {
+   {c.heroSubtitle}
+ </span>
+           </h1>
+-          <p className="mt-6 max-w-lg text-base leading-relaxed text-muted-foreground">
++          <Markdown className="mt-6 max-w-lg text-base leading-relaxed text-muted-foreground">
+             {c.heroText}
+-          </p>
++          </Markdown>
+           <div className="mt-8 flex flex-wrap gap-3">
+             <Button asChild size="lg">
+               <Link to="/cultos">
+diff --git a/src/routes/quem-somos.tsx b/src/routes/quem-somos.tsx
+index bffce49..0d13ec5 100644
+--- a/src/routes/quem-somos.tsx
++++ b/src/routes/quem-somos.tsx
+@@ -1,6 +1,7 @@
++import { stripMarkdown } from '@/lib/site-content';
+ import { createFileRoute } from '@tanstack/react-router';
+ import { SiteLayout, PageHeader } from '@/components/site/SiteLayout';
+ import { PageError } from '@/components/site/PageError';
+ import { siteQuery, siteMeta, useSiteContent } from '@/lib/site-query';
+-export const Route = createFileRoute('/quem-somos')({loader: ({context}) => context.queryClient.ensureQueryData(siteQuery), head: ({loaderData:c}) => siteMeta(`${c?.navAbout ?? 'Quem somos'} — ${c?.name ?? 'Comunidade Aava'}`, c?.aboutText ?? 'Conheça nossa comunidade.'), errorComponent: PageError, notFoundComponent: PageError, component: About});
++export const Route = createFileRoute('/quem-somos')({loader: ({context}) => context.queryClient.ensureQueryData(siteQuery), head: ({loaderData:c}) => siteMeta(`${c?.navAbout ?? 'Quem somos'} — ${c?.name ?? 'Comunidade Aava'}`, c?.aboutText ? stripMarkdown(c.aboutText) : 'Conheça nossa comunidade.'), errorComponent: PageError, notFoundComponent: PageError, component: About});
+ function About(){ const c=useSiteContent();return <SiteLayout><PageHeader eyebrow={c.aboutEyebrow} title={c.aboutTitle} text={c.aboutText}/><section className="mx-auto grid max-w-7xl gap-10 px-5 py-16 md:grid-cols-3 lg:px-10">{[{t:c.missionTitle,d:c.missionText},{t:c.visionTitle,d:c.visionText},{t:c.beliefsTitle,d:c.beliefsText}].map(b=><div key={b.t}><h2 className="text-2xl">{b.t}</h2><p className="mt-4 leading-relaxed text-muted-foreground">{b.d}</p></div>)}</section></SiteLayout>}
+diff --git a/src/test/markdown.test.tsx b/src/test/markdown.test.tsx
+new file mode 100644
+index 0000000..1f54917
+--- /dev/null
++++ b/src/test/markdown.test.tsx
+@@ -0,0 +1,37 @@
++import { renderToStaticMarkup } from "react-dom/server";
++import { describe, expect, it } from "vitest";
++import { Markdown } from "@/components/site/Markdown";
++import { stripMarkdown } from "@/lib/site-content";
++
++const html = (md: string) => renderToStaticMarkup(<Markdown>{md}</Markdown>);
++
++describe("Markdown dos textos do site", () => {
++  it("separa parágrafos e aplica negrito e itálico", () => {
++    const out = html("Primeiro **parágrafo** aqui.\n\nSegundo *parágrafo*.");
++    expect(out.match(/<p /g)).toHaveLength(2);
++    expect(out).toContain("<strong");
++    expect(out).toContain("<em>parágrafo</em>");
++  });
++
++  it("transforma Enter simples em quebra de linha", () => {
++    expect(html("linha 1\nlinha 2")).toContain("<br/>");
++  });
++
++  it("renderiza listas e links", () => {
++    const out = html("- um\n- dois\n\n[site](https://exemplo.com)");
++    expect(out).toContain("<ul");
++    expect(out.match(/<li>/g)).toHaveLength(2);
++    expect(out).toContain('href="https://exemplo.com"');
++  });
++
++  it("ignora HTML cru e links perigosos", () => {
++    const out = html("<script>alert(1)</script>\n\n<img src=x onerror=alert(1)>\n\n[x](javascript:alert(1))");
++    expect(out).not.toContain("<script");
++    expect(out).not.toContain("<img");
++    expect(out).not.toContain('href="javascript');
++  });
++
++  it("stripMarkdown deixa só o texto puro para a descrição do Google", () => {
++    expect(stripMarkdown("Olá **mundo**\n\n- item [link](https://a.com)")).toBe("Olá mundo item link");
++  });
++});

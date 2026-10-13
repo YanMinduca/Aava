@@ -1,3 +1,5 @@
+import { Markdown } from "@/components/site/Markdown";
+import { stripMarkdown } from "@/lib/site-content";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { ArrowUpRight, Heart, BookOpen, Users, Instagram } from "lucide-react";
 import hero from "@/assets/hero.jpg";
@@ -11,7 +13,7 @@ import { ContributionContent } from "@/components/site/ContributionContent";
 export const Route = createFileRoute("/")({
   loader: ({ context }) => context.queryClient.ensureQueryData(siteQuery),
   head: ({ loaderData: c }) =>
-    siteMeta(c?.name ?? "Comunidade Aava", c?.heroText ?? "Uma família de fé em Jacareí."),
+    siteMeta(c?.name ?? "Comunidade Aava", c?.heroText ? stripMarkdown(c.heroText) : "Uma família de fé em Jacareí."),
   errorComponent: PageError,
   notFoundComponent: PageError,
   component: Home,
@@ -31,9 +33,9 @@ function Home() {
   {c.heroSubtitle}
 </span>
           </h1>
-          <p className="mt-6 max-w-lg text-base leading-relaxed text-muted-foreground">
+          <Markdown className="mt-6 max-w-lg text-base leading-relaxed text-muted-foreground">
             {c.heroText}
-          </p>
+          </Markdown>
           <div className="mt-8 flex flex-wrap gap-3">
             <Button asChild size="lg">
               <Link to="/cultos">
