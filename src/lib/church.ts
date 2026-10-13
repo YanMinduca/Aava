@@ -131,17 +131,5 @@ export function formatCep(v: string) {
   return d.length > 5 ? `${d.slice(0, 5)}-${d.slice(5)}` : d;
 }
 
-/** Converte "1.234,56", "150,5" ou "150.50" em número. Retorna NaN se não der. */
-export function parseMoney(v: string) {
-  const t = v.trim().replace(/[^\d.,]/g, "");
-  if (!t) return NaN;
-  const normalized = t.includes(",") ? t.replace(/\./g, "").replace(",", ".") : t;
-  return Number(normalized);
-}
-
-/** "2026-03-01" -> "Março/2026" */
-export function monthRefLabel(d?: string | null) {
-  if (!d) return "—";
-  const [y, m] = d.slice(0, 7).split("-");
-  return `${MONTHS[Number(m) - 1] ?? m}/${y}`;
-}
+/** Receitas que podem ser ligadas a um membro (histórico no perfil dele). */
+export const MEMBER_LINK_CATEGORIES = ["Dízimos", "Ofertas"];

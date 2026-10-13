@@ -20,7 +20,6 @@ import { Route as QuemSomosRouteImport } from './routes/quem-somos'
 import { Route as AuthenticatedPainelRouteImport } from './routes/_authenticated/painel'
 import { Route as ConviteCodeRouteImport } from './routes/convite.$code'
 import { Route as AuthenticatedPainelIndexRouteImport } from './routes/_authenticated/painel.index'
-import { Route as AuthenticatedPainelDizimosRouteImport } from './routes/_authenticated/painel.dizimos'
 import { Route as AuthenticatedPainelFinanceiroRouteImport } from './routes/_authenticated/painel.financeiro'
 import { Route as AuthenticatedPainelMembrosRouteImport } from './routes/_authenticated/painel.membros'
 import { Route as AuthenticatedPainelMeuCadastroRouteImport } from './routes/_authenticated/painel.meu-cadastro'
@@ -85,12 +84,6 @@ const AuthenticatedPainelIndexRoute =
     path: '/',
     getParentRoute: () => AuthenticatedPainelRoute,
   } as any)
-const AuthenticatedPainelDizimosRoute =
-  AuthenticatedPainelDizimosRouteImport.update({
-    id: '/dizimos',
-    path: '/dizimos',
-    getParentRoute: () => AuthenticatedPainelRoute,
-  } as any)
 const AuthenticatedPainelFinanceiroRoute =
   AuthenticatedPainelFinanceiroRouteImport.update({
     id: '/financeiro',
@@ -149,7 +142,6 @@ export interface FileRoutesByFullPath {
   '/quem-somos': typeof QuemSomosRoute
   '/painel': typeof AuthenticatedPainelRouteWithChildren
   '/convite/$code': typeof ConviteCodeRoute
-  '/painel/dizimos': typeof AuthenticatedPainelDizimosRoute
   '/painel/financeiro': typeof AuthenticatedPainelFinanceiroRoute
   '/painel/membros': typeof AuthenticatedPainelMembrosRoute
   '/painel/meu-cadastro': typeof AuthenticatedPainelMeuCadastroRoute
@@ -169,7 +161,6 @@ export interface FileRoutesByTo {
   '/oracao': typeof OracaoRoute
   '/quem-somos': typeof QuemSomosRoute
   '/convite/$code': typeof ConviteCodeRoute
-  '/painel/dizimos': typeof AuthenticatedPainelDizimosRoute
   '/painel/financeiro': typeof AuthenticatedPainelFinanceiroRoute
   '/painel/membros': typeof AuthenticatedPainelMembrosRoute
   '/painel/meu-cadastro': typeof AuthenticatedPainelMeuCadastroRoute
@@ -192,7 +183,6 @@ export interface FileRoutesById {
   '/quem-somos': typeof QuemSomosRoute
   '/_authenticated/painel': typeof AuthenticatedPainelRouteWithChildren
   '/convite/$code': typeof ConviteCodeRoute
-  '/_authenticated/painel/dizimos': typeof AuthenticatedPainelDizimosRoute
   '/_authenticated/painel/financeiro': typeof AuthenticatedPainelFinanceiroRoute
   '/_authenticated/painel/membros': typeof AuthenticatedPainelMembrosRoute
   '/_authenticated/painel/meu-cadastro': typeof AuthenticatedPainelMeuCadastroRoute
@@ -215,7 +205,6 @@ export interface FileRouteTypes {
     | '/quem-somos'
     | '/painel'
     | '/convite/$code'
-    | '/painel/dizimos'
     | '/painel/financeiro'
     | '/painel/membros'
     | '/painel/meu-cadastro'
@@ -235,7 +224,6 @@ export interface FileRouteTypes {
     | '/oracao'
     | '/quem-somos'
     | '/convite/$code'
-    | '/painel/dizimos'
     | '/painel/financeiro'
     | '/painel/membros'
     | '/painel/meu-cadastro'
@@ -257,7 +245,6 @@ export interface FileRouteTypes {
     | '/quem-somos'
     | '/_authenticated/painel'
     | '/convite/$code'
-    | '/_authenticated/painel/dizimos'
     | '/_authenticated/painel/financeiro'
     | '/_authenticated/painel/membros'
     | '/_authenticated/painel/meu-cadastro'
@@ -360,13 +347,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedPainelIndexRouteImport
       parentRoute: typeof AuthenticatedPainelRoute
     }
-    '/_authenticated/painel/dizimos': {
-      id: '/_authenticated/painel/dizimos'
-      path: '/dizimos'
-      fullPath: '/painel/dizimos'
-      preLoaderRoute: typeof AuthenticatedPainelDizimosRouteImport
-      parentRoute: typeof AuthenticatedPainelRoute
-    }
     '/_authenticated/painel/financeiro': {
       id: '/_authenticated/painel/financeiro'
       path: '/financeiro'
@@ -427,7 +407,6 @@ declare module '@tanstack/react-router' {
 }
 
 interface AuthenticatedPainelRouteChildren {
-  AuthenticatedPainelDizimosRoute: typeof AuthenticatedPainelDizimosRoute
   AuthenticatedPainelFinanceiroRoute: typeof AuthenticatedPainelFinanceiroRoute
   AuthenticatedPainelMembrosRoute: typeof AuthenticatedPainelMembrosRoute
   AuthenticatedPainelMeuCadastroRoute: typeof AuthenticatedPainelMeuCadastroRoute
@@ -440,7 +419,6 @@ interface AuthenticatedPainelRouteChildren {
 }
 
 const AuthenticatedPainelRouteChildren: AuthenticatedPainelRouteChildren = {
-  AuthenticatedPainelDizimosRoute: AuthenticatedPainelDizimosRoute,
   AuthenticatedPainelFinanceiroRoute: AuthenticatedPainelFinanceiroRoute,
   AuthenticatedPainelMembrosRoute: AuthenticatedPainelMembrosRoute,
   AuthenticatedPainelMeuCadastroRoute: AuthenticatedPainelMeuCadastroRoute,

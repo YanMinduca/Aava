@@ -1,7 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-import { ArrowLeft, Pencil, Plus } from "lucide-react";
+import { ArrowLeft, Pencil } from "lucide-react";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 import { useAccess } from "@/hooks/use-access";
@@ -16,8 +16,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { MemberAvatar, MemberForm, type MemberDraft } from "@/components/members/MemberForm";
-import { TitheDialog, type TitheRow } from "@/components/tithes/TitheDialog";
-import { TitheTable, useDeleteTithe } from "@/components/tithes/TitheTable";
 import { APPROVAL_LABELS, MEMBER_STATUS, ageFrom, brl, dateBR } from "@/lib/church";
 import { siteMeta } from "@/lib/site-query";
 
@@ -49,12 +47,7 @@ function MemberProfile() {
   const { id } = Route.useParams();
   const { can, isLoading: loadingAccess } = useAccess();
   const qc = useQueryClient();
-  const del = useDeleteTithe();
   const [editing, setEditing] = useState<MemberDraft | null>(null);
-  const [titheDialog, setTitheDialog] = useState<{ open: boolean; tithe: TitheRow | null }>({
-    open: false,
-    tithe: null,
-  });
   const [year, setYear] = useState("todos");
 
   const member = useQuery({
@@ -80,17 +73,19 @@ function MemberProfile() {
     },
   });
 
-  const tithes = useQuery({
-    queryKey: ["tithes", "member", id],
+  // Dízimos e ofertas vêm do Financeiro: são as receitas ligadas a este membro.
+  const contributions = useQuery({
+    queryKey: ["transactions", "member", id],
     enabled: can("view_finance"),
     queryFn: async () => {
       const { data, error } = await supabase
-        .from("tithes")
-        .select("*")
+        .from("financial_transactions")
+        .select("id, category, amount, occurred_on, payment_method, description")
         .eq("member_id", id)
-        .order("paid_on", { ascending: false });
+        .eq("kind", "entrada")
+        .order("occurred_on", { ascending: false });
       if (error) throw error;
-      return data as TitheRow[];
+      return data;
     },
   });
 
@@ -112,18 +107,18 @@ function MemberProfile() {
     onError: (e: Error) => toast.error(e.message),
   });
 
-  const all = useMemo(() => tithes.data ?? [], [tithes.data]);
+  const all = useMemo(() => contributions.data ?? [], [contributions.data]);
   const years = useMemo(
     () =>
       Array.from(
-        new Set([String(new Date().getFullYear()), ...all.map((t) => t.paid_on.slice(0, 4))]),
+        new Set([String(new Date().getFullYear()), ...all.map((t) => t.occurred_on.slice(0, 4))]),
       )
         .sort()
         .reverse(),
     [all],
   );
-  const shown = year === "todos" ? all : all.filter((t) => t.paid_on.startsWith(year));
-  const sum = (l: TitheRow[]) => l.reduce((s, t) => s + Number(t.amount), 0);
+  const shown = year === "todos" ? all : all.filter((t) => t.occurred_on.startsWith(year));
+  const sum = (l: typeof all) => l.reduce((acc, t) => acc + Number(t.amount), 0);
 
   if (loadingAccess) return null;
   if (!can("view_members"))
@@ -224,70 +219,107 @@ function MemberProfile() {
       {can("view_finance") && (
         <section className="mt-10">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <h2 className="text-2xl text-foreground">Histórico de dízimos</h2>
-            <div className="flex gap-2">
-              <Select value={year} onValueChange={setYear}>
-                <SelectTrigger className="w-32">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="todos">Todos os anos</SelectItem>
-                  {years.map((y) => (
-                    <SelectItem key={y} value={y}>
-                      {y}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {can("create_financial_transaction") && (
-                <Button onClick={() => setTitheDialog({ open: true, tithe: null })}>
-                  <Plus className="h-4 w-4" /> Registrar dízimo
-                </Button>
-              )}
-            </div>
+            <h2 className="text-2xl text-foreground">Dízimos e ofertas</h2>
+            <Select value={year} onValueChange={setYear}>
+              <SelectTrigger className="w-32">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="todos">Todos os anos</SelectItem>
+                {years.map((y) => (
+                  <SelectItem key={y} value={y}>
+                    {y}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
 
           <dl className="mt-4 grid gap-4 sm:grid-cols-3">
             <div className="rounded-2xl border bg-card p-5">
-              <dt className="text-sm text-muted-foreground">Total em {thisYear}</dt>
+              <dt className="text-sm text-muted-foreground">Dízimos em {thisYear}</dt>
               <dd className="mt-1 text-2xl font-semibold text-foreground">
-                {brl(sum(all.filter((t) => t.paid_on.startsWith(thisYear))))}
+                {brl(
+                  sum(
+                    all.filter(
+                      (t) => t.category === "Dízimos" && t.occurred_on.startsWith(thisYear),
+                    ),
+                  ),
+                )}
+              </dd>
+            </div>
+            <div className="rounded-2xl border bg-card p-5">
+              <dt className="text-sm text-muted-foreground">Ofertas em {thisYear}</dt>
+              <dd className="mt-1 text-2xl font-semibold text-foreground">
+                {brl(
+                  sum(
+                    all.filter(
+                      (t) => t.category === "Ofertas" && t.occurred_on.startsWith(thisYear),
+                    ),
+                  ),
+                )}
               </dd>
             </div>
             <div className="rounded-2xl border bg-card p-5">
               <dt className="text-sm text-muted-foreground">Total geral</dt>
               <dd className="mt-1 text-2xl font-semibold text-foreground">{brl(sum(all))}</dd>
             </div>
-            <div className="rounded-2xl border bg-card p-5">
-              <dt className="text-sm text-muted-foreground">Último dízimo</dt>
-              <dd className="mt-1 text-2xl font-semibold text-foreground">
-                {all[0] ? dateBR(all[0].paid_on) : "—"}
-              </dd>
-            </div>
           </dl>
 
-          <div className="mt-4">
-            <TitheTable
-              rows={shown}
-              loading={tithes.isLoading}
-              {...(can("edit_financial_transaction")
-                ? { onEdit: (t: TitheRow) => setTitheDialog({ open: true, tithe: t }) }
-                : {})}
-              {...(can("delete_financial_transaction")
-                ? { onDelete: (t: TitheRow) => confirm("Excluir este dízimo?") && del.mutate(t.id) }
-                : {})}
-            />
+          <div className="mt-4 overflow-x-auto rounded-2xl border bg-card">
+            <table className="w-full text-sm">
+              <thead className="border-b text-left text-muted-foreground">
+                <tr>
+                  <th className="p-4 font-medium">Data</th>
+                  <th className="p-4 font-medium">Categoria</th>
+                  <th className="p-4 font-medium">Forma</th>
+                  <th className="p-4 text-right font-medium">Valor</th>
+                </tr>
+              </thead>
+              <tbody>
+                {contributions.isLoading && (
+                  <tr>
+                    <td colSpan={4} className="p-4 text-muted-foreground">
+                      Carregando...
+                    </td>
+                  </tr>
+                )}
+                {!contributions.isLoading && shown.length === 0 && (
+                  <tr>
+                    <td colSpan={4} className="p-6 text-center text-muted-foreground">
+                      Nenhum dízimo ou oferta registrado para este membro.
+                    </td>
+                  </tr>
+                )}
+                {shown.map((t) => (
+                  <tr key={t.id} className="border-b last:border-0">
+                    <td className="whitespace-nowrap p-4 text-foreground">
+                      {dateBR(t.occurred_on)}
+                    </td>
+                    <td className="p-4 text-foreground">
+                      {t.category}
+                      {t.description && (
+                        <p className="text-xs text-muted-foreground">{t.description}</p>
+                      )}
+                    </td>
+                    <td className="p-4 text-muted-foreground">{t.payment_method ?? "—"}</td>
+                    <td className="whitespace-nowrap p-4 text-right font-medium text-foreground">
+                      {brl(Number(t.amount))}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
+          <p className="mt-3 text-xs text-muted-foreground">
+            Para registrar, vá em{" "}
+            <Link to="/painel/financeiro" className="underline hover:text-foreground">
+              Financeiro
+            </Link>
+            , clique em Receita, escolha Dízimos ou Ofertas e selecione este membro.
+          </p>
         </section>
       )}
-
-      <TitheDialog
-        open={titheDialog.open}
-        tithe={titheDialog.tithe}
-        memberId={m.id}
-        memberName={m.full_name}
-        onClose={() => setTitheDialog({ open: false, tithe: null })}
-      />
 
       <Dialog open={!!editing} onOpenChange={(o) => !o && setEditing(null)}>
         <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">

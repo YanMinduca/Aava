@@ -65,6 +65,7 @@ export type Database = {
           description: string | null
           id: string
           kind: string
+          member_id: string | null
           notes: string | null
           occurred_on: string
           payment_method: string | null
@@ -79,6 +80,7 @@ export type Database = {
           description?: string | null
           id?: string
           kind: string
+          member_id?: string | null
           notes?: string | null
           occurred_on?: string
           payment_method?: string | null
@@ -93,13 +95,22 @@ export type Database = {
           description?: string | null
           id?: string
           kind?: string
+          member_id?: string | null
           notes?: string | null
           occurred_on?: string
           payment_method?: string | null
           receipt_path?: string | null
           responsible?: string | null
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "financial_transactions_member_id_fkey"
+            columns: ["member_id"]
+            isOneToOne: false
+            referencedRelation: "members"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       member_invites: {
         Row: {
@@ -354,50 +365,6 @@ export type Database = {
           updated_at?: string
         }
         Relationships: []
-      }
-      tithes: {
-        Row: {
-          amount: number
-          created_at: string
-          created_by: string | null
-          id: string
-          member_id: string
-          notes: string | null
-          paid_on: string
-          payment_method: string | null
-          reference_month: string | null
-        }
-        Insert: {
-          amount: number
-          created_at?: string
-          created_by?: string | null
-          id?: string
-          member_id: string
-          notes?: string | null
-          paid_on?: string
-          payment_method?: string | null
-          reference_month?: string | null
-        }
-        Update: {
-          amount?: number
-          created_at?: string
-          created_by?: string | null
-          id?: string
-          member_id?: string
-          notes?: string | null
-          paid_on?: string
-          payment_method?: string | null
-          reference_month?: string | null
-        }
-        Relationships: [
-          {
-            foreignKeyName: "tithes_member_id_fkey"
-            columns: ["member_id"]
-            isOneToOne: false
-            referencedRelation: "members"
-            referencedColumns: ["id"]
-          },
-        ]
       }
       user_permissions: {
         Row: {

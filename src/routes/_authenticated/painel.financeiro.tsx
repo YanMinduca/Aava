@@ -7,8 +7,8 @@ import { Plus, Trash2, Download, Target, Paperclip, Pencil, FileText, Repeat, Ch
 import { Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { supabase } from "@/integrations/supabase/client";
 import { useAccess } from "@/hooks/use-access";
-import { EXPENSE_CATEGORIES, INCOME_CATEGORIES, MONTHS, PAYMENT_METHODS, brl, dateBR } from "@/lib/church";
-import { byCategory, downloadCsv, expenses, goalProgress, inPeriod, incomes, sum, txCsvRows, type Goal, type Tx } from "@/lib/finance";
+import { EXPENSE_CATEGORIES, INCOME_CATEGORIES, MEMBER_LINK_CATEGORIES, MONTHS, PAYMENT_METHODS, brl, dateBR } from "@/lib/church";
+import { byCategory, downloadCsv, expenses, goalProgress, inPeriod, incomes, sum, txCsvRows, type Goal, type Tx, type TxWithMember } from "@/lib/finance";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -28,8 +28,10 @@ const COLORS = ["var(--chart-1)", "var(--chart-3)", "var(--chart-4)", "var(--cha
 const today = () => new Date().toISOString().slice(0, 10);
 const GOAL_STATUS: Record<string, string> = { em_andamento: "Em andamento", concluida: "Concluída", pausada: "Pausada", cancelada: "Cancelada" };
 
-type TxDraft = { id?: string; kind: string; category: string; amount: string; occurred_on: string; description: string; responsible: string; payment_method: string; notes: string; receipt_path: string | null };
-const emptyTx = (kind = "entrada"): TxDraft => ({ kind, category: kind === "entrada" ? "Dízimos" : "Aluguel", amount: "", occurred_on: today(), description: "", responsible: "", payment_method: "Pix", notes: "", receipt_path: null });
+type TxDraft = { id?: string; kind: string; category: string; amount: string; occurred_on: string; description: string; responsible: string; payment_method: string; notes: string; receipt_path: string | null; member_id: string };
+const NO_MEMBER = "__none";
+const canLinkMember = (kind: string, category: string) => kind === "entrada" && MEMBER_LINK_CATEGORIES.includes(category);
+const emptyTx = (kind = "entrada"): TxDraft => ({ kind, category: kind === "entrada" ? "Dízimos" : "Aluguel", amount: "", occurred_on: today(), description: "", responsible: "", payment_method: "Pix", notes: "", receipt_path: null, member_id: "" });
 
 function Sel({ value, onChange, options, placeholder }: { value: string; onChange: (v: string) => void; options: [string, string][]; placeholder?: string }) {
   return (
@@ -51,7 +53,7 @@ function FinancePage() {
   const txs = useQuery({
     queryKey: ["transactions"],
     queryFn: async () => {
-      const { data, error } = await supabase.from("financial_transactions").select("*").order("occurred_on", { ascending: false });
+      const { data, error } = await supabase.from("financial_transactions").select("*, members(id, full_name)").order("occurred_on", { ascending: false });
       if (error) throw error;
       return data;
     },
@@ -70,6 +72,7 @@ function FinancePage() {
         kind: d.kind, category: d.category, amount: Number(d.amount), occurred_on: d.occurred_on,
         description: d.description || null, responsible: d.responsible || null, payment_method: d.payment_method || null,
         notes: d.notes || null, receipt_path: d.receipt_path,
+        member_id: canLinkMember(d.kind, d.category) && d.member_id ? d.member_id : null,
       };
       const { error } = d.id
         ? await supabase.from("financial_transactions").update(payload).eq("id", d.id)
@@ -255,7 +258,7 @@ function Stat({ label, value, tone }: { label: string; value: string; tone: stri
 }
 
 /* ---------------- Lançamentos ---------------- */
-function TxList({ all, year, month, onEdit, onChanged }: { all: Tx[]; year: number; month: number; onEdit: (d: TxDraft) => void; onChanged: () => void }) {
+function TxList({ all, year, month, onEdit, onChanged }: { all: TxWithMember[]; year: number; month: number; onEdit: (d: TxDraft) => void; onChanged: () => void }) {
   const { can } = useAccess();
   const [kind, setKind] = useState("todos");
   const [scope, setScope] = useState("mes");
@@ -293,13 +296,13 @@ function TxList({ all, year, month, onEdit, onChanged }: { all: Tx[]; year: numb
               <tr key={t.id} className="border-b last:border-0 align-top">
                 <td className="whitespace-nowrap p-4 text-muted-foreground">{dateBR(t.occurred_on)}</td>
                 <td className="p-4 text-foreground">{t.category}</td>
-                <td className="p-4 text-muted-foreground">{t.description}{t.notes && <p className="text-xs italic">{t.notes}</p>}</td>
+                <td className="p-4 text-muted-foreground">{t.members && <Link to="/painel/membro/$id" params={{ id: t.members.id }} className="block font-medium text-foreground hover:text-primary hover:underline">{t.members.full_name}</Link>}{t.description}{t.notes && <p className="text-xs italic">{t.notes}</p>}</td>
                 <td className="p-4 text-muted-foreground">{t.responsible || "—"}<p className="text-xs">{t.payment_method}</p></td>
                 <td className={`whitespace-nowrap p-4 text-right font-semibold tabular-nums ${t.kind === "entrada" ? "text-success" : "text-destructive"}`}>{t.kind === "entrada" ? "+" : "−"} {brl(Number(t.amount))}</td>
                 <td className="whitespace-nowrap p-2 text-right">
                   {t.receipt_path && <Button size="icon" variant="ghost" title="Comprovante" onClick={() => openReceipt(t.receipt_path!)}><Paperclip className="h-4 w-4" /></Button>}
                   {can("edit_financial_transaction") && (
-                    <Button size="icon" variant="ghost" onClick={() => onEdit({ id: t.id, kind: t.kind, category: t.category, amount: String(t.amount), occurred_on: t.occurred_on, description: t.description ?? "", responsible: t.responsible ?? "", payment_method: t.payment_method ?? "", notes: t.notes ?? "", receipt_path: t.receipt_path })}>
+                    <Button size="icon" variant="ghost" onClick={() => onEdit({ id: t.id, kind: t.kind, category: t.category, amount: String(t.amount), occurred_on: t.occurred_on, description: t.description ?? "", responsible: t.responsible ?? "", payment_method: t.payment_method ?? "", notes: t.notes ?? "", receipt_path: t.receipt_path, member_id: t.member_id ?? "" })}>
                       <Pencil className="h-4 w-4" />
                     </Button>
                   )}
@@ -316,6 +319,16 @@ function TxList({ all, year, month, onEdit, onChanged }: { all: Tx[]; year: numb
 
 function TxDialog({ draft, setDraft, onSave, saving }: { draft: TxDraft | null; setDraft: (d: TxDraft | null) => void; onSave: (d: TxDraft) => void; saving: boolean }) {
   const [uploading, setUploading] = useState(false);
+  const linkable = !!draft && canLinkMember(draft.kind, draft.category);
+  const members = useQuery({
+    queryKey: ["members-options"],
+    enabled: linkable,
+    queryFn: async () => {
+      const { data, error } = await supabase.from("members").select("id, full_name").neq("approval_status", "pendente").order("full_name");
+      if (error) throw error;
+      return data;
+    },
+  });
   if (!draft) return null;
   const set = (p: Partial<TxDraft>) => setDraft({ ...draft, ...p });
   const cats = draft.kind === "entrada" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
@@ -336,14 +349,26 @@ function TxDialog({ draft, setDraft, onSave, saving }: { draft: TxDraft | null; 
         <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); onSave(draft); }}>
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5"><Label>Tipo</Label>
-              <Sel value={draft.kind} onChange={(v) => set({ kind: v, category: (v === "entrada" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES)[0] ?? "" })} options={[["entrada", "Receita"], ["saida", "Despesa"]]} />
+              <Sel value={draft.kind} onChange={(v) => set({ kind: v, category: (v === "entrada" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES)[0] ?? "", member_id: "" })} options={[["entrada", "Receita"], ["saida", "Despesa"]]} />
             </div>
-            <div className="space-y-1.5"><Label>Categoria</Label><Sel value={draft.category} onChange={(v) => set({ category: v })} options={cats.map((c) => [c, c])} /></div>
+            <div className="space-y-1.5"><Label>Categoria</Label><Sel value={draft.category} onChange={(v) => set({ category: v, member_id: canLinkMember(draft.kind, v) ? draft.member_id : "" })} options={cats.map((c) => [c, c])} /></div>
             <div className="space-y-1.5"><Label>Valor (R$)</Label><Input type="number" step="0.01" min="0.01" required value={draft.amount} onChange={(e) => set({ amount: e.target.value })} /></div>
             <div className="space-y-1.5"><Label>Data</Label><Input type="date" required value={draft.occurred_on} onChange={(e) => set({ occurred_on: e.target.value })} /></div>
             <div className="space-y-1.5"><Label>Responsável</Label><Input value={draft.responsible} onChange={(e) => set({ responsible: e.target.value })} /></div>
             <div className="space-y-1.5"><Label>Método de pagamento</Label><Sel value={draft.payment_method} onChange={(v) => set({ payment_method: v })} options={PAYMENT_METHODS.map((m) => [m, m])} /></div>
           </div>
+          {linkable && (
+            <div className="space-y-1.5">
+              <Label>Membro (opcional)</Label>
+              <Sel
+                value={draft.member_id || NO_MEMBER}
+                onChange={(v) => set({ member_id: v === NO_MEMBER ? "" : v })}
+                placeholder={members.isLoading ? "Carregando..." : "Selecione o membro"}
+                options={[[NO_MEMBER, `Sem membro (${draft.category === "Ofertas" ? "oferta anônima" : "dízimo anônimo"})`], ...(members.data ?? []).map((m): [string, string] => [m.id, m.full_name])]}
+              />
+              <p className="text-xs text-muted-foreground">O lançamento aparece no histórico do membro, no perfil dele.</p>
+            </div>
+          )}
           <div className="space-y-1.5"><Label>Descrição</Label><Input value={draft.description} onChange={(e) => set({ description: e.target.value })} /></div>
           <div className="space-y-1.5"><Label>Observação</Label><Textarea rows={2} value={draft.notes} onChange={(e) => set({ notes: e.target.value })} /></div>
           <div className="flex items-center gap-3">

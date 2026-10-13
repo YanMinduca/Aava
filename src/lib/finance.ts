@@ -1,6 +1,7 @@
 import type { Tables } from "@/integrations/supabase/types";
 
 export type Tx = Tables<"financial_transactions">;
+export type TxWithMember = Tx & { members?: { id: string; full_name: string } | null };
 export type Goal = Tables<"financial_goals">;
 
 export const sum = (l: Tx[]) => l.reduce((s, t) => s + Number(t.amount), 0);
@@ -13,7 +14,7 @@ export function byCategory(l: Tx[]) {
   return Object.entries(m).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
 }
 
-export function inPeriod(l: Tx[], year: number, month?: number | null) {
+export function inPeriod<T extends Tx>(l: T[], year: number, month?: number | null): T[] {
   const p = month ? `${year}-${String(month).padStart(2, "0")}` : `${year}`;
   return l.filter((t) => t.occurred_on.startsWith(p));
 }
@@ -45,7 +46,7 @@ export function downloadCsv(name: string, rows: (string | number | null | undefi
   a.click();
 }
 
-export const txCsvRows = (l: Tx[]) => [
-  ["Data", "Tipo", "Categoria", "Descrição", "Responsável", "Método", "Observação", "Valor"],
-  ...l.map((t) => [t.occurred_on.split("-").reverse().join("/"), t.kind === "entrada" ? "Receita" : "Despesa", t.category, t.description, t.responsible, t.payment_method, t.notes, String(t.amount).replace(".", ",")]),
+export const txCsvRows = (l: TxWithMember[]) => [
+  ["Data", "Tipo", "Categoria", "Membro", "Descrição", "Responsável", "Método", "Observação", "Valor"],
+  ...l.map((t) => [t.occurred_on.split("-").reverse().join("/"), t.kind === "entrada" ? "Receita" : "Despesa", t.category, t.members?.full_name ?? "", t.description, t.responsible, t.payment_method, t.notes, String(t.amount).replace(".", ",")]),
 ];
