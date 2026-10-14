@@ -28,7 +28,7 @@ export const PERMISSION_GROUPS: { label: string; perms: { key: string; label: st
       { key: "create_financial_goal", label: "Criar metas" },
       { key: "edit_financial_goal", label: "Editar metas" },
       { key: "view_financial_reports", label: "Ver relatórios e indicadores" },
-      { key: "export_financial_reports", label: "Exportar relatórios (PDF/CSV)" },
+      { key: "export_financial_reports", label: "Exportar relatórios (PDF/XLS)" },
     ],
   },
   {
@@ -36,10 +36,27 @@ export const PERMISSION_GROUPS: { label: string; perms: { key: string; label: st
     perms: [{ key: "view_prayer_requests", label: "Ver pedidos de oração" }],
   },
   {
+    label: "Departamentos",
+    perms: [
+      { key: "view_departments", label: "Ver todos os departamentos e seus voluntários" },
+      { key: "manage_departments", label: "Criar departamentos, definir líderes e vincular membros" },
+    ],
+  },
+  {
     label: "Configurações",
     perms: [{ key: "manage_permissions", label: "Ver usuários e permissões" }],
   },
 ];
+
+/** Permissões que um cargo concede dentro do departamento ao qual a pessoa está vinculada. */
+export const DEPT_PERMISSIONS: { key: string; label: string }[] = [
+  { key: "dept_view", label: "Ver o departamento e seus voluntários" },
+  { key: "dept_manage_members", label: "Adicionar e remover voluntários" },
+  { key: "dept_report", label: "Gerar relatório do departamento" },
+];
+
+/** O líder do departamento recebe automaticamente estas permissões no próprio departamento. */
+export const LEADER_DEPT_PERMISSIONS = ["dept_view", "dept_manage_members", "dept_report"];
 
 export const ROLE_LABELS: Record<string, string> = {
   ceo: "CEO / Super Admin",

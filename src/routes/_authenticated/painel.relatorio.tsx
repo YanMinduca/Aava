@@ -5,7 +5,8 @@ import { ArrowLeft, Download, Printer } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAccess } from "@/hooks/use-access";
 import { CHURCH, MONTHS, brl, dateBR } from "@/lib/church";
-import { byCategory, downloadCsv, expenses, goalProgress, inPeriod, incomes, sum, txCsvRows } from "@/lib/finance";
+import { byCategory, expenses, goalProgress, inPeriod, incomes, sum, txRows } from "@/lib/finance";
+import { downloadXls } from "@/lib/export";
 import { Button } from "@/components/ui/button";
 
 type Tipo = "mensal" | "anual" | "receitas" | "despesas" | "completo";
@@ -50,7 +51,7 @@ function ReportPage() {
       <div className="mb-6 flex flex-wrap items-center justify-between gap-2 print:hidden">
         <Link to="/painel/financeiro" className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"><ArrowLeft className="h-4 w-4" /> Voltar</Link>
         <div className="flex gap-2">
-          <Button variant="outline" onClick={() => downloadCsv(`${tipo}-${ano}${tipo === "mensal" ? "-" + mes : ""}.csv`, txCsvRows(list))}><Download className="h-4 w-4" /> CSV</Button>
+          <Button variant="outline" onClick={() => downloadXls(`${tipo}-${ano}${tipo === "mensal" ? "-" + mes : ""}`, txRows(list), "Lançamentos")}><Download className="h-4 w-4" /> XLS</Button>
           <Button onClick={() => window.print()}><Printer className="h-4 w-4" /> Imprimir / Salvar PDF</Button>
         </div>
       </div>

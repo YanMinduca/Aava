@@ -1,11 +1,14 @@
 import { useEffect, useState } from "react";
-import { Camera, User } from "lucide-react";
+import { Camera, ChevronDown, User } from "lucide-react";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 import type { TablesInsert } from "@/integrations/supabase/types";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { MARITAL, MEMBER_STATUS, ageFrom, formatCep, formatCpf } from "@/lib/church";
@@ -14,7 +17,7 @@ export type MemberDraft = TablesInsert<"members"> & { id?: string };
 
 export const emptyMember: MemberDraft = {
   full_name: "", email: "", phone: "", birth_date: null, address: "", cpf: "", rg: "", marital_status: null,
-  joined_on: null, affiliated_on: null, baptized: false, baptism_date: null, ministry: "", department: "", church_role: "",
+  affiliated_on: null, baptized: false, baptism_date: null, church_role: "",
   status: "membro", photo_path: null,
   neighborhood: "", city: "", zip_code: "", baptism_church: "",
 };
@@ -36,6 +39,40 @@ export function MemberAvatar({ path, size = "h-10 w-10" }: { path?: string | nul
     <div className={`${size} flex shrink-0 items-center justify-center rounded-full bg-primary-soft text-primary`}>
       <User className="h-1/2 w-1/2" />
     </div>
+  );
+}
+
+export type DepartmentOption = { id: string; name: string };
+
+/** Menu de opções (seleção múltipla) com os departamentos cadastrados na página Departamentos. */
+function DepartmentPicker({ options, value, onChange }: { options: DepartmentOption[]; value: string[]; onChange: (ids: string[]) => void }) {
+  const names = options.filter((o) => value.includes(o.id)).map((o) => o.name);
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button type="button" variant="outline" className="w-full justify-between font-normal">
+          <span className="truncate">{names.length ? names.join(", ") : "Selecione os departamentos"}</span>
+          <ChevronDown className="h-4 w-4 shrink-0 opacity-60" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-[var(--radix-popover-trigger-width)] p-2">
+        {options.length === 0 ? (
+          <p className="p-2 text-sm text-muted-foreground">Nenhum departamento cadastrado. Crie em Departamentos, no menu lateral.</p>
+        ) : (
+          <div className="max-h-60 space-y-1 overflow-y-auto">
+            {options.map((o) => (
+              <label key={o.id} className="flex cursor-pointer items-center gap-3 rounded-md px-2 py-2 text-sm hover:bg-accent">
+                <Checkbox
+                  checked={value.includes(o.id)}
+                  onCheckedChange={(on) => onChange(on ? [...value, o.id] : value.filter((id) => id !== o.id))}
+                />
+                {o.name}
+              </label>
+            ))}
+          </div>
+        )}
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -64,6 +101,9 @@ export function MemberForm({
   photoFolder,
   notes,
   onNotesChange,
+  departments,
+  departmentIds,
+  onDepartmentIdsChange,
 }: {
   value: MemberDraft;
   onChange: (v: MemberDraft) => void;
@@ -71,6 +111,10 @@ export function MemberForm({
   photoFolder: string;
   notes?: string;
   onNotesChange?: (v: string) => void;
+  /** Opções de departamento. Só é passado para quem pode vincular membros a departamentos. */
+  departments?: DepartmentOption[];
+  departmentIds?: string[];
+  onDepartmentIdsChange?: (ids: string[]) => void;
 }) {
   const set = (patch: Partial<MemberDraft>) => onChange({ ...value, ...patch });
   const age = ageFrom(value.birth_date);
@@ -159,7 +203,6 @@ export function MemberForm({
       </Section>
 
       <Section title="Dados da igreja">
-        <F label="Data de entrada na igreja"><Input {...dt("joined_on")} /></F>
         {mode === "admin" && <F label="Data de filiação"><Input {...dt("affiliated_on")} /></F>}
         <div className="flex items-center gap-3 pt-6">
           <Switch checked={!!value.baptized} onCheckedChange={(v) => set({ baptized: v, baptism_date: v ? (value.baptism_date ?? null) : null, baptism_church: v ? (value.baptism_church ?? "") : "" })} />
@@ -173,8 +216,11 @@ export function MemberForm({
         )}
         {mode === "admin" && (
           <>
-            <F label="Ministério"><Input {...txt("ministry")} /></F>
-            <F label="Departamento"><Input {...txt("department")} /></F>
+            {departments && onDepartmentIdsChange && (
+              <F label="Departamento">
+                <DepartmentPicker options={departments} value={departmentIds ?? []} onChange={onDepartmentIdsChange} />
+              </F>
+            )}
             <F label="Cargo"><Input {...txt("church_role")} /></F>
             <F label="Status">
               <Select value={value.status ?? "membro"} onValueChange={(v) => set({ status: v })}>

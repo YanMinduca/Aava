@@ -16,6 +16,9 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { MemberForm, MemberAvatar, emptyMember, type MemberDraft } from "@/components/members/MemberForm";
 import { APPROVAL_LABELS, MEMBER_STATUS, ageFrom, dateBR } from "@/lib/church";
+import { downloadXls } from "@/lib/export";
+import { syncMemberDepartments } from "@/lib/departments";
+import { useDepartments, useMemberDepartments } from "@/hooks/use-departments";
 
 export const Route = createFileRoute("/_authenticated/painel/membros")({
   head: () => siteMeta("Membros — Comunidade Aava", "Cadastros, aprovação e convites da Comunidade Aava."),
@@ -29,6 +32,11 @@ function MembersPage() {
   const [statusFilter, setStatusFilter] = useState("todos");
   const [editing, setEditing] = useState<MemberDraft | null>(null);
   const [notes, setNotes] = useState("");
+  const [deptIds, setDeptIds] = useState<string[]>([]);
+  const canLinkDepartments = can("manage_departments");
+  const departments = useDepartments();
+  const memberDepts = useMemberDepartments(can("view_members") || can("view_departments"));
+  const deptNames = (id: string) => (memberDepts.data?.get(id) ?? []).map((d) => d.name);
 
   const { data = [], isLoading } = useQuery({
     queryKey: ["members"],
@@ -42,6 +50,7 @@ function MembersPage() {
   async function openEdit(m: MemberDraft) {
     setEditing(m);
     setNotes("");
+    setDeptIds(m.id ? (memberDepts.data?.get(m.id) ?? []).map((d) => d.id) : []);
     if (m.id && can("view_member_notes")) {
       const { data } = await supabase.from("member_notes").select("notes").eq("member_id", m.id).maybeSingle();
       setNotes(data?.notes ?? "");
@@ -64,11 +73,14 @@ function MembersPage() {
       if (memberId && can("view_member_notes")) {
         await supabase.from("member_notes").upsert({ member_id: memberId, notes });
       }
+      if (memberId && canLinkDepartments) await syncMemberDepartments(memberId, deptIds);
     },
     onSuccess: () => {
       toast.success("Cadastro salvo");
       setEditing(null);
       qc.invalidateQueries({ queryKey: ["members"] });
+      qc.invalidateQueries({ queryKey: ["member-departments"] });
+      qc.invalidateQueries({ queryKey: ["departments"] });
     },
     onError: (e) => toast.error(e.message),
   });
@@ -104,14 +116,10 @@ function MembersPage() {
       (m.full_name.toLowerCase().includes(search.toLowerCase()) || (m.cpf ?? "").includes(search)),
   );
 
-  function exportCsv() {
-    const head = ["Nome", "Nascimento", "Idade", "CPF", "RG", "Telefone", "E-mail", "Endereço", "Bairro", "Cidade", "CEP", "Estado civil", "Entrada", "Filiação", "Batizado", "Data batismo", "Igreja do batismo", "Ministério", "Departamento", "Cargo", "Status"];
-    const rows = filtered.map((m) => [m.full_name, dateBR(m.birth_date), ageFrom(m.birth_date) ?? "", m.cpf, m.rg, m.phone, m.email, m.address, m.neighborhood, m.city, m.zip_code, m.marital_status, dateBR(m.joined_on), dateBR(m.affiliated_on), m.baptized ? "Sim" : "Não", dateBR(m.baptism_date), m.baptism_church, m.ministry, m.department, m.church_role, MEMBER_STATUS[m.status] ?? m.status]);
-    const csv = [head, ...rows].map((r) => r.map((c) => String(c ?? "").replace(/[;\n]/g, " ")).join(";")).join("\n");
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" }));
-    a.download = "membros.csv";
-    a.click();
+  function exportXls() {
+    const head = ["Nome", "Nascimento", "Idade", "CPF", "RG", "Telefone", "E-mail", "Endereço", "Bairro", "Cidade", "CEP", "Estado civil", "Filiação", "Batizado", "Data batismo", "Igreja do batismo", "Departamento", "Cargo", "Status"];
+    const rows = filtered.map((m) => [m.full_name, dateBR(m.birth_date), ageFrom(m.birth_date) ?? "", m.cpf, m.rg, m.phone, m.email, m.address, m.neighborhood, m.city, m.zip_code, m.marital_status, dateBR(m.affiliated_on), m.baptized ? "Sim" : "Não", dateBR(m.baptism_date), m.baptism_church, deptNames(m.id).join(", "), m.church_role, MEMBER_STATUS[m.status] ?? m.status]);
+    downloadXls("membros", [head, ...rows], "Membros");
   }
 
   return (
@@ -119,7 +127,7 @@ function MembersPage() {
       <div className="flex flex-wrap items-center justify-between gap-4">
         <h1 className="text-3xl text-foreground">Membros</h1>
         <div className="flex gap-2">
-          <Button variant="outline" onClick={exportCsv}><Download className="h-4 w-4" /> CSV</Button>
+          <Button variant="outline" onClick={exportXls}><Download className="h-4 w-4" /> XLS</Button>
           {can("create_member") && (
             <Button onClick={() => openEdit({ ...emptyMember })}><Plus className="h-4 w-4" /> Novo membro</Button>
           )}
@@ -175,7 +183,7 @@ function MembersPage() {
                         </div>
                       </td>
                       <td className="p-4 text-muted-foreground">{m.phone}<br />{m.email}</td>
-                      <td className="p-4 text-muted-foreground">{[m.ministry, m.department, m.church_role].filter(Boolean).join(" · ") || "—"}</td>
+                      <td className="p-4 text-muted-foreground">{[deptNames(m.id).join(", "), m.church_role].filter(Boolean).join(" · ") || "—"}</td>
                       <td className="p-4">
                         <Badge variant={m.status === "membro_ativo" ? "default" : "secondary"}>{MEMBER_STATUS[m.status] ?? m.status}</Badge>
                         {m.approval_status === "recusado" && <p className="mt-1 text-xs text-destructive">Recusado</p>}
@@ -253,6 +261,13 @@ function MembersPage() {
                 onChange={setEditing}
                 photoFolder={editing.user_id ?? "admin"}
                 {...(can("view_member_notes") ? { notes, onNotesChange: setNotes } : {})}
+                {...(canLinkDepartments
+                  ? {
+                      departments: (departments.data ?? []).map((d) => ({ id: d.id, name: d.name })),
+                      departmentIds: deptIds,
+                      onDepartmentIdsChange: setDeptIds,
+                    }
+                  : {})}
               />
               <Button type="submit" className="w-full" disabled={save.isPending}>Salvar cadastro</Button>
             </form>

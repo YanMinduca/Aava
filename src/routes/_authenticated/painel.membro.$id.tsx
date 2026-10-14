@@ -18,6 +18,8 @@ import {
 import { MemberAvatar, MemberForm, type MemberDraft } from "@/components/members/MemberForm";
 import { APPROVAL_LABELS, MEMBER_STATUS, ageFrom, brl, dateBR } from "@/lib/church";
 import { siteMeta } from "@/lib/site-query";
+import { syncMemberDepartments } from "@/lib/departments";
+import { useDepartments, useMemberDepartments } from "@/hooks/use-departments";
 
 export const Route = createFileRoute("/_authenticated/painel/membro/$id")({
   head: () =>
@@ -49,6 +51,10 @@ function MemberProfile() {
   const qc = useQueryClient();
   const [editing, setEditing] = useState<MemberDraft | null>(null);
   const [year, setYear] = useState("todos");
+  const [deptIds, setDeptIds] = useState<string[]>([]);
+  const canLinkDepartments = can("manage_departments");
+  const departments = useDepartments();
+  const memberDepts = useMemberDepartments(can("view_members") || can("view_departments"));
 
   const member = useQuery({
     queryKey: ["member", id],
@@ -97,12 +103,15 @@ function MemberProfile() {
         .update({ ...rest, notes: null })
         .eq("id", id);
       if (error) throw error;
+      if (canLinkDepartments) await syncMemberDepartments(id, deptIds);
     },
     onSuccess: () => {
       toast.success("Cadastro salvo");
       setEditing(null);
       qc.invalidateQueries({ queryKey: ["member", id] });
       qc.invalidateQueries({ queryKey: ["members"] });
+      qc.invalidateQueries({ queryKey: ["member-departments"] });
+      qc.invalidateQueries({ queryKey: ["departments"] });
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -171,7 +180,10 @@ function MemberProfile() {
           </div>
         </div>
         {can("edit_member") && (
-          <Button variant="outline" onClick={() => setEditing({ ...m })}>
+          <Button variant="outline" onClick={() => {
+              setDeptIds((memberDepts.data?.get(m.id) ?? []).map((d) => d.id));
+              setEditing({ ...m });
+            }}>
             <Pencil className="h-4 w-4" /> Editar cadastro
           </Button>
         )}
@@ -195,14 +207,12 @@ function MemberProfile() {
         </Block>
 
         <Block title="Vida na igreja">
-          <Field label="Entrada na igreja">{dateBR(m.joined_on)}</Field>
           <Field label="Filiação">{dateBR(m.affiliated_on)}</Field>
           <Field label="Batizado">
             {m.baptized ? `Sim${m.baptism_date ? `, em ${dateBR(m.baptism_date)}` : ""}` : "Não"}
           </Field>
           <Field label="Igreja onde se batizou">{m.baptized ? m.baptism_church : ""}</Field>
-          <Field label="Ministério">{m.ministry}</Field>
-          <Field label="Departamento">{m.department}</Field>
+          <Field label="Departamento">{(memberDepts.data?.get(m.id) ?? []).map((d) => d.name).join(", ")}</Field>
           <Field label="Cargo">{m.church_role}</Field>
         </Block>
 
@@ -339,6 +349,13 @@ function MemberProfile() {
                 value={editing}
                 onChange={setEditing}
                 photoFolder={editing.user_id ?? "admin"}
+                {...(canLinkDepartments
+                  ? {
+                      departments: (departments.data ?? []).map((d) => ({ id: d.id, name: d.name })),
+                      departmentIds: deptIds,
+                      onDepartmentIdsChange: setDeptIds,
+                    }
+                  : {})}
               />
               <Button type="submit" className="w-full" disabled={save.isPending}>
                 Salvar cadastro
