@@ -161,7 +161,7 @@ function MembersPage() {
                 <tr>
                   <th className="p-4 font-medium">Nome</th>
                   <th className="p-4 font-medium">Contato</th>
-                  <th className="p-4 font-medium">Igreja</th>
+                  <th className="p-4 font-medium">Outros</th>
                   <th className="p-4 font-medium">Status</th>
                   <th className="p-4" />
                 </tr>

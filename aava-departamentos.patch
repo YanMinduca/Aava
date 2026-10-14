@@ -1,0 +1,2118 @@
+From c0f4e62c59a05483737d615643dd56f530438f1d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 22:19:22 +0000
+Subject: [PATCH] =?UTF-8?q?Departamentos,=20cargos=20com=20permiss=C3=B5es?=
+ =?UTF-8?q?=20por=20departamento=20e=20exporta=C3=A7=C3=A3o=20XLS?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Exportações CSV trocadas por XLS (biblioteca xlsx)
+- Cadastro de membros: remove data de entrada e ministério; departamento vira menu de opções
+- Nova página Departamentos no menu lateral: criar departamentos, adicionar voluntários,
+  definir líder, relatório (XLS/impressão) e aba Cargos (criação e permissões)
+- Migration 0007: departments, church_roles, department_members, RLS e RPCs
+---
+ .../0007_departments_and_church_roles.sql     | 193 +++++++++
+ drizzle/migrations/meta/_journal.json         |   7 +
+ package-lock.json                             | 106 ++++-
+ package.json                                  |   1 +
+ roadmap.md                                    |   4 +-
+ src/components/members/MemberForm.tsx         |  56 ++-
+ src/hooks/use-departments.ts                  |  83 ++++
+ src/integrations/supabase/types.ts            | 159 ++++++++
+ src/lib/church.ts                             |  19 +-
+ src/lib/departments.ts                        |  29 ++
+ src/lib/export.ts                             |  31 ++
+ src/lib/finance.ts                            |  14 +-
+ src/routeTree.gen.ts                          |  45 +++
+ .../painel.departamento.$id.tsx               | 382 ++++++++++++++++++
+ .../_authenticated/painel.departamentos.tsx   | 248 ++++++++++++
+ .../_authenticated/painel.financeiro.tsx      |   7 +-
+ .../_authenticated/painel.membro.$id.tsx      |  25 +-
+ src/routes/_authenticated/painel.membros.tsx  |  35 +-
+ .../_authenticated/painel.meu-cadastro.tsx    |   2 +-
+ .../_authenticated/painel.relatorio.tsx       |   5 +-
+ src/routes/_authenticated/painel.tsx          |   4 +
+ 21 files changed, 1416 insertions(+), 39 deletions(-)
+ create mode 100644 drizzle/migrations/0007_departments_and_church_roles.sql
+ create mode 100644 src/hooks/use-departments.ts
+ create mode 100644 src/lib/departments.ts
+ create mode 100644 src/lib/export.ts
+ create mode 100644 src/routes/_authenticated/painel.departamento.$id.tsx
+ create mode 100644 src/routes/_authenticated/painel.departamentos.tsx
+
+diff --git a/drizzle/migrations/0007_departments_and_church_roles.sql b/drizzle/migrations/0007_departments_and_church_roles.sql
+new file mode 100644
+index 0000000..6a21802
+--- /dev/null
++++ b/drizzle/migrations/0007_departments_and_church_roles.sql
+@@ -0,0 +1,193 @@
++-- Departamentos, cargos (criáveis) e permissões por departamento. Pode rodar mais de uma vez.
++
++-- 1) Permissões globais novas ficam em user_permissions (view_departments, manage_departments).
++--    Permissões POR DEPARTAMENTO ficam no cargo: dept_view, dept_manage_members, dept_report.
++
++create table if not exists public.departments (
++  id uuid primary key default gen_random_uuid(),
++  name text not null,
++  description text,
++  leader_member_id uuid references public.members(id) on delete set null,
++  created_by uuid,
++  created_at timestamptz not null default now()
++);
++create unique index if not exists departments_name_key on public.departments (lower(name));
++
++create table if not exists public.church_roles (
++  id uuid primary key default gen_random_uuid(),
++  code text unique,
++  name text not null,
++  description text,
++  permissions text[] not null default '{}',
++  is_system boolean not null default false,
++  created_at timestamptz not null default now()
++);
++create unique index if not exists church_roles_name_key on public.church_roles (lower(name));
++
++create table if not exists public.department_members (
++  department_id uuid not null references public.departments(id) on delete cascade,
++  member_id uuid not null references public.members(id) on delete cascade,
++  church_role_id uuid references public.church_roles(id) on delete set null,
++  joined_at timestamptz not null default now(),
++  primary key (department_id, member_id)
++);
++create index if not exists department_members_member_idx on public.department_members (member_id);
++
++insert into public.church_roles (code, name, description, permissions, is_system) values
++  ('volunteer', 'Voluntário', 'Participa do departamento.', array['dept_view']::text[], true),
++  ('leader', 'Líder', 'Lidera o departamento: gerencia voluntários e gera relatórios.', array['dept_view','dept_manage_members','dept_report']::text[], true)
++on conflict (code) do nothing;
++
++-- 2) Funções de permissão
++create or replace function public.is_church_leadership(_user_id uuid)
++returns boolean language sql stable security definer set search_path = public as $$
++  select public.has_role(_user_id, 'ceo') or public.has_role(_user_id, 'pastor_presidente');
++$$;
++
++create or replace function public.has_dept_permission(_user_id uuid, _dept uuid, _perm text)
++returns boolean language sql stable security definer set search_path = public as $$
++  select _user_id is not null and (
++    public.is_church_leadership(_user_id)
++    or public.has_permission(_user_id, 'manage_departments')
++    or exists (
++      select 1 from public.department_members dm
++      join public.members m on m.id = dm.member_id
++      join public.church_roles r on r.id = dm.church_role_id
++      where m.user_id = _user_id and dm.department_id = _dept and _perm = any (r.permissions)
++    )
++    or exists (
++      select 1 from public.departments d
++      join public.members m on m.id = d.leader_member_id
++      where m.user_id = _user_id and d.id = _dept
++        and _perm in ('dept_view', 'dept_manage_members', 'dept_report')
++    )
++  );
++$$;
++
++create or replace function public.can_view_department(_user_id uuid, _dept uuid)
++returns boolean language sql stable security definer set search_path = public as $$
++  select public.has_permission(_user_id, 'view_departments')
++      or public.has_dept_permission(_user_id, _dept, 'dept_view');
++$$;
++
++-- 3) RLS
++alter table public.departments enable row level security;
++alter table public.church_roles enable row level security;
++alter table public.department_members enable row level security;
++
++drop policy if exists "departments read" on public.departments;
++create policy "departments read" on public.departments for select to authenticated
++  using (public.can_view_department(auth.uid(), id));
++drop policy if exists "departments insert" on public.departments;
++create policy "departments insert" on public.departments for insert to authenticated
++  with check (public.has_permission(auth.uid(), 'manage_departments'));
++drop policy if exists "departments update" on public.departments;
++create policy "departments update" on public.departments for update to authenticated
++  using (public.has_permission(auth.uid(), 'manage_departments'))
++  with check (public.has_permission(auth.uid(), 'manage_departments'));
++drop policy if exists "departments delete" on public.departments;
++create policy "departments delete" on public.departments for delete to authenticated
++  using (public.has_permission(auth.uid(), 'manage_departments'));
++
++drop policy if exists "church_roles read" on public.church_roles;
++create policy "church_roles read" on public.church_roles for select to authenticated using (true);
++drop policy if exists "church_roles leadership insert" on public.church_roles;
++create policy "church_roles leadership insert" on public.church_roles for insert to authenticated
++  with check (public.is_church_leadership(auth.uid()));
++drop policy if exists "church_roles leadership update" on public.church_roles;
++create policy "church_roles leadership update" on public.church_roles for update to authenticated
++  using (public.is_church_leadership(auth.uid())) with check (public.is_church_leadership(auth.uid()));
++drop policy if exists "church_roles leadership delete" on public.church_roles;
++create policy "church_roles leadership delete" on public.church_roles for delete to authenticated
++  using (public.is_church_leadership(auth.uid()) and not is_system);
++
++drop policy if exists "department_members read" on public.department_members;
++create policy "department_members read" on public.department_members for select to authenticated
++  using (public.can_view_department(auth.uid(), department_id));
++drop policy if exists "department_members insert" on public.department_members;
++create policy "department_members insert" on public.department_members for insert to authenticated
++  with check (public.has_dept_permission(auth.uid(), department_id, 'dept_manage_members'));
++drop policy if exists "department_members update" on public.department_members;
++create policy "department_members update" on public.department_members for update to authenticated
++  using (public.has_dept_permission(auth.uid(), department_id, 'dept_manage_members'))
++  with check (public.has_dept_permission(auth.uid(), department_id, 'dept_manage_members'));
++drop policy if exists "department_members delete" on public.department_members;
++create policy "department_members delete" on public.department_members for delete to authenticated
++  using (public.has_dept_permission(auth.uid(), department_id, 'dept_manage_members'));
++
++revoke all on public.departments, public.church_roles, public.department_members from anon;
++grant select, insert, update, delete on public.departments, public.church_roles, public.department_members to authenticated;
++
++-- 4) Se o líder sai do departamento, o campo de líder é limpo
++create or replace function public.department_members_clear_leader()
++returns trigger language plpgsql security definer set search_path = public as $$
++begin
++  update public.departments set leader_member_id = null
++   where id = old.department_id and leader_member_id = old.member_id;
++  return old;
++end $$;
++drop trigger if exists department_members_clear_leader on public.department_members;
++create trigger department_members_clear_leader after delete on public.department_members
++  for each row execute function public.department_members_clear_leader();
++revoke all on function public.department_members_clear_leader() from public, anon, authenticated;
++
++-- 5) RPCs: expõem só o necessário (sem CPF/RG/endereço) para líderes sem acesso à lista de membros
++create or replace function public.department_overview()
++returns table (id uuid, name text, description text, leader_member_id uuid, leader_name text, member_count bigint, created_at timestamptz)
++language sql stable security definer set search_path = public as $$
++  select d.id, d.name, d.description, d.leader_member_id, lm.full_name,
++         (select count(*) from public.department_members dm where dm.department_id = d.id), d.created_at
++  from public.departments d
++  left join public.members lm on lm.id = d.leader_member_id
++  where public.can_view_department(auth.uid(), d.id)
++     or exists (select 1 from public.department_members dm join public.members m on m.id = dm.member_id
++                where dm.department_id = d.id and m.user_id = auth.uid())
++  order by d.name;
++$$;
++
++create or replace function public.department_roster(_dept uuid)
++returns table (member_id uuid, full_name text, phone text, email text, photo_path text, status text,
++               church_role_id uuid, role_name text, joined_at timestamptz, is_leader boolean)
++language plpgsql stable security definer set search_path = public as $$
++begin
++  if not public.can_view_department(auth.uid(), _dept) then raise exception 'Acesso negado'; end if;
++  return query
++    select m.id, m.full_name, m.phone, m.email, m.photo_path, m.status,
++           dm.church_role_id, r.name, dm.joined_at, (d.leader_member_id = m.id)
++    from public.department_members dm
++    join public.members m on m.id = dm.member_id
++    join public.departments d on d.id = dm.department_id
++    left join public.church_roles r on r.id = dm.church_role_id
++    where dm.department_id = _dept
++    order by (d.leader_member_id = m.id) desc, m.full_name;
++end $$;
++
++create or replace function public.department_candidates(_dept uuid)
++returns table (id uuid, full_name text)
++language plpgsql stable security definer set search_path = public as $$
++begin
++  if not public.has_dept_permission(auth.uid(), _dept, 'dept_manage_members') then raise exception 'Acesso negado'; end if;
++  return query
++    select m.id, m.full_name from public.members m
++    where m.approval_status = 'aprovado'
++      and not exists (select 1 from public.department_members dm where dm.department_id = _dept and dm.member_id = m.id)
++    order by m.full_name;
++end $$;
++
++create or replace function public.member_departments()
++returns table (member_id uuid, department_id uuid, department_name text)
++language plpgsql stable security definer set search_path = public as $$
++begin
++  if not (public.has_permission(auth.uid(), 'view_members') or public.has_permission(auth.uid(), 'view_departments')) then
++    raise exception 'Acesso negado';
++  end if;
++  return query
++    select dm.member_id, d.id, d.name from public.department_members dm
++    join public.departments d on d.id = dm.department_id
++    order by d.name;
++end $$;
++
++revoke all on function public.department_overview(), public.department_roster(uuid), public.department_candidates(uuid), public.member_departments() from public, anon;
++grant execute on function public.department_overview(), public.department_roster(uuid), public.department_candidates(uuid), public.member_departments() to authenticated;
++revoke all on function public.has_dept_permission(uuid, uuid, text), public.can_view_department(uuid, uuid), public.is_church_leadership(uuid) from public, anon;
++grant execute on function public.has_dept_permission(uuid, uuid, text), public.can_view_department(uuid, uuid), public.is_church_leadership(uuid) to authenticated;
+diff --git a/drizzle/migrations/meta/_journal.json b/drizzle/migrations/meta/_journal.json
+index 78759ca..7e37567 100644
+--- a/drizzle/migrations/meta/_journal.json
++++ b/drizzle/migrations/meta/_journal.json
+@@ -50,6 +50,13 @@
+       "when": 1791546000000,
+       "tag": "0006_member_address_and_tithes",
+       "breakpoints": true
++    },
++    {
++      "idx": 7,
++      "version": "7",
++      "when": 1791632400000,
++      "tag": "0007_departments_and_church_roles",
++      "breakpoints": true
+     }
+   ]
+ }
+diff --git a/package-lock.json b/package-lock.json
+index ae2e331..57a8e71 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -60,6 +60,7 @@
+         "tw-animate-css": "^1.3.4",
+         "vaul": "^1.1.2",
+         "vite-tsconfig-paths": "^6.0.2",
++        "xlsx": "^0.18.5",
+         "zod": "^3.25.76"
+       },
+       "devDependencies": {
+@@ -5765,6 +5766,15 @@
+         "node": ">=0.4.0"
+       }
+     },
++    "node_modules/adler-32": {
++      "version": "1.3.1",
++      "resolved": "https://registry.npmjs.org/adler-32/-/adler-32-1.3.1.tgz",
++      "integrity": "sha512-ynZ4w/nUUv5rrsR8UUGoe1VC9hZj6V5hU9Qw1HlMDJGEJw5S7TfTErWTjMys6M7vr0YWcPqs3qAr4ss0nDfP+A==",
++      "license": "Apache-2.0",
++      "engines": {
++        "node": ">=0.8"
++      }
++    },
+     "node_modules/agent-base": {
+       "version": "6.0.2",
+       "resolved": "https://registry.npmjs.org/agent-base/-/agent-base-6.0.2.tgz",
+@@ -6003,6 +6013,19 @@
+         "url": "https://github.com/sponsors/wooorm"
+       }
+     },
++    "node_modules/cfb": {
++      "version": "1.2.2",
++      "resolved": "https://registry.npmjs.org/cfb/-/cfb-1.2.2.tgz",
++      "integrity": "sha512-KfdUZsSOw19/ObEWasvBP/Ac4reZvAGauZhs6S/gqNhXhI7cKwvlH7ulj+dOEYnca4bm4SGo8C1bTAQvnTjgQA==",
++      "license": "Apache-2.0",
++      "dependencies": {
++        "adler-32": "~1.3.0",
++        "crc-32": "~1.2.0"
++      },
++      "engines": {
++        "node": ">=0.8"
++      }
++    },
+     "node_modules/chai": {
+       "version": "6.3.0",
+       "resolved": "https://registry.npmjs.org/chai/-/chai-6.3.0.tgz",
+@@ -6118,6 +6141,15 @@
+         "react-dom": "^18 || ^19 || ^19.0.0-rc"
+       }
+     },
++    "node_modules/codepage": {
++      "version": "1.15.0",
++      "resolved": "https://registry.npmjs.org/codepage/-/codepage-1.15.0.tgz",
++      "integrity": "sha512-3g6NUTPd/YtuuGrhMnOMRjFc+LJw/bnMp3+0r/Wcz3IXUuCosKRJvMphm5+Q+bvTVGcJJuRvVLuYba+WojaFaA==",
++      "license": "Apache-2.0",
++      "engines": {
++        "node": ">=0.8"
++      }
++    },
+     "node_modules/color-convert": {
+       "version": "2.0.1",
+       "resolved": "https://registry.npmjs.org/color-convert/-/color-convert-2.0.1.tgz",
+@@ -6190,6 +6222,18 @@
+       "integrity": "sha512-UaXxwISYJPTr9hwQxMFYZ7kNhSXboMXP+Z3TRX6f1/NyaGPfuNUZOWP1pUEb75B2HjfklIYLVRfWiFZJyC6Npg==",
+       "license": "MIT"
+     },
++    "node_modules/crc-32": {
++      "version": "1.2.2",
++      "resolved": "https://registry.npmjs.org/crc-32/-/crc-32-1.2.2.tgz",
++      "integrity": "sha512-ROmzCKrTnOwybPcJApAA6WBWij23HVfGVNKqqrZpuyZOHqK2CwHSvpGuyt/UNNvaIjEd8X5IFGp4Mh+Ie1IHJQ==",
++      "license": "Apache-2.0",
++      "bin": {
++        "crc32": "bin/crc32.njs"
++      },
++      "engines": {
++        "node": ">=0.8"
++      }
++    },
+     "node_modules/cross-spawn": {
+       "version": "7.0.6",
+       "resolved": "https://registry.npmjs.org/cross-spawn/-/cross-spawn-7.0.6.tgz",
+@@ -7827,7 +7871,7 @@
+       "version": "3.1.3",
+       "resolved": "https://registry.npmjs.org/fast-deep-equal/-/fast-deep-equal-3.1.3.tgz",
+       "integrity": "sha512-f3qQ9oQy9j2AhBe/H9VC91wLmKBCCU/gDOnKNAYG5hswO7BLKj09Hc5HYNz9cGI++xlpDCIgDaitVs03ATR84Q==",
+-      "devOptional": true,
++      "dev": true,
+       "license": "MIT"
+     },
+     "node_modules/fast-diff": {
+@@ -7951,6 +7995,15 @@
+         "node": ">= 6"
+       }
+     },
++    "node_modules/frac": {
++      "version": "1.1.2",
++      "resolved": "https://registry.npmjs.org/frac/-/frac-1.1.2.tgz",
++      "integrity": "sha512-w/XBfkibaTl3YDqASwfDUqkna4Z2p9cFSr1aHDt0WoMTECnRfBOv2WArlZILlqgWlmdIlALXGpM2AOhEk5W3IA==",
++      "license": "Apache-2.0",
++      "engines": {
++        "node": ">=0.8"
++      }
++    },
+     "node_modules/fsevents": {
+       "version": "2.3.3",
+       "resolved": "https://registry.npmjs.org/fsevents/-/fsevents-2.3.3.tgz",
+@@ -10830,6 +10883,18 @@
+         "node": ">=20.16.0"
+       }
+     },
++    "node_modules/ssf": {
++      "version": "0.11.2",
++      "resolved": "https://registry.npmjs.org/ssf/-/ssf-0.11.2.tgz",
++      "integrity": "sha512-+idbmIXoYET47hH+d7dfm2epdOMUDjqcB4648sTZ+t2JwoyBFL/insLfB/racrDmsKB3diwsDA696pZMieAC5g==",
++      "license": "Apache-2.0",
++      "dependencies": {
++        "frac": "~1.1.2"
++      },
++      "engines": {
++        "node": ">=0.8"
++      }
++    },
+     "node_modules/stackback": {
+       "version": "0.0.2",
+       "resolved": "https://registry.npmjs.org/stackback/-/stackback-0.0.2.tgz",
+@@ -11835,6 +11900,24 @@
+         "node": ">=8"
+       }
+     },
++    "node_modules/wmf": {
++      "version": "1.0.2",
++      "resolved": "https://registry.npmjs.org/wmf/-/wmf-1.0.2.tgz",
++      "integrity": "sha512-/p9K7bEh0Dj6WbXg4JG0xvLQmIadrner1bi45VMJTfnbVHsc7yIajZyoSoK60/dtVBs12Fm6WkUI5/3WAVsNMw==",
++      "license": "Apache-2.0",
++      "engines": {
++        "node": ">=0.8"
++      }
++    },
++    "node_modules/word": {
++      "version": "0.3.0",
++      "resolved": "https://registry.npmjs.org/word/-/word-0.3.0.tgz",
++      "integrity": "sha512-OELeY0Q61OXpdUfTp+oweA/vtLVg5VDOXh+3he3PNzLGG/y0oylSOC1xRVj0+l4vQ3tj/bB1HVHv1ocXkQceFA==",
++      "license": "Apache-2.0",
++      "engines": {
++        "node": ">=0.8"
++      }
++    },
+     "node_modules/word-wrap": {
+       "version": "1.2.5",
+       "resolved": "https://registry.npmjs.org/word-wrap/-/word-wrap-1.2.5.tgz",
+@@ -11867,6 +11950,27 @@
+         }
+       }
+     },
++    "node_modules/xlsx": {
++      "version": "0.18.5",
++      "resolved": "https://registry.npmjs.org/xlsx/-/xlsx-0.18.5.tgz",
++      "integrity": "sha512-dmg3LCjBPHZnQp5/F/+nnTa+miPJxUXB6vtk42YjBBKayDNagxGEeIdWApkYPOf3Z3pm3k62Knjzp7lMeTEtFQ==",
++      "license": "Apache-2.0",
++      "dependencies": {
++        "adler-32": "~1.3.0",
++        "cfb": "~1.2.1",
++        "codepage": "~1.15.0",
++        "crc-32": "~1.2.1",
++        "ssf": "~0.11.2",
++        "wmf": "~1.0.1",
++        "word": "~0.3.0"
++      },
++      "bin": {
++        "xlsx": "bin/xlsx.njs"
++      },
++      "engines": {
++        "node": ">=0.8"
++      }
++    },
+     "node_modules/xml-name-validator": {
+       "version": "4.0.0",
+       "resolved": "https://registry.npmjs.org/xml-name-validator/-/xml-name-validator-4.0.0.tgz",
+diff --git a/package.json b/package.json
+index d21b9cf..76aa424 100644
+--- a/package.json
++++ b/package.json
+@@ -71,6 +71,7 @@
+     "tw-animate-css": "^1.3.4",
+     "vaul": "^1.1.2",
+     "vite-tsconfig-paths": "^6.0.2",
++    "xlsx": "^0.18.5",
+     "zod": "^3.25.76"
+   },
+   "devDependencies": {
+diff --git a/roadmap.md b/roadmap.md
+index 379bab2..1df9eed 100644
+--- a/roadmap.md
++++ b/roadmap.md
+@@ -4,4 +4,6 @@
+ - [ ] Contribution page with editable Pix and methods
+ - [ ] Public content editor, homepage photos and Instagram video
+ - [ ] White, blue and black homepage redesign
+-- [ ] Verify permissions, tests and pages
+\ No newline at end of file
++- [ ] Verify permissions, tests and pages- [x] Exportações em XLS (membros, financeiro e relatórios)
++- [x] Cadastro de membros: só data de filiação e departamento em menu de opções
++- [x] Página Departamentos: voluntários, líder, relatório e cargos com permissões por departamento
+diff --git a/src/components/members/MemberForm.tsx b/src/components/members/MemberForm.tsx
+index 7e0995d..31ad92c 100644
+--- a/src/components/members/MemberForm.tsx
++++ b/src/components/members/MemberForm.tsx
+@@ -1,11 +1,14 @@
+ import { useEffect, useState } from "react";
+-import { Camera, User } from "lucide-react";
++import { Camera, ChevronDown, User } from "lucide-react";
+ import { toast } from "sonner";
+ import { supabase } from "@/integrations/supabase/client";
+ import type { TablesInsert } from "@/integrations/supabase/types";
+ import { Input } from "@/components/ui/input";
+ import { Label } from "@/components/ui/label";
+ import { Switch } from "@/components/ui/switch";
++import { Button } from "@/components/ui/button";
++import { Checkbox } from "@/components/ui/checkbox";
++import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+ import { Textarea } from "@/components/ui/textarea";
+ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+ import { MARITAL, MEMBER_STATUS, ageFrom, formatCep, formatCpf } from "@/lib/church";
+@@ -14,7 +17,7 @@ export type MemberDraft = TablesInsert<"members"> & { id?: string };
+ 
+ export const emptyMember: MemberDraft = {
+   full_name: "", email: "", phone: "", birth_date: null, address: "", cpf: "", rg: "", marital_status: null,
+-  joined_on: null, affiliated_on: null, baptized: false, baptism_date: null, ministry: "", department: "", church_role: "",
++  affiliated_on: null, baptized: false, baptism_date: null, church_role: "",
+   status: "membro", photo_path: null,
+   neighborhood: "", city: "", zip_code: "", baptism_church: "",
+ };
+@@ -39,6 +42,40 @@ export function MemberAvatar({ path, size = "h-10 w-10" }: { path?: string | nul
+   );
+ }
+ 
++export type DepartmentOption = { id: string; name: string };
++
++/** Menu de opções (seleção múltipla) com os departamentos cadastrados na página Departamentos. */
++function DepartmentPicker({ options, value, onChange }: { options: DepartmentOption[]; value: string[]; onChange: (ids: string[]) => void }) {
++  const names = options.filter((o) => value.includes(o.id)).map((o) => o.name);
++  return (
++    <Popover>
++      <PopoverTrigger asChild>
++        <Button type="button" variant="outline" className="w-full justify-between font-normal">
++          <span className="truncate">{names.length ? names.join(", ") : "Selecione os departamentos"}</span>
++          <ChevronDown className="h-4 w-4 shrink-0 opacity-60" />
++        </Button>
++      </PopoverTrigger>
++      <PopoverContent align="start" className="w-[var(--radix-popover-trigger-width)] p-2">
++        {options.length === 0 ? (
++          <p className="p-2 text-sm text-muted-foreground">Nenhum departamento cadastrado. Crie em Departamentos, no menu lateral.</p>
++        ) : (
++          <div className="max-h-60 space-y-1 overflow-y-auto">
++            {options.map((o) => (
++              <label key={o.id} className="flex cursor-pointer items-center gap-3 rounded-md px-2 py-2 text-sm hover:bg-accent">
++                <Checkbox
++                  checked={value.includes(o.id)}
++                  onCheckedChange={(on) => onChange(on ? [...value, o.id] : value.filter((id) => id !== o.id))}
++                />
++                {o.name}
++              </label>
++            ))}
++          </div>
++        )}
++      </PopoverContent>
++    </Popover>
++  );
++}
++
+ function Section({ title, children }: { title: string; children: React.ReactNode }) {
+   return (
+     <fieldset className="rounded-2xl border p-5">
+@@ -64,6 +101,9 @@ export function MemberForm({
+   photoFolder,
+   notes,
+   onNotesChange,
++  departments,
++  departmentIds,
++  onDepartmentIdsChange,
+ }: {
+   value: MemberDraft;
+   onChange: (v: MemberDraft) => void;
+@@ -71,6 +111,10 @@ export function MemberForm({
+   photoFolder: string;
+   notes?: string;
+   onNotesChange?: (v: string) => void;
++  /** Opções de departamento. Só é passado para quem pode vincular membros a departamentos. */
++  departments?: DepartmentOption[];
++  departmentIds?: string[];
++  onDepartmentIdsChange?: (ids: string[]) => void;
+ }) {
+   const set = (patch: Partial<MemberDraft>) => onChange({ ...value, ...patch });
+   const age = ageFrom(value.birth_date);
+@@ -159,7 +203,6 @@ export function MemberForm({
+       </Section>
+ 
+       <Section title="Dados da igreja">
+-        <F label="Data de entrada na igreja"><Input {...dt("joined_on")} /></F>
+         {mode === "admin" && <F label="Data de filiação"><Input {...dt("affiliated_on")} /></F>}
+         <div className="flex items-center gap-3 pt-6">
+           <Switch checked={!!value.baptized} onCheckedChange={(v) => set({ baptized: v, baptism_date: v ? (value.baptism_date ?? null) : null, baptism_church: v ? (value.baptism_church ?? "") : "" })} />
+@@ -173,8 +216,11 @@ export function MemberForm({
+         )}
+         {mode === "admin" && (
+           <>
+-            <F label="Ministério"><Input {...txt("ministry")} /></F>
+-            <F label="Departamento"><Input {...txt("department")} /></F>
++            {departments && onDepartmentIdsChange && (
++              <F label="Departamento">
++                <DepartmentPicker options={departments} value={departmentIds ?? []} onChange={onDepartmentIdsChange} />
++              </F>
++            )}
+             <F label="Cargo"><Input {...txt("church_role")} /></F>
+             <F label="Status">
+               <Select value={value.status ?? "membro"} onValueChange={(v) => set({ status: v })}>
+diff --git a/src/hooks/use-departments.ts b/src/hooks/use-departments.ts
+new file mode 100644
+index 0000000..c7244aa
+--- /dev/null
++++ b/src/hooks/use-departments.ts
+@@ -0,0 +1,83 @@
++import { useQuery } from "@tanstack/react-query";
++import { supabase } from "@/integrations/supabase/client";
++import { useAccess } from "@/hooks/use-access";
++import { LEADER_DEPT_PERMISSIONS } from "@/lib/church";
++
++/** Departamentos visíveis para o usuário (com líder e total de voluntários). */
++export function useDepartments() {
++  return useQuery({
++    queryKey: ["departments"],
++    queryFn: async () => {
++      const { data, error } = await supabase.rpc("department_overview");
++      if (error) throw error;
++      return data ?? [];
++    },
++  });
++}
++
++/** Cargos criados (Voluntário, Líder, ...). */
++export function useChurchRoles() {
++  return useQuery({
++    queryKey: ["church-roles"],
++    queryFn: async () => {
++      const { data, error } = await supabase.from("church_roles").select("*").order("name");
++      if (error) throw error;
++      return data ?? [];
++    },
++  });
++}
++
++/** Departamentos de cada membro: Map<member_id, {id, name}[]>. Só para quem vê membros/departamentos. */
++export function useMemberDepartments(enabled = true) {
++  return useQuery({
++    queryKey: ["member-departments"],
++    enabled,
++    queryFn: async () => {
++      const { data, error } = await supabase.rpc("member_departments");
++      if (error) throw error;
++      const map = new Map<string, { id: string; name: string }[]>();
++      for (const r of data ?? []) {
++        const list = map.get(r.member_id) ?? [];
++        list.push({ id: r.department_id, name: r.department_name });
++        map.set(r.member_id, list);
++      }
++      return map;
++    },
++  });
++}
++
++/**
++ * Permissões por departamento no navegador (só para esconder botões).
++ * Quem de fato autoriza é o banco (RLS + funções), então isto nunca é a barreira de segurança.
++ */
++export function useDeptAccess() {
++  const { can, isFullAccess, data: access } = useAccess();
++  const uid = access?.uid;
++  const departments = useDepartments();
++  const mine = useQuery({
++    queryKey: ["my-dept-roles", uid],
++    enabled: !!uid,
++    queryFn: async () => {
++      const { data: m } = await supabase.from("members").select("id").eq("user_id", uid!).maybeSingle();
++      if (!m) return { memberId: null as string | null, rows: [] as { department_id: string; permissions: string[] }[] };
++      const { data } = await supabase
++        .from("department_members")
++        .select("department_id, church_roles(permissions)")
++        .eq("member_id", m.id);
++      return {
++        memberId: m.id as string | null,
++        rows: (data ?? []).map((r) => ({ department_id: r.department_id, permissions: r.church_roles?.permissions ?? [] })),
++      };
++    },
++  });
++
++  const manageAll = isFullAccess || can("manage_departments");
++  const canIn = (deptId: string, perm: string) => {
++    if (manageAll) return true;
++    const dept = departments.data?.find((d) => d.id === deptId);
++    if (dept?.leader_member_id && dept.leader_member_id === mine.data?.memberId && LEADER_DEPT_PERMISSIONS.includes(perm)) return true;
++    return (mine.data?.rows ?? []).some((r) => r.department_id === deptId && r.permissions.includes(perm));
++  };
++  const canViewPage = manageAll || can("view_departments") || (departments.data?.length ?? 0) > 0;
++  return { canIn, manageAll, canViewPage, isLoading: departments.isLoading || mine.isLoading };
++}
+diff --git a/src/integrations/supabase/types.ts b/src/integrations/supabase/types.ts
+index 449d0b6..1492ab3 100644
+--- a/src/integrations/supabase/types.ts
++++ b/src/integrations/supabase/types.ts
+@@ -14,6 +14,114 @@ export type Database = {
+   }
+   public: {
+     Tables: {
++      church_roles: {
++        Row: {
++          code: string | null
++          created_at: string
++          description: string | null
++          id: string
++          is_system: boolean
++          name: string
++          permissions: string[]
++        }
++        Insert: {
++          code?: string | null
++          created_at?: string
++          description?: string | null
++          id?: string
++          is_system?: boolean
++          name: string
++          permissions?: string[]
++        }
++        Update: {
++          code?: string | null
++          created_at?: string
++          description?: string | null
++          id?: string
++          is_system?: boolean
++          name?: string
++          permissions?: string[]
++        }
++        Relationships: []
++      }
++      department_members: {
++        Row: {
++          church_role_id: string | null
++          department_id: string
++          joined_at: string
++          member_id: string
++        }
++        Insert: {
++          church_role_id?: string | null
++          department_id: string
++          joined_at?: string
++          member_id: string
++        }
++        Update: {
++          church_role_id?: string | null
++          department_id?: string
++          joined_at?: string
++          member_id?: string
++        }
++        Relationships: [
++          {
++            foreignKeyName: "department_members_church_role_id_fkey"
++            columns: ["church_role_id"]
++            isOneToOne: false
++            referencedRelation: "church_roles"
++            referencedColumns: ["id"]
++          },
++          {
++            foreignKeyName: "department_members_department_id_fkey"
++            columns: ["department_id"]
++            isOneToOne: false
++            referencedRelation: "departments"
++            referencedColumns: ["id"]
++          },
++          {
++            foreignKeyName: "department_members_member_id_fkey"
++            columns: ["member_id"]
++            isOneToOne: false
++            referencedRelation: "members"
++            referencedColumns: ["id"]
++          },
++        ]
++      }
++      departments: {
++        Row: {
++          created_at: string
++          created_by: string | null
++          description: string | null
++          id: string
++          leader_member_id: string | null
++          name: string
++        }
++        Insert: {
++          created_at?: string
++          created_by?: string | null
++          description?: string | null
++          id?: string
++          leader_member_id?: string | null
++          name: string
++        }
++        Update: {
++          created_at?: string
++          created_by?: string | null
++          description?: string | null
++          id?: string
++          leader_member_id?: string | null
++          name?: string
++        }
++        Relationships: [
++          {
++            foreignKeyName: "departments_leader_member_id_fkey"
++            columns: ["leader_member_id"]
++            isOneToOne: false
++            referencedRelation: "members"
++            referencedColumns: ["id"]
++          },
++        ]
++      }
+       financial_goals: {
+         Row: {
+           category: string | null
+@@ -414,7 +522,49 @@ export type Database = {
+         }
+         Returns: undefined
+       }
++      can_view_department: {
++        Args: { _dept: string; _user_id: string }
++        Returns: boolean
++      }
+       check_invite: { Args: { _code: string }; Returns: boolean }
++      department_candidates: {
++        Args: { _dept: string }
++        Returns: {
++          full_name: string
++          id: string
++        }[]
++      }
++      department_overview: {
++        Args: never
++        Returns: {
++          created_at: string
++          description: string | null
++          id: string
++          leader_member_id: string | null
++          leader_name: string | null
++          member_count: number
++          name: string
++        }[]
++      }
++      department_roster: {
++        Args: { _dept: string }
++        Returns: {
++          church_role_id: string | null
++          email: string | null
++          full_name: string
++          is_leader: boolean
++          joined_at: string
++          member_id: string
++          phone: string | null
++          photo_path: string | null
++          role_name: string | null
++          status: string
++        }[]
++      }
++      has_dept_permission: {
++        Args: { _dept: string; _perm: string; _user_id: string }
++        Returns: boolean
++      }
+       has_permission: {
+         Args: { _permission: string; _user_id: string }
+         Returns: boolean
+@@ -426,6 +576,15 @@ export type Database = {
+         }
+         Returns: boolean
+       }
++      is_church_leadership: { Args: { _user_id: string }; Returns: boolean }
++      member_departments: {
++        Args: never
++        Returns: {
++          department_id: string
++          department_name: string
++          member_id: string
++        }[]
++      }
+       use_invite: { Args: { _code: string }; Returns: boolean }
+     }
+     Enums: {
+diff --git a/src/lib/church.ts b/src/lib/church.ts
+index 5c2f07c..ed58f6e 100644
+--- a/src/lib/church.ts
++++ b/src/lib/church.ts
+@@ -28,19 +28,36 @@ export const PERMISSION_GROUPS: { label: string; perms: { key: string; label: st
+       { key: "create_financial_goal", label: "Criar metas" },
+       { key: "edit_financial_goal", label: "Editar metas" },
+       { key: "view_financial_reports", label: "Ver relatórios e indicadores" },
+-      { key: "export_financial_reports", label: "Exportar relatórios (PDF/CSV)" },
++      { key: "export_financial_reports", label: "Exportar relatórios (PDF/XLS)" },
+     ],
+   },
+   {
+     label: "Oração",
+     perms: [{ key: "view_prayer_requests", label: "Ver pedidos de oração" }],
+   },
++  {
++    label: "Departamentos",
++    perms: [
++      { key: "view_departments", label: "Ver todos os departamentos e seus voluntários" },
++      { key: "manage_departments", label: "Criar departamentos, definir líderes e vincular membros" },
++    ],
++  },
+   {
+     label: "Configurações",
+     perms: [{ key: "manage_permissions", label: "Ver usuários e permissões" }],
+   },
+ ];
+ 
++/** Permissões que um cargo concede dentro do departamento ao qual a pessoa está vinculada. */
++export const DEPT_PERMISSIONS: { key: string; label: string }[] = [
++  { key: "dept_view", label: "Ver o departamento e seus voluntários" },
++  { key: "dept_manage_members", label: "Adicionar e remover voluntários" },
++  { key: "dept_report", label: "Gerar relatório do departamento" },
++];
++
++/** O líder do departamento recebe automaticamente estas permissões no próprio departamento. */
++export const LEADER_DEPT_PERMISSIONS = ["dept_view", "dept_manage_members", "dept_report"];
++
+ export const ROLE_LABELS: Record<string, string> = {
+   ceo: "CEO / Super Admin",
+   pastor_presidente: "Pastor Presidente",
+diff --git a/src/lib/departments.ts b/src/lib/departments.ts
+new file mode 100644
+index 0000000..e9d1027
+--- /dev/null
++++ b/src/lib/departments.ts
+@@ -0,0 +1,29 @@
++import { supabase } from "@/integrations/supabase/client";
++
++/** Deixa o membro exatamente nos departamentos escolhidos (novos entram como Voluntário). */
++export async function syncMemberDepartments(memberId: string, wanted: string[]) {
++  const { data: current, error } = await supabase
++    .from("department_members")
++    .select("department_id")
++    .eq("member_id", memberId);
++  if (error) throw error;
++  const have = (current ?? []).map((r) => r.department_id);
++  const toAdd = wanted.filter((id) => !have.includes(id));
++  const toRemove = have.filter((id) => !wanted.includes(id));
++
++  if (toAdd.length) {
++    const { data: vol } = await supabase.from("church_roles").select("id").eq("code", "volunteer").maybeSingle();
++    const { error: e } = await supabase
++      .from("department_members")
++      .insert(toAdd.map((department_id) => ({ department_id, member_id: memberId, church_role_id: vol?.id ?? null })));
++    if (e) throw e;
++  }
++  if (toRemove.length) {
++    const { error: e } = await supabase
++      .from("department_members")
++      .delete()
++      .eq("member_id", memberId)
++      .in("department_id", toRemove);
++    if (e) throw e;
++  }
++}
+diff --git a/src/lib/export.ts b/src/lib/export.ts
+new file mode 100644
+index 0000000..223c3b0
+--- /dev/null
++++ b/src/lib/export.ts
+@@ -0,0 +1,31 @@
++import * as XLSX from "xlsx";
++
++export type Cell = string | number | null | undefined;
++export type Sheet = { name: string; rows: Cell[][] };
++
++/** Formato dos arquivos exportados. Troque para "xlsx" se preferir o formato moderno do Excel. */
++const FORMAT: "xls" | "xlsx" = "xls";
++
++function widths(rows: Cell[][]) {
++  const n = Math.max(0, ...rows.map((r) => r.length));
++  return Array.from({ length: n }, (_, c) => ({
++    wch: Math.min(48, Math.max(10, ...rows.map((r) => String(r[c] ?? "").length + 2))),
++  }));
++}
++
++/** Baixa uma planilha Excel com uma ou mais abas. `fileName` vai sem extensão. */
++export function downloadSheets(fileName: string, sheets: Sheet[]) {
++  const wb = XLSX.utils.book_new();
++  for (const s of sheets) {
++    const ws = XLSX.utils.aoa_to_sheet(s.rows.map((r) => r.map((c) => c ?? "")));
++    ws["!cols"] = widths(s.rows);
++    XLSX.utils.book_append_sheet(wb, ws, s.name.replace(/[\\/?*[\]:]/g, " ").slice(0, 31) || "Dados");
++  }
++  XLSX.writeFile(wb, `${fileName.replace(/\.(csv|xlsx?)$/i, "")}.${FORMAT}`, {
++    bookType: FORMAT === "xls" ? "biff8" : "xlsx",
++  });
++}
++
++export function downloadXls(fileName: string, rows: Cell[][], sheetName = "Dados") {
++  downloadSheets(fileName, [{ name: sheetName, rows }]);
++}
+diff --git a/src/lib/finance.ts b/src/lib/finance.ts
+index c91ef4f..0cea2e4 100644
+--- a/src/lib/finance.ts
++++ b/src/lib/finance.ts
+@@ -38,15 +38,7 @@ export function goalProgress(g: Goal, all: Tx[]) {
+   return { raised, target, remaining: Math.max(0, target - raised), pct: Math.min(100, (raised / target) * 100) };
+ }
+ 
+-export function downloadCsv(name: string, rows: (string | number | null | undefined)[][]) {
+-  const csv = rows.map((r) => r.map((c) => String(c ?? "").replace(/[;\n]/g, " ")).join(";")).join("\n");
+-  const a = document.createElement("a");
+-  a.href = URL.createObjectURL(new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" }));
+-  a.download = name;
+-  a.click();
+-}
+-
+-export const txCsvRows = (l: TxWithMember[]) => [
+-  ["Data", "Tipo", "Categoria", "Membro", "Descrição", "Responsável", "Método", "Observação", "Valor"],
+-  ...l.map((t) => [t.occurred_on.split("-").reverse().join("/"), t.kind === "entrada" ? "Receita" : "Despesa", t.category, t.members?.full_name ?? "", t.description, t.responsible, t.payment_method, t.notes, String(t.amount).replace(".", ",")]),
++export const txRows = (l: TxWithMember[]) => [
++  ["Data", "Tipo", "Categoria", "Membro", "Descrição", "Responsável", "Método", "Observação", "Valor (R$)"],
++  ...l.map((t) => [t.occurred_on.split("-").reverse().join("/"), t.kind === "entrada" ? "Receita" : "Despesa", t.category, t.members?.full_name ?? "", t.description, t.responsible, t.payment_method, t.notes, Number(t.amount)]),
+ ];
+diff --git a/src/routeTree.gen.ts b/src/routeTree.gen.ts
+index 9bade6f..7e03e06 100644
+--- a/src/routeTree.gen.ts
++++ b/src/routeTree.gen.ts
+@@ -20,6 +20,7 @@ import { Route as QuemSomosRouteImport } from './routes/quem-somos'
+ import { Route as AuthenticatedPainelRouteImport } from './routes/_authenticated/painel'
+ import { Route as ConviteCodeRouteImport } from './routes/convite.$code'
+ import { Route as AuthenticatedPainelIndexRouteImport } from './routes/_authenticated/painel.index'
++import { Route as AuthenticatedPainelDepartamentosRouteImport } from './routes/_authenticated/painel.departamentos'
+ import { Route as AuthenticatedPainelFinanceiroRouteImport } from './routes/_authenticated/painel.financeiro'
+ import { Route as AuthenticatedPainelMembrosRouteImport } from './routes/_authenticated/painel.membros'
+ import { Route as AuthenticatedPainelMeuCadastroRouteImport } from './routes/_authenticated/painel.meu-cadastro'
+@@ -27,6 +28,7 @@ import { Route as AuthenticatedPainelOracaoRouteImport } from './routes/_authent
+ import { Route as AuthenticatedPainelPermissoesRouteImport } from './routes/_authenticated/painel.permissoes'
+ import { Route as AuthenticatedPainelRelatorioRouteImport } from './routes/_authenticated/painel.relatorio'
+ import { Route as AuthenticatedPainelSiteRouteImport } from './routes/_authenticated/painel.site'
++import { Route as AuthenticatedPainelDepartamentoIdRouteImport } from './routes/_authenticated/painel.departamento.$id'
+ import { Route as AuthenticatedPainelMembroIdRouteImport } from './routes/_authenticated/painel.membro.$id'
+ 
+ const IndexRoute = IndexRouteImport.update({
+@@ -84,6 +86,12 @@ const AuthenticatedPainelIndexRoute =
+     path: '/',
+     getParentRoute: () => AuthenticatedPainelRoute,
+   } as any)
++const AuthenticatedPainelDepartamentosRoute =
++  AuthenticatedPainelDepartamentosRouteImport.update({
++    id: '/departamentos',
++    path: '/departamentos',
++    getParentRoute: () => AuthenticatedPainelRoute,
++  } as any)
+ const AuthenticatedPainelFinanceiroRoute =
+   AuthenticatedPainelFinanceiroRouteImport.update({
+     id: '/financeiro',
+@@ -125,6 +133,12 @@ const AuthenticatedPainelSiteRoute = AuthenticatedPainelSiteRouteImport.update({
+   path: '/site',
+   getParentRoute: () => AuthenticatedPainelRoute,
+ } as any)
++const AuthenticatedPainelDepartamentoIdRoute =
++  AuthenticatedPainelDepartamentoIdRouteImport.update({
++    id: '/departamento/$id',
++    path: '/departamento/$id',
++    getParentRoute: () => AuthenticatedPainelRoute,
++  } as any)
+ const AuthenticatedPainelMembroIdRoute =
+   AuthenticatedPainelMembroIdRouteImport.update({
+     id: '/membro/$id',
+@@ -142,6 +156,7 @@ export interface FileRoutesByFullPath {
+   '/quem-somos': typeof QuemSomosRoute
+   '/painel': typeof AuthenticatedPainelRouteWithChildren
+   '/convite/$code': typeof ConviteCodeRoute
++  '/painel/departamentos': typeof AuthenticatedPainelDepartamentosRoute
+   '/painel/financeiro': typeof AuthenticatedPainelFinanceiroRoute
+   '/painel/membros': typeof AuthenticatedPainelMembrosRoute
+   '/painel/meu-cadastro': typeof AuthenticatedPainelMeuCadastroRoute
+@@ -150,6 +165,7 @@ export interface FileRoutesByFullPath {
+   '/painel/relatorio': typeof AuthenticatedPainelRelatorioRoute
+   '/painel/site': typeof AuthenticatedPainelSiteRoute
+   '/painel/': typeof AuthenticatedPainelIndexRoute
++  '/painel/departamento/$id': typeof AuthenticatedPainelDepartamentoIdRoute
+   '/painel/membro/$id': typeof AuthenticatedPainelMembroIdRoute
+ }
+ export interface FileRoutesByTo {
+@@ -161,6 +177,7 @@ export interface FileRoutesByTo {
+   '/oracao': typeof OracaoRoute
+   '/quem-somos': typeof QuemSomosRoute
+   '/convite/$code': typeof ConviteCodeRoute
++  '/painel/departamentos': typeof AuthenticatedPainelDepartamentosRoute
+   '/painel/financeiro': typeof AuthenticatedPainelFinanceiroRoute
+   '/painel/membros': typeof AuthenticatedPainelMembrosRoute
+   '/painel/meu-cadastro': typeof AuthenticatedPainelMeuCadastroRoute
+@@ -169,6 +186,7 @@ export interface FileRoutesByTo {
+   '/painel/relatorio': typeof AuthenticatedPainelRelatorioRoute
+   '/painel/site': typeof AuthenticatedPainelSiteRoute
+   '/painel': typeof AuthenticatedPainelIndexRoute
++  '/painel/departamento/$id': typeof AuthenticatedPainelDepartamentoIdRoute
+   '/painel/membro/$id': typeof AuthenticatedPainelMembroIdRoute
+ }
+ export interface FileRoutesById {
+@@ -183,6 +201,7 @@ export interface FileRoutesById {
+   '/quem-somos': typeof QuemSomosRoute
+   '/_authenticated/painel': typeof AuthenticatedPainelRouteWithChildren
+   '/convite/$code': typeof ConviteCodeRoute
++  '/_authenticated/painel/departamentos': typeof AuthenticatedPainelDepartamentosRoute
+   '/_authenticated/painel/financeiro': typeof AuthenticatedPainelFinanceiroRoute
+   '/_authenticated/painel/membros': typeof AuthenticatedPainelMembrosRoute
+   '/_authenticated/painel/meu-cadastro': typeof AuthenticatedPainelMeuCadastroRoute
+@@ -191,6 +210,7 @@ export interface FileRoutesById {
+   '/_authenticated/painel/relatorio': typeof AuthenticatedPainelRelatorioRoute
+   '/_authenticated/painel/site': typeof AuthenticatedPainelSiteRoute
+   '/_authenticated/painel/': typeof AuthenticatedPainelIndexRoute
++  '/_authenticated/painel/departamento/$id': typeof AuthenticatedPainelDepartamentoIdRoute
+   '/_authenticated/painel/membro/$id': typeof AuthenticatedPainelMembroIdRoute
+ }
+ export interface FileRouteTypes {
+@@ -205,6 +225,7 @@ export interface FileRouteTypes {
+     | '/quem-somos'
+     | '/painel'
+     | '/convite/$code'
++    | '/painel/departamentos'
+     | '/painel/financeiro'
+     | '/painel/membros'
+     | '/painel/meu-cadastro'
+@@ -213,6 +234,7 @@ export interface FileRouteTypes {
+     | '/painel/relatorio'
+     | '/painel/site'
+     | '/painel/'
++    | '/painel/departamento/$id'
+     | '/painel/membro/$id'
+   fileRoutesByTo: FileRoutesByTo
+   to:
+@@ -224,6 +246,7 @@ export interface FileRouteTypes {
+     | '/oracao'
+     | '/quem-somos'
+     | '/convite/$code'
++    | '/painel/departamentos'
+     | '/painel/financeiro'
+     | '/painel/membros'
+     | '/painel/meu-cadastro'
+@@ -232,6 +255,7 @@ export interface FileRouteTypes {
+     | '/painel/relatorio'
+     | '/painel/site'
+     | '/painel'
++    | '/painel/departamento/$id'
+     | '/painel/membro/$id'
+   id:
+     | '__root__'
+@@ -245,6 +269,7 @@ export interface FileRouteTypes {
+     | '/quem-somos'
+     | '/_authenticated/painel'
+     | '/convite/$code'
++    | '/_authenticated/painel/departamentos'
+     | '/_authenticated/painel/financeiro'
+     | '/_authenticated/painel/membros'
+     | '/_authenticated/painel/meu-cadastro'
+@@ -253,6 +278,7 @@ export interface FileRouteTypes {
+     | '/_authenticated/painel/relatorio'
+     | '/_authenticated/painel/site'
+     | '/_authenticated/painel/'
++    | '/_authenticated/painel/departamento/$id'
+     | '/_authenticated/painel/membro/$id'
+   fileRoutesById: FileRoutesById
+ }
+@@ -347,6 +373,13 @@ declare module '@tanstack/react-router' {
+       preLoaderRoute: typeof AuthenticatedPainelIndexRouteImport
+       parentRoute: typeof AuthenticatedPainelRoute
+     }
++    '/_authenticated/painel/departamentos': {
++      id: '/_authenticated/painel/departamentos'
++      path: '/departamentos'
++      fullPath: '/painel/departamentos'
++      preLoaderRoute: typeof AuthenticatedPainelDepartamentosRouteImport
++      parentRoute: typeof AuthenticatedPainelRoute
++    }
+     '/_authenticated/painel/financeiro': {
+       id: '/_authenticated/painel/financeiro'
+       path: '/financeiro'
+@@ -396,6 +429,13 @@ declare module '@tanstack/react-router' {
+       preLoaderRoute: typeof AuthenticatedPainelSiteRouteImport
+       parentRoute: typeof AuthenticatedPainelRoute
+     }
++    '/_authenticated/painel/departamento/$id': {
++      id: '/_authenticated/painel/departamento/$id'
++      path: '/departamento/$id'
++      fullPath: '/painel/departamento/$id'
++      preLoaderRoute: typeof AuthenticatedPainelDepartamentoIdRouteImport
++      parentRoute: typeof AuthenticatedPainelRoute
++    }
+     '/_authenticated/painel/membro/$id': {
+       id: '/_authenticated/painel/membro/$id'
+       path: '/membro/$id'
+@@ -407,6 +447,7 @@ declare module '@tanstack/react-router' {
+ }
+ 
+ interface AuthenticatedPainelRouteChildren {
++  AuthenticatedPainelDepartamentosRoute: typeof AuthenticatedPainelDepartamentosRoute
+   AuthenticatedPainelFinanceiroRoute: typeof AuthenticatedPainelFinanceiroRoute
+   AuthenticatedPainelMembrosRoute: typeof AuthenticatedPainelMembrosRoute
+   AuthenticatedPainelMeuCadastroRoute: typeof AuthenticatedPainelMeuCadastroRoute
+@@ -415,10 +456,12 @@ interface AuthenticatedPainelRouteChildren {
+   AuthenticatedPainelRelatorioRoute: typeof AuthenticatedPainelRelatorioRoute
+   AuthenticatedPainelSiteRoute: typeof AuthenticatedPainelSiteRoute
+   AuthenticatedPainelIndexRoute: typeof AuthenticatedPainelIndexRoute
++  AuthenticatedPainelDepartamentoIdRoute: typeof AuthenticatedPainelDepartamentoIdRoute
+   AuthenticatedPainelMembroIdRoute: typeof AuthenticatedPainelMembroIdRoute
+ }
+ 
+ const AuthenticatedPainelRouteChildren: AuthenticatedPainelRouteChildren = {
++  AuthenticatedPainelDepartamentosRoute: AuthenticatedPainelDepartamentosRoute,
+   AuthenticatedPainelFinanceiroRoute: AuthenticatedPainelFinanceiroRoute,
+   AuthenticatedPainelMembrosRoute: AuthenticatedPainelMembrosRoute,
+   AuthenticatedPainelMeuCadastroRoute: AuthenticatedPainelMeuCadastroRoute,
+@@ -427,6 +470,8 @@ const AuthenticatedPainelRouteChildren: AuthenticatedPainelRouteChildren = {
+   AuthenticatedPainelRelatorioRoute: AuthenticatedPainelRelatorioRoute,
+   AuthenticatedPainelSiteRoute: AuthenticatedPainelSiteRoute,
+   AuthenticatedPainelIndexRoute: AuthenticatedPainelIndexRoute,
++  AuthenticatedPainelDepartamentoIdRoute:
++    AuthenticatedPainelDepartamentoIdRoute,
+   AuthenticatedPainelMembroIdRoute: AuthenticatedPainelMembroIdRoute,
+ }
+ 
+diff --git a/src/routes/_authenticated/painel.departamento.$id.tsx b/src/routes/_authenticated/painel.departamento.$id.tsx
+new file mode 100644
+index 0000000..35a5f4d
+--- /dev/null
++++ b/src/routes/_authenticated/painel.departamento.$id.tsx
+@@ -0,0 +1,382 @@
++import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
++import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
++import { useState } from "react";
++import { toast } from "sonner";
++import { ArrowLeft, Crown, Download, Pencil, Plus, Printer, Trash2, UserMinus } from "lucide-react";
++import { supabase } from "@/integrations/supabase/client";
++import { useChurchRoles, useDeptAccess, useDepartments } from "@/hooks/use-departments";
++import { dateBR, MEMBER_STATUS } from "@/lib/church";
++import { downloadSheets } from "@/lib/export";
++import { siteMeta } from "@/lib/site-query";
++import { MemberAvatar } from "@/components/members/MemberForm";
++import { Button } from "@/components/ui/button";
++import { Input } from "@/components/ui/input";
++import { Label } from "@/components/ui/label";
++import { Textarea } from "@/components/ui/textarea";
++import { Badge } from "@/components/ui/badge";
++import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
++import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
++import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
++
++export const Route = createFileRoute("/_authenticated/painel/departamento/$id")({
++  head: () => siteMeta("Departamento — Comunidade Aava", "Voluntários, liderança e relatório do departamento."),
++  component: DepartmentDetail,
++});
++
++function DepartmentDetail() {
++  const { id } = Route.useParams();
++  const qc = useQueryClient();
++  const navigate = useNavigate();
++  const { canIn, manageAll, isLoading: loadingAccess } = useDeptAccess();
++  const departments = useDepartments();
++  const roles = useChurchRoles();
++  const dept = departments.data?.find((d) => d.id === id);
++
++  const canView = canIn(id, "dept_view");
++  const canManageMembers = canIn(id, "dept_manage_members");
++  const canReport = canIn(id, "dept_report");
++
++  const roster = useQuery({
++    queryKey: ["department-roster", id],
++    enabled: canView,
++    queryFn: async () => {
++      const { data, error } = await supabase.rpc("department_roster", { _dept: id });
++      if (error) throw error;
++      return data ?? [];
++    },
++  });
++
++  const refresh = () => {
++    qc.invalidateQueries({ queryKey: ["department-roster", id] });
++    qc.invalidateQueries({ queryKey: ["departments"] });
++    qc.invalidateQueries({ queryKey: ["member-departments"] });
++    qc.invalidateQueries({ queryKey: ["my-dept-roles"] });
++  };
++
++  const [adding, setAdding] = useState(false);
++  const [candidate, setCandidate] = useState("");
++  const [candidateRole, setCandidateRole] = useState("");
++  const [editing, setEditing] = useState(false);
++  const [form, setForm] = useState({ name: "", description: "" });
++
++  const candidates = useQuery({
++    queryKey: ["department-candidates", id],
++    enabled: adding && canManageMembers,
++    queryFn: async () => {
++      const { data, error } = await supabase.rpc("department_candidates", { _dept: id });
++      if (error) throw error;
++      return data ?? [];
++    },
++  });
++
++  const volunteerRole = roles.data?.find((r) => r.code === "volunteer");
++  const leaderRole = roles.data?.find((r) => r.code === "leader");
++
++  const addMember = useMutation({
++    mutationFn: async () => {
++      const { error } = await supabase
++        .from("department_members")
++        .insert({ department_id: id, member_id: candidate, church_role_id: candidateRole || volunteerRole?.id || null });
++      if (error) throw error;
++    },
++    onSuccess: () => {
++      toast.success("Voluntário adicionado");
++      setAdding(false);
++      setCandidate("");
++      setCandidateRole("");
++      qc.invalidateQueries({ queryKey: ["department-candidates", id] });
++      refresh();
++    },
++    onError: (e: Error) => toast.error(e.message),
++  });
++
++  const changeRole = useMutation({
++    mutationFn: async ({ memberId, roleId }: { memberId: string; roleId: string }) => {
++      const { error } = await supabase
++        .from("department_members")
++        .update({ church_role_id: roleId })
++        .eq("department_id", id)
++        .eq("member_id", memberId);
++      if (error) throw error;
++    },
++    onSuccess: refresh,
++    onError: (e: Error) => toast.error(e.message),
++  });
++
++  const removeMember = useMutation({
++    mutationFn: async (memberId: string) => {
++      const { error } = await supabase.from("department_members").delete().eq("department_id", id).eq("member_id", memberId);
++      if (error) throw error;
++    },
++    onSuccess: () => {
++      toast.success("Voluntário removido do departamento");
++      refresh();
++    },
++    onError: (e: Error) => toast.error(e.message),
++  });
++
++  const setLeader = useMutation({
++    mutationFn: async (memberId: string | null) => {
++      if (memberId) {
++        const { error: e1 } = await supabase
++          .from("department_members")
++          .upsert({ department_id: id, member_id: memberId, church_role_id: leaderRole?.id ?? null }, { onConflict: "department_id,member_id" });
++        if (e1) throw e1;
++      }
++      const { error } = await supabase.from("departments").update({ leader_member_id: memberId }).eq("id", id);
++      if (error) throw error;
++    },
++    onSuccess: () => {
++      toast.success("Liderança atualizada");
++      refresh();
++    },
++    onError: (e: Error) => toast.error(e.message),
++  });
++
++  const saveDept = useMutation({
++    mutationFn: async () => {
++      const { error } = await supabase
++        .from("departments")
++        .update({ name: form.name.trim(), description: form.description.trim() || null })
++        .eq("id", id);
++      if (error) throw new Error(error.code === "23505" ? "Já existe um departamento com esse nome." : error.message);
++    },
++    onSuccess: () => {
++      toast.success("Departamento atualizado");
++      setEditing(false);
++      refresh();
++    },
++    onError: (e: Error) => toast.error(e.message),
++  });
++
++  const deleteDept = useMutation({
++    mutationFn: async () => {
++      const { error } = await supabase.from("departments").delete().eq("id", id);
++      if (error) throw error;
++    },
++    onSuccess: () => {
++      toast.success("Departamento excluído");
++      qc.invalidateQueries({ queryKey: ["departments"] });
++      qc.invalidateQueries({ queryKey: ["member-departments"] });
++      navigate({ to: "/painel/departamentos" });
++    },
++    onError: (e: Error) => toast.error(e.message),
++  });
++
++  if (loadingAccess || departments.isLoading) return null;
++  const back = (
++    <Link to="/painel/departamentos" className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground">
++      <ArrowLeft className="h-4 w-4" /> Voltar para departamentos
++    </Link>
++  );
++  if (!dept) return <div className="space-y-4">{back}<p className="text-muted-foreground">Departamento não encontrado ou sem acesso.</p></div>;
++
++  const rows = roster.data ?? [];
++  const byRole = rows.reduce<Record<string, number>>((acc, r) => {
++    const k = r.role_name ?? "Sem cargo";
++    acc[k] = (acc[k] ?? 0) + 1;
++    return acc;
++  }, {});
++
++  function exportReport() {
++    const today = new Date().toLocaleDateString("pt-BR");
++    downloadSheets(`departamento-${dept!.name.toLowerCase().replace(/[^a-z0-9]+/gi, "-")}`, [
++      {
++        name: "Resumo",
++        rows: [
++          ["Departamento", dept!.name],
++          ["Líder", dept!.leader_name ?? "—"],
++          ["Total de voluntários", rows.length],
++          ["Gerado em", today],
++          [],
++          ["Cargo", "Quantidade"],
++          ...Object.entries(byRole).map(([k, v]) => [k, v]),
++        ],
++      },
++      {
++        name: "Voluntários",
++        rows: [
++          ["Nome", "Cargo", "Líder", "Telefone", "E-mail", "Status", "No departamento desde"],
++          ...rows.map((r) => [r.full_name, r.role_name ?? "", r.is_leader ? "Sim" : "", r.phone, r.email, MEMBER_STATUS[r.status] ?? r.status, dateBR(r.joined_at)]),
++        ],
++      },
++    ]);
++  }
++
++  return (
++    <div>
++      <div className="print:hidden">{back}</div>
++      <div className="mt-4 flex flex-wrap items-start justify-between gap-4">
++        <div>
++          <h1 className="text-3xl text-foreground">{dept.name}</h1>
++          {dept.description && <p className="mt-1 max-w-2xl text-sm text-muted-foreground">{dept.description}</p>}
++          <p className="mt-3 inline-flex items-center gap-2 text-sm text-foreground">
++            <Crown className="h-4 w-4 text-primary" /> Líder: {dept.leader_name ?? "não definido"}
++          </p>
++        </div>
++        {manageAll && (
++          <div className="flex gap-2 print:hidden">
++            <Button variant="outline" onClick={() => { setForm({ name: dept.name, description: dept.description ?? "" }); setEditing(true); }}><Pencil className="h-4 w-4" /> Editar</Button>
++            <Button variant="outline" onClick={() => confirm(`Excluir o departamento ${dept.name}? Os vínculos dos voluntários com ele serão removidos.`) && deleteDept.mutate()}><Trash2 className="h-4 w-4" /> Excluir</Button>
++          </div>
++        )}
++      </div>
++
++      {!canView ? (
++        <p className="mt-8 text-muted-foreground">Você faz parte deste departamento, mas ainda não tem permissão para ver os voluntários. Peça ao Pastor Presidente ou ao CEO para liberar o acesso.</p>
++      ) : (
++        <Tabs defaultValue="voluntarios" className="mt-6">
++          <TabsList className="print:hidden">
++            <TabsTrigger value="voluntarios">Voluntários ({rows.length})</TabsTrigger>
++            {canReport && <TabsTrigger value="relatorio">Relatório</TabsTrigger>}
++          </TabsList>
++
++          <TabsContent value="voluntarios">
++            <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
++              {manageAll ? (
++                <div className="flex items-center gap-2">
++                  <Label className="text-sm">Líder do departamento</Label>
++                  <Select value={dept.leader_member_id ?? ""} onValueChange={(v) => setLeader.mutate(v || null)}>
++                    <SelectTrigger className="w-56"><SelectValue placeholder="Escolher líder" /></SelectTrigger>
++                    <SelectContent>
++                      {rows.map((r) => <SelectItem key={r.member_id} value={r.member_id}>{r.full_name}</SelectItem>)}
++                    </SelectContent>
++                  </Select>
++                  {dept.leader_member_id && <Button size="sm" variant="ghost" onClick={() => setLeader.mutate(null)}>Remover líder</Button>}
++                </div>
++              ) : <span />}
++              {canManageMembers && <Button onClick={() => setAdding(true)}><Plus className="h-4 w-4" /> Adicionar voluntário</Button>}
++            </div>
++            {manageAll && rows.length === 0 && <p className="mt-2 text-xs text-muted-foreground">Adicione voluntários primeiro; o líder é escolhido entre eles.</p>}
++
++            <div className="mt-4 overflow-x-auto rounded-2xl border bg-card">
++              <table className="w-full text-sm">
++                <thead className="border-b text-left text-muted-foreground">
++                  <tr>
++                    <th className="p-4 font-medium">Nome</th>
++                    <th className="p-4 font-medium">Contato</th>
++                    <th className="p-4 font-medium">Cargo</th>
++                    <th className="p-4" />
++                  </tr>
++                </thead>
++                <tbody>
++                  {roster.isLoading && <tr><td className="p-4 text-muted-foreground" colSpan={4}>Carregando...</td></tr>}
++                  {!roster.isLoading && rows.length === 0 && <tr><td className="p-6 text-center text-muted-foreground" colSpan={4}>Nenhum voluntário neste departamento.</td></tr>}
++                  {rows.map((r) => (
++                    <tr key={r.member_id} className="border-b last:border-0">
++                      <td className="p-4">
++                        <div className="flex items-center gap-3">
++                          <MemberAvatar path={r.photo_path} />
++                          <div>
++                            <p className="font-medium text-foreground">{r.full_name}</p>
++                            {r.is_leader && <Badge className="mt-1"><Crown className="mr-1 h-3 w-3" /> Líder</Badge>}
++                          </div>
++                        </div>
++                      </td>
++                      <td className="p-4 text-muted-foreground">{r.phone}<br />{r.email}</td>
++                      <td className="p-4">
++                        {canManageMembers ? (
++                          <Select value={r.church_role_id ?? ""} onValueChange={(roleId) => changeRole.mutate({ memberId: r.member_id, roleId })}>
++                            <SelectTrigger className="w-44"><SelectValue placeholder="Sem cargo" /></SelectTrigger>
++                            <SelectContent>
++                              {(roles.data ?? []).map((role) => <SelectItem key={role.id} value={role.id}>{role.name}</SelectItem>)}
++                            </SelectContent>
++                          </Select>
++                        ) : (
++                          <span className="text-foreground">{r.role_name ?? "—"}</span>
++                        )}
++                      </td>
++                      <td className="whitespace-nowrap p-4 text-right">
++                        {canManageMembers && (
++                          <Button size="icon" variant="ghost" aria-label="Remover do departamento" onClick={() => confirm(`Remover ${r.full_name} do departamento?`) && removeMember.mutate(r.member_id)}><UserMinus className="h-4 w-4" /></Button>
++                        )}
++                      </td>
++                    </tr>
++                  ))}
++                </tbody>
++              </table>
++            </div>
++          </TabsContent>
++
++          {canReport && (
++            <TabsContent value="relatorio">
++              <div className="mt-4 flex flex-wrap justify-end gap-2 print:hidden">
++                <Button variant="outline" onClick={exportReport}><Download className="h-4 w-4" /> XLS</Button>
++                <Button variant="outline" onClick={() => window.print()}><Printer className="h-4 w-4" /> Imprimir</Button>
++              </div>
++              <div className="mt-4 grid gap-4 sm:grid-cols-3">
++                <div className="rounded-2xl border bg-card p-5"><p className="text-xs text-muted-foreground">Total de voluntários</p><p className="mt-1 text-2xl font-semibold text-foreground">{rows.length}</p></div>
++                <div className="rounded-2xl border bg-card p-5"><p className="text-xs text-muted-foreground">Líder</p><p className="mt-1 text-lg font-semibold text-foreground">{dept.leader_name ?? "—"}</p></div>
++                <div className="rounded-2xl border bg-card p-5"><p className="text-xs text-muted-foreground">Gerado em</p><p className="mt-1 text-lg font-semibold text-foreground">{new Date().toLocaleDateString("pt-BR")}</p></div>
++              </div>
++              <div className="mt-4 rounded-2xl border bg-card p-5">
++                <p className="text-sm font-semibold text-foreground">Por cargo</p>
++                <div className="mt-3 flex flex-wrap gap-2">
++                  {Object.entries(byRole).map(([k, v]) => <Badge key={k} variant="secondary">{k}: {v}</Badge>)}
++                  {rows.length === 0 && <span className="text-sm text-muted-foreground">Sem voluntários.</span>}
++                </div>
++              </div>
++              <div className="mt-4 overflow-x-auto rounded-2xl border bg-card">
++                <table className="w-full text-sm">
++                  <thead className="border-b text-left text-muted-foreground">
++                    <tr><th className="p-4 font-medium">Nome</th><th className="p-4 font-medium">Cargo</th><th className="p-4 font-medium">Telefone</th><th className="p-4 font-medium">Status</th><th className="p-4 font-medium">Desde</th></tr>
++                  </thead>
++                  <tbody>
++                    {rows.map((r) => (
++                      <tr key={r.member_id} className="border-b last:border-0">
++                        <td className="p-4 text-foreground">{r.full_name}{r.is_leader ? " (líder)" : ""}</td>
++                        <td className="p-4 text-muted-foreground">{r.role_name ?? "—"}</td>
++                        <td className="p-4 text-muted-foreground">{r.phone || "—"}</td>
++                        <td className="p-4 text-muted-foreground">{MEMBER_STATUS[r.status] ?? r.status}</td>
++                        <td className="p-4 text-muted-foreground">{dateBR(r.joined_at)}</td>
++                      </tr>
++                    ))}
++                  </tbody>
++                </table>
++              </div>
++            </TabsContent>
++          )}
++        </Tabs>
++      )}
++
++      <Dialog open={adding} onOpenChange={setAdding}>
++        <DialogContent>
++          <DialogHeader><DialogTitle>Adicionar voluntário</DialogTitle></DialogHeader>
++          <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); if (candidate) addMember.mutate(); }}>
++            <div className="space-y-1.5">
++              <Label>Membro</Label>
++              <Select value={candidate} onValueChange={setCandidate}>
++                <SelectTrigger><SelectValue placeholder={candidates.isLoading ? "Carregando..." : "Selecione um membro"} /></SelectTrigger>
++                <SelectContent>
++                  {(candidates.data ?? []).map((c) => <SelectItem key={c.id} value={c.id}>{c.full_name}</SelectItem>)}
++                </SelectContent>
++              </Select>
++              {!candidates.isLoading && (candidates.data ?? []).length === 0 && <p className="text-xs text-muted-foreground">Todos os membros aprovados já estão neste departamento.</p>}
++            </div>
++            <div className="space-y-1.5">
++              <Label>Cargo no departamento</Label>
++              <Select value={candidateRole || volunteerRole?.id || ""} onValueChange={setCandidateRole}>
++                <SelectTrigger><SelectValue placeholder="Voluntário" /></SelectTrigger>
++                <SelectContent>
++                  {(roles.data ?? []).map((role) => <SelectItem key={role.id} value={role.id}>{role.name}</SelectItem>)}
++                </SelectContent>
++              </Select>
++            </div>
++            <Button type="submit" className="w-full" disabled={!candidate || addMember.isPending}>Adicionar</Button>
++          </form>
++        </DialogContent>
++      </Dialog>
++
++      <Dialog open={editing} onOpenChange={setEditing}>
++        <DialogContent>
++          <DialogHeader><DialogTitle>Editar departamento</DialogTitle></DialogHeader>
++          <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); if (form.name.trim()) saveDept.mutate(); }}>
++            <div className="space-y-1.5"><Label>Nome *</Label><Input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></div>
++            <div className="space-y-1.5"><Label>Descrição</Label><Textarea rows={3} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></div>
++            <Button type="submit" className="w-full" disabled={saveDept.isPending}>Salvar</Button>
++          </form>
++        </DialogContent>
++      </Dialog>
++    </div>
++  );
++}
+diff --git a/src/routes/_authenticated/painel.departamentos.tsx b/src/routes/_authenticated/painel.departamentos.tsx
+new file mode 100644
+index 0000000..02c5b42
+--- /dev/null
++++ b/src/routes/_authenticated/painel.departamentos.tsx
+@@ -0,0 +1,248 @@
++import { createFileRoute, Link } from "@tanstack/react-router";
++import { useMutation, useQueryClient } from "@tanstack/react-query";
++import { useState } from "react";
++import { toast } from "sonner";
++import { Crown, Network, Pencil, Plus, Trash2, Users } from "lucide-react";
++import { supabase } from "@/integrations/supabase/client";
++import { useAccess } from "@/hooks/use-access";
++import { useChurchRoles, useDeptAccess, useDepartments } from "@/hooks/use-departments";
++import { DEPT_PERMISSIONS } from "@/lib/church";
++import { siteMeta } from "@/lib/site-query";
++import { Button } from "@/components/ui/button";
++import { Input } from "@/components/ui/input";
++import { Label } from "@/components/ui/label";
++import { Textarea } from "@/components/ui/textarea";
++import { Badge } from "@/components/ui/badge";
++import { Checkbox } from "@/components/ui/checkbox";
++import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
++import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
++import type { Tables } from "@/integrations/supabase/types";
++
++export const Route = createFileRoute("/_authenticated/painel/departamentos")({
++  head: () => siteMeta("Departamentos — Comunidade Aava", "Departamentos, voluntários, líderes e cargos da Comunidade Aava."),
++  component: DepartmentsPage,
++});
++
++function DepartmentsPage() {
++  const { isFullAccess } = useAccess();
++  const { manageAll, canViewPage, isLoading } = useDeptAccess();
++
++  if (isLoading) return null;
++  if (!canViewPage) return <p className="text-muted-foreground">Você não tem acesso a esta área.</p>;
++
++  return (
++    <div>
++      <h1 className="text-3xl text-foreground">Departamentos</h1>
++      <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
++        Organize voluntários e líderes por departamento. Os cargos definem o que cada pessoa pode fazer dentro do departamento dela.
++      </p>
++      <Tabs defaultValue="departamentos" className="mt-6">
++        <TabsList>
++          <TabsTrigger value="departamentos">Departamentos</TabsTrigger>
++          {isFullAccess && <TabsTrigger value="cargos">Cargos</TabsTrigger>}
++        </TabsList>
++        <TabsContent value="departamentos">
++          <DepartmentList canManage={manageAll} />
++        </TabsContent>
++        {isFullAccess && (
++          <TabsContent value="cargos">
++            <RolesManager />
++          </TabsContent>
++        )}
++      </Tabs>
++    </div>
++  );
++}
++
++function DepartmentList({ canManage }: { canManage: boolean }) {
++  const qc = useQueryClient();
++  const { data = [], isLoading } = useDepartments();
++  const [open, setOpen] = useState(false);
++  const [name, setName] = useState("");
++  const [description, setDescription] = useState("");
++
++  const create = useMutation({
++    mutationFn: async () => {
++      const { data: u } = await supabase.auth.getUser();
++      const { error } = await supabase
++        .from("departments")
++        .insert({ name: name.trim(), description: description.trim() || null, created_by: u.user?.id ?? null });
++      if (error) throw new Error(error.code === "23505" ? "Já existe um departamento com esse nome." : error.message);
++    },
++    onSuccess: () => {
++      toast.success("Departamento criado");
++      setOpen(false);
++      setName("");
++      setDescription("");
++      qc.invalidateQueries({ queryKey: ["departments"] });
++    },
++    onError: (e: Error) => toast.error(e.message),
++  });
++
++  return (
++    <div className="mt-4">
++      {canManage && (
++        <div className="flex justify-end">
++          <Button onClick={() => setOpen(true)}><Plus className="h-4 w-4" /> Adicionar departamento</Button>
++        </div>
++      )}
++      {isLoading && <p className="mt-4 text-muted-foreground">Carregando...</p>}
++      {!isLoading && data.length === 0 && (
++        <div className="mt-4 rounded-2xl border border-dashed p-8 text-center text-sm text-muted-foreground">
++          <Network className="mx-auto mb-3 h-6 w-6" />
++          {canManage ? "Nenhum departamento ainda. Clique em “Adicionar departamento” para criar o primeiro." : "Nenhum departamento disponível para você."}
++        </div>
++      )}
++      <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
++        {data.map((d) => (
++          <Link
++            key={d.id}
++            to="/painel/departamento/$id"
++            params={{ id: d.id }}
++            className="rounded-2xl border bg-card p-5 transition-colors hover:border-primary"
++          >
++            <p className="font-display text-lg text-foreground">{d.name}</p>
++            {d.description && <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">{d.description}</p>}
++            <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
++              <span className="inline-flex items-center gap-1.5"><Users className="h-4 w-4" /> {d.member_count} {d.member_count === 1 ? "voluntário" : "voluntários"}</span>
++              <span className="inline-flex items-center gap-1.5"><Crown className="h-4 w-4" /> {d.leader_name ?? "Sem líder"}</span>
++            </div>
++          </Link>
++        ))}
++      </div>
++
++      <Dialog open={open} onOpenChange={setOpen}>
++        <DialogContent>
++          <DialogHeader><DialogTitle>Novo departamento</DialogTitle></DialogHeader>
++          <form
++            className="space-y-4"
++            onSubmit={(e) => {
++              e.preventDefault();
++              if (name.trim()) create.mutate();
++            }}
++          >
++            <div className="space-y-1.5">
++              <Label>Nome *</Label>
++              <Input required value={name} onChange={(e) => setName(e.target.value)} placeholder="Ex.: Louvor, Mídia, Infantil" />
++            </div>
++            <div className="space-y-1.5">
++              <Label>Descrição</Label>
++              <Textarea rows={3} value={description} onChange={(e) => setDescription(e.target.value)} />
++            </div>
++            <Button type="submit" className="w-full" disabled={create.isPending}>Criar departamento</Button>
++          </form>
++        </DialogContent>
++      </Dialog>
++    </div>
++  );
++}
++
++type RoleDraft = { id?: string; name: string; description: string; permissions: string[]; is_system?: boolean };
++
++function RolesManager() {
++  const qc = useQueryClient();
++  const { data = [], isLoading } = useChurchRoles();
++  const [editing, setEditing] = useState<RoleDraft | null>(null);
++
++  const save = useMutation({
++    mutationFn: async (r: RoleDraft) => {
++      const payload = { name: r.name.trim(), description: r.description.trim() || null, permissions: r.permissions };
++      const { error } = r.id
++        ? await supabase.from("church_roles").update(payload).eq("id", r.id)
++        : await supabase.from("church_roles").insert(payload);
++      if (error) throw new Error(error.code === "23505" ? "Já existe um cargo com esse nome." : error.message);
++    },
++    onSuccess: () => {
++      toast.success("Cargo salvo");
++      setEditing(null);
++      qc.invalidateQueries({ queryKey: ["church-roles"] });
++      qc.invalidateQueries({ queryKey: ["my-dept-roles"] });
++    },
++    onError: (e: Error) => toast.error(e.message),
++  });
++
++  const remove = useMutation({
++    mutationFn: async (id: string) => {
++      const { error } = await supabase.from("church_roles").delete().eq("id", id);
++      if (error) throw error;
++    },
++    onSuccess: () => {
++      qc.invalidateQueries({ queryKey: ["church-roles"] });
++      qc.invalidateQueries({ queryKey: ["department-roster"] });
++    },
++    onError: (e: Error) => toast.error(e.message),
++  });
++
++  const label = (k: string) => DEPT_PERMISSIONS.find((p) => p.key === k)?.label ?? k;
++
++  return (
++    <div className="mt-4">
++      <div className="flex flex-wrap items-center justify-between gap-3">
++        <p className="max-w-2xl text-sm text-muted-foreground">
++          Um cargo define o que a pessoa pode fazer no departamento em que está vinculada. Só o CEO e o Pastor Presidente criam cargos e liberam permissões.
++        </p>
++        <Button onClick={() => setEditing({ name: "", description: "", permissions: ["dept_view"] })}><Plus className="h-4 w-4" /> Criar cargo</Button>
++      </div>
++      {isLoading && <p className="mt-4 text-muted-foreground">Carregando...</p>}
++      <div className="mt-4 divide-y rounded-2xl border bg-card">
++        {data.map((r: Tables<"church_roles">) => (
++          <div key={r.id} className="flex flex-wrap items-start justify-between gap-3 p-4">
++            <div className="min-w-0">
++              <p className="font-medium text-foreground">{r.name} {r.is_system && <Badge variant="secondary" className="ml-2">Padrão</Badge>}</p>
++              {r.description && <p className="text-sm text-muted-foreground">{r.description}</p>}
++              <div className="mt-2 flex flex-wrap gap-1.5">
++                {r.permissions.length === 0 && <span className="text-xs text-muted-foreground">Sem permissões</span>}
++                {r.permissions.map((p) => <Badge key={p} variant="outline">{label(p)}</Badge>)}
++              </div>
++            </div>
++            <div className="flex gap-1">
++              <Button size="icon" variant="ghost" aria-label="Editar cargo" onClick={() => setEditing({ id: r.id, name: r.name, description: r.description ?? "", permissions: r.permissions, is_system: r.is_system })}><Pencil className="h-4 w-4" /></Button>
++              {!r.is_system && (
++                <Button size="icon" variant="ghost" aria-label="Excluir cargo" onClick={() => confirm(`Excluir o cargo ${r.name}? Quem tem esse cargo fica sem permissões no departamento.`) && remove.mutate(r.id)}><Trash2 className="h-4 w-4" /></Button>
++              )}
++            </div>
++          </div>
++        ))}
++      </div>
++
++      <Dialog open={!!editing} onOpenChange={(o) => !o && setEditing(null)}>
++        <DialogContent>
++          <DialogHeader><DialogTitle>{editing?.id ? "Editar cargo" : "Novo cargo"}</DialogTitle></DialogHeader>
++          {editing && (
++            <form
++              className="space-y-4"
++              onSubmit={(e) => {
++                e.preventDefault();
++                if (editing.name.trim()) save.mutate(editing);
++              }}
++            >
++              <div className="space-y-1.5">
++                <Label>Nome *</Label>
++                <Input required value={editing.name} onChange={(e) => setEditing({ ...editing, name: e.target.value })} placeholder="Ex.: Vice-líder, Tesoureiro do departamento" />
++              </div>
++              <div className="space-y-1.5">
++                <Label>Descrição</Label>
++                <Textarea rows={2} value={editing.description} onChange={(e) => setEditing({ ...editing, description: e.target.value })} />
++              </div>
++              <div className="space-y-2">
++                <Label>O que este cargo permite no departamento</Label>
++                {DEPT_PERMISSIONS.map((p) => (
++                  <label key={p.key} className="flex items-center gap-3 rounded-lg border px-4 py-2.5 text-sm">
++                    <Checkbox
++                      checked={editing.permissions.includes(p.key)}
++                      onCheckedChange={(on) =>
++                        setEditing({ ...editing, permissions: on ? [...editing.permissions, p.key] : editing.permissions.filter((x) => x !== p.key) })
++                      }
++                    />
++                    {p.label}
++                  </label>
++                ))}
++              </div>
++              <Button type="submit" className="w-full" disabled={save.isPending}>Salvar cargo</Button>
++            </form>
++          )}
++        </DialogContent>
++      </Dialog>
++    </div>
++  );
++}
+diff --git a/src/routes/_authenticated/painel.financeiro.tsx b/src/routes/_authenticated/painel.financeiro.tsx
+index e2ff977..94c9233 100644
+--- a/src/routes/_authenticated/painel.financeiro.tsx
++++ b/src/routes/_authenticated/painel.financeiro.tsx
+@@ -8,7 +8,8 @@ import { Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart, Pie, PieCh
+ import { supabase } from "@/integrations/supabase/client";
+ import { useAccess } from "@/hooks/use-access";
+ import { EXPENSE_CATEGORIES, INCOME_CATEGORIES, MEMBER_LINK_CATEGORIES, MONTHS, PAYMENT_METHODS, brl, dateBR } from "@/lib/church";
+-import { byCategory, downloadCsv, expenses, goalProgress, inPeriod, incomes, sum, txCsvRows, type Goal, type Tx, type TxWithMember } from "@/lib/finance";
++import { byCategory, expenses, goalProgress, inPeriod, incomes, sum, txRows, type Goal, type Tx, type TxWithMember } from "@/lib/finance";
++import { downloadXls } from "@/lib/export";
+ import { Button } from "@/components/ui/button";
+ import { Input } from "@/components/ui/input";
+ import { Label } from "@/components/ui/label";
+@@ -282,7 +283,7 @@ function TxList({ all, year, month, onEdit, onChanged }: { all: TxWithMember[];
+         <div className="w-40"><Sel value={scope} onChange={setScope} options={[["mes", "Mês selecionado"], ["ano", "Ano inteiro"]]} /></div>
+         <div className="w-40"><Sel value={kind} onChange={setKind} options={[["todos", "Receitas e despesas"], ["entrada", "Só receitas"], ["saida", "Só despesas"]]} /></div>
+         {can("export_financial_reports") && (
+-          <Button variant="outline" onClick={() => downloadCsv(`lancamentos-${year}${scope === "mes" ? "-" + month : ""}.csv`, txCsvRows(list))}><Download className="h-4 w-4" /> CSV</Button>
++          <Button variant="outline" onClick={() => downloadXls(`lancamentos-${year}${scope === "mes" ? "-" + month : ""}`, txRows(list), "Lançamentos")}><Download className="h-4 w-4" /> XLS</Button>
+         )}
+       </div>
+       <div className="overflow-x-auto rounded-2xl border bg-card">
+@@ -580,7 +581,7 @@ function Reports({ year, month }: { year: number; month: number }) {
+           <FileText className="h-6 w-6 text-primary" />
+           <p className="mt-3 font-semibold text-foreground">{i.t}</p>
+           <p className="text-sm text-muted-foreground">{i.d}</p>
+-          <p className="mt-3 text-xs font-semibold text-primary">Abrir · PDF / CSV →</p>
++          <p className="mt-3 text-xs font-semibold text-primary">Abrir · PDF / XLS →</p>
+         </Link>
+       ))}
+     </div>
+diff --git a/src/routes/_authenticated/painel.membro.$id.tsx b/src/routes/_authenticated/painel.membro.$id.tsx
+index cea540c..5dd0347 100644
+--- a/src/routes/_authenticated/painel.membro.$id.tsx
++++ b/src/routes/_authenticated/painel.membro.$id.tsx
+@@ -18,6 +18,8 @@ import {
+ import { MemberAvatar, MemberForm, type MemberDraft } from "@/components/members/MemberForm";
+ import { APPROVAL_LABELS, MEMBER_STATUS, ageFrom, brl, dateBR } from "@/lib/church";
+ import { siteMeta } from "@/lib/site-query";
++import { syncMemberDepartments } from "@/lib/departments";
++import { useDepartments, useMemberDepartments } from "@/hooks/use-departments";
+ 
+ export const Route = createFileRoute("/_authenticated/painel/membro/$id")({
+   head: () =>
+@@ -49,6 +51,10 @@ function MemberProfile() {
+   const qc = useQueryClient();
+   const [editing, setEditing] = useState<MemberDraft | null>(null);
+   const [year, setYear] = useState("todos");
++  const [deptIds, setDeptIds] = useState<string[]>([]);
++  const canLinkDepartments = can("manage_departments");
++  const departments = useDepartments();
++  const memberDepts = useMemberDepartments(can("view_members") || can("view_departments"));
+ 
+   const member = useQuery({
+     queryKey: ["member", id],
+@@ -97,12 +103,15 @@ function MemberProfile() {
+         .update({ ...rest, notes: null })
+         .eq("id", id);
+       if (error) throw error;
++      if (canLinkDepartments) await syncMemberDepartments(id, deptIds);
+     },
+     onSuccess: () => {
+       toast.success("Cadastro salvo");
+       setEditing(null);
+       qc.invalidateQueries({ queryKey: ["member", id] });
+       qc.invalidateQueries({ queryKey: ["members"] });
++      qc.invalidateQueries({ queryKey: ["member-departments"] });
++      qc.invalidateQueries({ queryKey: ["departments"] });
+     },
+     onError: (e: Error) => toast.error(e.message),
+   });
+@@ -171,7 +180,10 @@ function MemberProfile() {
+           </div>
+         </div>
+         {can("edit_member") && (
+-          <Button variant="outline" onClick={() => setEditing({ ...m })}>
++          <Button variant="outline" onClick={() => {
++              setDeptIds((memberDepts.data?.get(m.id) ?? []).map((d) => d.id));
++              setEditing({ ...m });
++            }}>
+             <Pencil className="h-4 w-4" /> Editar cadastro
+           </Button>
+         )}
+@@ -195,14 +207,12 @@ function MemberProfile() {
+         </Block>
+ 
+         <Block title="Vida na igreja">
+-          <Field label="Entrada na igreja">{dateBR(m.joined_on)}</Field>
+           <Field label="Filiação">{dateBR(m.affiliated_on)}</Field>
+           <Field label="Batizado">
+             {m.baptized ? `Sim${m.baptism_date ? `, em ${dateBR(m.baptism_date)}` : ""}` : "Não"}
+           </Field>
+           <Field label="Igreja onde se batizou">{m.baptized ? m.baptism_church : ""}</Field>
+-          <Field label="Ministério">{m.ministry}</Field>
+-          <Field label="Departamento">{m.department}</Field>
++          <Field label="Departamento">{(memberDepts.data?.get(m.id) ?? []).map((d) => d.name).join(", ")}</Field>
+           <Field label="Cargo">{m.church_role}</Field>
+         </Block>
+ 
+@@ -339,6 +349,13 @@ function MemberProfile() {
+                 value={editing}
+                 onChange={setEditing}
+                 photoFolder={editing.user_id ?? "admin"}
++                {...(canLinkDepartments
++                  ? {
++                      departments: (departments.data ?? []).map((d) => ({ id: d.id, name: d.name })),
++                      departmentIds: deptIds,
++                      onDepartmentIdsChange: setDeptIds,
++                    }
++                  : {})}
+               />
+               <Button type="submit" className="w-full" disabled={save.isPending}>
+                 Salvar cadastro
+diff --git a/src/routes/_authenticated/painel.membros.tsx b/src/routes/_authenticated/painel.membros.tsx
+index 1fee419..70e83ea 100644
+--- a/src/routes/_authenticated/painel.membros.tsx
++++ b/src/routes/_authenticated/painel.membros.tsx
+@@ -16,6 +16,9 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
+ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+ import { MemberForm, MemberAvatar, emptyMember, type MemberDraft } from "@/components/members/MemberForm";
+ import { APPROVAL_LABELS, MEMBER_STATUS, ageFrom, dateBR } from "@/lib/church";
++import { downloadXls } from "@/lib/export";
++import { syncMemberDepartments } from "@/lib/departments";
++import { useDepartments, useMemberDepartments } from "@/hooks/use-departments";
+ 
+ export const Route = createFileRoute("/_authenticated/painel/membros")({
+   head: () => siteMeta("Membros — Comunidade Aava", "Cadastros, aprovação e convites da Comunidade Aava."),
+@@ -29,6 +32,11 @@ function MembersPage() {
+   const [statusFilter, setStatusFilter] = useState("todos");
+   const [editing, setEditing] = useState<MemberDraft | null>(null);
+   const [notes, setNotes] = useState("");
++  const [deptIds, setDeptIds] = useState<string[]>([]);
++  const canLinkDepartments = can("manage_departments");
++  const departments = useDepartments();
++  const memberDepts = useMemberDepartments(can("view_members") || can("view_departments"));
++  const deptNames = (id: string) => (memberDepts.data?.get(id) ?? []).map((d) => d.name);
+ 
+   const { data = [], isLoading } = useQuery({
+     queryKey: ["members"],
+@@ -42,6 +50,7 @@ function MembersPage() {
+   async function openEdit(m: MemberDraft) {
+     setEditing(m);
+     setNotes("");
++    setDeptIds(m.id ? (memberDepts.data?.get(m.id) ?? []).map((d) => d.id) : []);
+     if (m.id && can("view_member_notes")) {
+       const { data } = await supabase.from("member_notes").select("notes").eq("member_id", m.id).maybeSingle();
+       setNotes(data?.notes ?? "");
+@@ -64,11 +73,14 @@ function MembersPage() {
+       if (memberId && can("view_member_notes")) {
+         await supabase.from("member_notes").upsert({ member_id: memberId, notes });
+       }
++      if (memberId && canLinkDepartments) await syncMemberDepartments(memberId, deptIds);
+     },
+     onSuccess: () => {
+       toast.success("Cadastro salvo");
+       setEditing(null);
+       qc.invalidateQueries({ queryKey: ["members"] });
++      qc.invalidateQueries({ queryKey: ["member-departments"] });
++      qc.invalidateQueries({ queryKey: ["departments"] });
+     },
+     onError: (e) => toast.error(e.message),
+   });
+@@ -104,14 +116,10 @@ function MembersPage() {
+       (m.full_name.toLowerCase().includes(search.toLowerCase()) || (m.cpf ?? "").includes(search)),
+   );
+ 
+-  function exportCsv() {
+-    const head = ["Nome", "Nascimento", "Idade", "CPF", "RG", "Telefone", "E-mail", "Endereço", "Bairro", "Cidade", "CEP", "Estado civil", "Entrada", "Filiação", "Batizado", "Data batismo", "Igreja do batismo", "Ministério", "Departamento", "Cargo", "Status"];
+-    const rows = filtered.map((m) => [m.full_name, dateBR(m.birth_date), ageFrom(m.birth_date) ?? "", m.cpf, m.rg, m.phone, m.email, m.address, m.neighborhood, m.city, m.zip_code, m.marital_status, dateBR(m.joined_on), dateBR(m.affiliated_on), m.baptized ? "Sim" : "Não", dateBR(m.baptism_date), m.baptism_church, m.ministry, m.department, m.church_role, MEMBER_STATUS[m.status] ?? m.status]);
+-    const csv = [head, ...rows].map((r) => r.map((c) => String(c ?? "").replace(/[;\n]/g, " ")).join(";")).join("\n");
+-    const a = document.createElement("a");
+-    a.href = URL.createObjectURL(new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" }));
+-    a.download = "membros.csv";
+-    a.click();
++  function exportXls() {
++    const head = ["Nome", "Nascimento", "Idade", "CPF", "RG", "Telefone", "E-mail", "Endereço", "Bairro", "Cidade", "CEP", "Estado civil", "Filiação", "Batizado", "Data batismo", "Igreja do batismo", "Departamento", "Cargo", "Status"];
++    const rows = filtered.map((m) => [m.full_name, dateBR(m.birth_date), ageFrom(m.birth_date) ?? "", m.cpf, m.rg, m.phone, m.email, m.address, m.neighborhood, m.city, m.zip_code, m.marital_status, dateBR(m.affiliated_on), m.baptized ? "Sim" : "Não", dateBR(m.baptism_date), m.baptism_church, deptNames(m.id).join(", "), m.church_role, MEMBER_STATUS[m.status] ?? m.status]);
++    downloadXls("membros", [head, ...rows], "Membros");
+   }
+ 
+   return (
+@@ -119,7 +127,7 @@ function MembersPage() {
+       <div className="flex flex-wrap items-center justify-between gap-4">
+         <h1 className="text-3xl text-foreground">Membros</h1>
+         <div className="flex gap-2">
+-          <Button variant="outline" onClick={exportCsv}><Download className="h-4 w-4" /> CSV</Button>
++          <Button variant="outline" onClick={exportXls}><Download className="h-4 w-4" /> XLS</Button>
+           {can("create_member") && (
+             <Button onClick={() => openEdit({ ...emptyMember })}><Plus className="h-4 w-4" /> Novo membro</Button>
+           )}
+@@ -175,7 +183,7 @@ function MembersPage() {
+                         </div>
+                       </td>
+                       <td className="p-4 text-muted-foreground">{m.phone}<br />{m.email}</td>
+-                      <td className="p-4 text-muted-foreground">{[m.ministry, m.department, m.church_role].filter(Boolean).join(" · ") || "—"}</td>
++                      <td className="p-4 text-muted-foreground">{[deptNames(m.id).join(", "), m.church_role].filter(Boolean).join(" · ") || "—"}</td>
+                       <td className="p-4">
+                         <Badge variant={m.status === "membro_ativo" ? "default" : "secondary"}>{MEMBER_STATUS[m.status] ?? m.status}</Badge>
+                         {m.approval_status === "recusado" && <p className="mt-1 text-xs text-destructive">Recusado</p>}
+@@ -253,6 +261,13 @@ function MembersPage() {
+                 onChange={setEditing}
+                 photoFolder={editing.user_id ?? "admin"}
+                 {...(can("view_member_notes") ? { notes, onNotesChange: setNotes } : {})}
++                {...(canLinkDepartments
++                  ? {
++                      departments: (departments.data ?? []).map((d) => ({ id: d.id, name: d.name })),
++                      departmentIds: deptIds,
++                      onDepartmentIdsChange: setDeptIds,
++                    }
++                  : {})}
+               />
+               <Button type="submit" className="w-full" disabled={save.isPending}>Salvar cadastro</Button>
+             </form>
+diff --git a/src/routes/_authenticated/painel.meu-cadastro.tsx b/src/routes/_authenticated/painel.meu-cadastro.tsx
+index fe5444e..e8c65e4 100644
+--- a/src/routes/_authenticated/painel.meu-cadastro.tsx
++++ b/src/routes/_authenticated/painel.meu-cadastro.tsx
+@@ -71,7 +71,7 @@ function MyProfile() {
+       {row?.approval_status === "aprovado" && (
+         <div className="mt-4 flex items-center gap-3 rounded-2xl border bg-card p-4 text-sm">
+           <CheckCircle2 className="h-5 w-5 text-success" />
+-          <span className="text-foreground">Cadastro aprovado · {MEMBER_STATUS[row.status] ?? row.status}{row.ministry ? ` · ${row.ministry}` : ""}</span>
++          <span className="text-foreground">Cadastro aprovado · {MEMBER_STATUS[row.status] ?? row.status}</span>
+         </div>
+       )}
+       {row?.approval_status === "recusado" && (
+diff --git a/src/routes/_authenticated/painel.relatorio.tsx b/src/routes/_authenticated/painel.relatorio.tsx
+index 1399c91..b0fbc55 100644
+--- a/src/routes/_authenticated/painel.relatorio.tsx
++++ b/src/routes/_authenticated/painel.relatorio.tsx
+@@ -5,7 +5,8 @@ import { ArrowLeft, Download, Printer } from "lucide-react";
+ import { supabase } from "@/integrations/supabase/client";
+ import { useAccess } from "@/hooks/use-access";
+ import { CHURCH, MONTHS, brl, dateBR } from "@/lib/church";
+-import { byCategory, downloadCsv, expenses, goalProgress, inPeriod, incomes, sum, txCsvRows } from "@/lib/finance";
++import { byCategory, expenses, goalProgress, inPeriod, incomes, sum, txRows } from "@/lib/finance";
++import { downloadXls } from "@/lib/export";
+ import { Button } from "@/components/ui/button";
+ 
+ type Tipo = "mensal" | "anual" | "receitas" | "despesas" | "completo";
+@@ -50,7 +51,7 @@ function ReportPage() {
+       <div className="mb-6 flex flex-wrap items-center justify-between gap-2 print:hidden">
+         <Link to="/painel/financeiro" className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"><ArrowLeft className="h-4 w-4" /> Voltar</Link>
+         <div className="flex gap-2">
+-          <Button variant="outline" onClick={() => downloadCsv(`${tipo}-${ano}${tipo === "mensal" ? "-" + mes : ""}.csv`, txCsvRows(list))}><Download className="h-4 w-4" /> CSV</Button>
++          <Button variant="outline" onClick={() => downloadXls(`${tipo}-${ano}${tipo === "mensal" ? "-" + mes : ""}`, txRows(list), "Lançamentos")}><Download className="h-4 w-4" /> XLS</Button>
+           <Button onClick={() => window.print()}><Printer className="h-4 w-4" /> Imprimir / Salvar PDF</Button>
+         </div>
+       </div>
+diff --git a/src/routes/_authenticated/painel.tsx b/src/routes/_authenticated/painel.tsx
+index cd3cbbc..4d8bf84 100644
+--- a/src/routes/_authenticated/painel.tsx
++++ b/src/routes/_authenticated/painel.tsx
+@@ -11,10 +11,12 @@ import {
+   UserCircle,
+   Heart,
+   Settings,
++  Network,
+ } from "lucide-react";
+ import { Button } from "@/components/ui/button";
+ import { supabase } from "@/integrations/supabase/client";
+ import { useAccess } from "@/hooks/use-access";
++import { useDeptAccess } from "@/hooks/use-departments";
+ import { ROLE_LABELS } from "@/lib/church";
+ 
+ export const Route = createFileRoute("/_authenticated/painel")({
+@@ -26,6 +28,7 @@ export const Route = createFileRoute("/_authenticated/painel")({
+ 
+ function PanelLayout() {
+   const { can, isFullAccess, roles, email } = useAccess();
++  const { canViewPage: canViewDepartments } = useDeptAccess();
+   const qc = useQueryClient();
+   const navigate = useNavigate();
+   const items = [
+@@ -38,6 +41,7 @@ function PanelLayout() {
+       show: can("view_prayer_requests"),
+     },
+     { to: "/painel/membros", label: "Membros", icon: Users, show: can("view_members") },
++    { to: "/painel/departamentos", label: "Departamentos", icon: Network, show: canViewDepartments },
+     { to: "/painel/financeiro", label: "Financeiro", icon: Wallet, show: can("view_finance") },
+     {
+       to: "/painel/permissoes",
+-- 
+2.43.0
+
