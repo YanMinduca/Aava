@@ -71,7 +71,7 @@ function MyProfile() {
       {row?.approval_status === "aprovado" && (
         <div className="mt-4 flex items-center gap-3 rounded-2xl border bg-card p-4 text-sm">
           <CheckCircle2 className="h-5 w-5 text-success" />
-          <span className="text-foreground">Cadastro aprovado · {MEMBER_STATUS[row.status] ?? row.status}{row.ministry ? ` · ${row.ministry}` : ""}</span>
+          <span className="text-foreground">Cadastro aprovado · {MEMBER_STATUS[row.status] ?? row.status}</span>
         </div>
       )}
       {row?.approval_status === "recusado" && (

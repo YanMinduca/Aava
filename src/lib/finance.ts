@@ -38,15 +38,7 @@ export function goalProgress(g: Goal, all: Tx[]) {
   return { raised, target, remaining: Math.max(0, target - raised), pct: Math.min(100, (raised / target) * 100) };
 }
 
-export function downloadCsv(name: string, rows: (string | number | null | undefined)[][]) {
-  const csv = rows.map((r) => r.map((c) => String(c ?? "").replace(/[;\n]/g, " ")).join(";")).join("\n");
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" }));
-  a.download = name;
-  a.click();
-}
-
-export const txCsvRows = (l: TxWithMember[]) => [
-  ["Data", "Tipo", "Categoria", "Membro", "Descrição", "Responsável", "Método", "Observação", "Valor"],
-  ...l.map((t) => [t.occurred_on.split("-").reverse().join("/"), t.kind === "entrada" ? "Receita" : "Despesa", t.category, t.members?.full_name ?? "", t.description, t.responsible, t.payment_method, t.notes, String(t.amount).replace(".", ",")]),
+export const txRows = (l: TxWithMember[]) => [
+  ["Data", "Tipo", "Categoria", "Membro", "Descrição", "Responsável", "Método", "Observação", "Valor (R$)"],
+  ...l.map((t) => [t.occurred_on.split("-").reverse().join("/"), t.kind === "entrada" ? "Receita" : "Despesa", t.category, t.members?.full_name ?? "", t.description, t.responsible, t.payment_method, t.notes, Number(t.amount)]),
 ];

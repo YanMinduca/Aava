@@ -14,6 +14,114 @@ export type Database = {
   }
   public: {
     Tables: {
+      church_roles: {
+        Row: {
+          code: string | null
+          created_at: string
+          description: string | null
+          id: string
+          is_system: boolean
+          name: string
+          permissions: string[]
+        }
+        Insert: {
+          code?: string | null
+          created_at?: string
+          description?: string | null
+          id?: string
+          is_system?: boolean
+          name: string
+          permissions?: string[]
+        }
+        Update: {
+          code?: string | null
+          created_at?: string
+          description?: string | null
+          id?: string
+          is_system?: boolean
+          name?: string
+          permissions?: string[]
+        }
+        Relationships: []
+      }
+      department_members: {
+        Row: {
+          church_role_id: string | null
+          department_id: string
+          joined_at: string
+          member_id: string
+        }
+        Insert: {
+          church_role_id?: string | null
+          department_id: string
+          joined_at?: string
+          member_id: string
+        }
+        Update: {
+          church_role_id?: string | null
+          department_id?: string
+          joined_at?: string
+          member_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "department_members_church_role_id_fkey"
+            columns: ["church_role_id"]
+            isOneToOne: false
+            referencedRelation: "church_roles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "department_members_department_id_fkey"
+            columns: ["department_id"]
+            isOneToOne: false
+            referencedRelation: "departments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "department_members_member_id_fkey"
+            columns: ["member_id"]
+            isOneToOne: false
+            referencedRelation: "members"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      departments: {
+        Row: {
+          created_at: string
+          created_by: string | null
+          description: string | null
+          id: string
+          leader_member_id: string | null
+          name: string
+        }
+        Insert: {
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          id?: string
+          leader_member_id?: string | null
+          name: string
+        }
+        Update: {
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          id?: string
+          leader_member_id?: string | null
+          name?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "departments_leader_member_id_fkey"
+            columns: ["leader_member_id"]
+            isOneToOne: false
+            referencedRelation: "members"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       financial_goals: {
         Row: {
           category: string | null
@@ -414,7 +522,49 @@ export type Database = {
         }
         Returns: undefined
       }
+      can_view_department: {
+        Args: { _dept: string; _user_id: string }
+        Returns: boolean
+      }
       check_invite: { Args: { _code: string }; Returns: boolean }
+      department_candidates: {
+        Args: { _dept: string }
+        Returns: {
+          full_name: string
+          id: string
+        }[]
+      }
+      department_overview: {
+        Args: never
+        Returns: {
+          created_at: string
+          description: string | null
+          id: string
+          leader_member_id: string | null
+          leader_name: string | null
+          member_count: number
+          name: string
+        }[]
+      }
+      department_roster: {
+        Args: { _dept: string }
+        Returns: {
+          church_role_id: string | null
+          email: string | null
+          full_name: string
+          is_leader: boolean
+          joined_at: string
+          member_id: string
+          phone: string | null
+          photo_path: string | null
+          role_name: string | null
+          status: string
+        }[]
+      }
+      has_dept_permission: {
+        Args: { _dept: string; _perm: string; _user_id: string }
+        Returns: boolean
+      }
       has_permission: {
         Args: { _permission: string; _user_id: string }
         Returns: boolean
@@ -425,6 +575,15 @@ export type Database = {
           _user_id: string
         }
         Returns: boolean
+      }
+      is_church_leadership: { Args: { _user_id: string }; Returns: boolean }
+      member_departments: {
+        Args: never
+        Returns: {
+          department_id: string
+          department_name: string
+          member_id: string
+        }[]
       }
       use_invite: { Args: { _code: string }; Returns: boolean }
     }

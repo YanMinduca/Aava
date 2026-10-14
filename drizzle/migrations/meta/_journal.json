@@ -50,6 +50,13 @@
       "when": 1791546000000,
       "tag": "0006_member_address_and_tithes",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1791632400000,
+      "tag": "0007_departments_and_church_roles",
+      "breakpoints": true
     }
   ]
 }

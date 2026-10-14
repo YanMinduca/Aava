@@ -8,7 +8,8 @@ import { Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart, Pie, PieCh
 import { supabase } from "@/integrations/supabase/client";
 import { useAccess } from "@/hooks/use-access";
 import { EXPENSE_CATEGORIES, INCOME_CATEGORIES, MEMBER_LINK_CATEGORIES, MONTHS, PAYMENT_METHODS, brl, dateBR } from "@/lib/church";
-import { byCategory, downloadCsv, expenses, goalProgress, inPeriod, incomes, sum, txCsvRows, type Goal, type Tx, type TxWithMember } from "@/lib/finance";
+import { byCategory, expenses, goalProgress, inPeriod, incomes, sum, txRows, type Goal, type Tx, type TxWithMember } from "@/lib/finance";
+import { downloadXls } from "@/lib/export";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -282,7 +283,7 @@ function TxList({ all, year, month, onEdit, onChanged }: { all: TxWithMember[]; 
         <div className="w-40"><Sel value={scope} onChange={setScope} options={[["mes", "Mês selecionado"], ["ano", "Ano inteiro"]]} /></div>
         <div className="w-40"><Sel value={kind} onChange={setKind} options={[["todos", "Receitas e despesas"], ["entrada", "Só receitas"], ["saida", "Só despesas"]]} /></div>
         {can("export_financial_reports") && (
-          <Button variant="outline" onClick={() => downloadCsv(`lancamentos-${year}${scope === "mes" ? "-" + month : ""}.csv`, txCsvRows(list))}><Download className="h-4 w-4" /> CSV</Button>
+          <Button variant="outline" onClick={() => downloadXls(`lancamentos-${year}${scope === "mes" ? "-" + month : ""}`, txRows(list), "Lançamentos")}><Download className="h-4 w-4" /> XLS</Button>
         )}
       </div>
       <div className="overflow-x-auto rounded-2xl border bg-card">
@@ -580,7 +581,7 @@ function Reports({ year, month }: { year: number; month: number }) {
           <FileText className="h-6 w-6 text-primary" />
           <p className="mt-3 font-semibold text-foreground">{i.t}</p>
           <p className="text-sm text-muted-foreground">{i.d}</p>
-          <p className="mt-3 text-xs font-semibold text-primary">Abrir · PDF / CSV →</p>
+          <p className="mt-3 text-xs font-semibold text-primary">Abrir · PDF / XLS →</p>
         </Link>
       ))}
     </div>

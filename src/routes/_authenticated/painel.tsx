@@ -11,10 +11,12 @@ import {
   UserCircle,
   Heart,
   Settings,
+  Network,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
 import { useAccess } from "@/hooks/use-access";
+import { useDeptAccess } from "@/hooks/use-departments";
 import { ROLE_LABELS } from "@/lib/church";
 
 export const Route = createFileRoute("/_authenticated/painel")({
@@ -26,6 +28,7 @@ export const Route = createFileRoute("/_authenticated/painel")({
 
 function PanelLayout() {
   const { can, isFullAccess, roles, email } = useAccess();
+  const { canViewPage: canViewDepartments } = useDeptAccess();
   const qc = useQueryClient();
   const navigate = useNavigate();
   const items = [
@@ -38,6 +41,7 @@ function PanelLayout() {
       show: can("view_prayer_requests"),
     },
     { to: "/painel/membros", label: "Membros", icon: Users, show: can("view_members") },
+    { to: "/painel/departamentos", label: "Departamentos", icon: Network, show: canViewDepartments },
     { to: "/painel/financeiro", label: "Financeiro", icon: Wallet, show: can("view_finance") },
     {
       to: "/painel/permissoes",
