@@ -17,7 +17,7 @@ export type MemberDraft = TablesInsert<"members"> & { id?: string };
 
 export const emptyMember: MemberDraft = {
   full_name: "", email: "", phone: "", birth_date: null, address: "", cpf: "", rg: "", marital_status: null,
-  affiliated_on: null, baptized: false, baptism_date: null, church_role: "",
+  affiliated_on: null, baptized: false, baptism_date: null, church_role_id: null,
   status: "membro", photo_path: null,
   neighborhood: "", city: "", zip_code: "", baptism_church: "",
 };
@@ -43,6 +43,7 @@ export function MemberAvatar({ path, size = "h-10 w-10" }: { path?: string | nul
 }
 
 export type DepartmentOption = { id: string; name: string };
+export type RoleOption = { id: string; name: string; is_leadership: boolean };
 
 /** Menu de opções (seleção múltipla) com os departamentos cadastrados na página Departamentos. */
 function DepartmentPicker({ options, value, onChange }: { options: DepartmentOption[]; value: string[]; onChange: (ids: string[]) => void }) {
@@ -104,6 +105,9 @@ export function MemberForm({
   departments,
   departmentIds,
   onDepartmentIdsChange,
+  roles,
+  leaderDepartmentIds,
+  onLeaderDepartmentIdsChange,
 }: {
   value: MemberDraft;
   onChange: (v: MemberDraft) => void;
@@ -115,10 +119,17 @@ export function MemberForm({
   departments?: DepartmentOption[];
   departmentIds?: string[];
   onDepartmentIdsChange?: (ids: string[]) => void;
+  /** Cargos criados na área de Departamentos. Só é passado para quem pode atribuir cargos. */
+  roles?: RoleOption[];
+  /** Departamentos dos quais o membro é líder (perguntado quando o cargo é de liderança). */
+  leaderDepartmentIds?: string[];
+  onLeaderDepartmentIdsChange?: (ids: string[]) => void;
 }) {
   const set = (patch: Partial<MemberDraft>) => onChange({ ...value, ...patch });
   const age = ageFrom(value.birth_date);
   const [uploading, setUploading] = useState(false);
+  const isLeadershipRole = !!roles?.find((r) => r.id === value.church_role_id)?.is_leadership;
+  const selectedDepartments = (departments ?? []).filter((d) => (departmentIds ?? []).includes(d.id));
 
   async function upload(file: File) {
     setUploading(true);
@@ -221,7 +232,17 @@ export function MemberForm({
                 <DepartmentPicker options={departments} value={departmentIds ?? []} onChange={onDepartmentIdsChange} />
               </F>
             )}
-            <F label="Cargo"><Input {...txt("church_role")} /></F>
+            {roles && (
+              <F label="Cargo">
+                <Select value={value.church_role_id ?? "none"} onValueChange={(v) => set({ church_role_id: v === "none" ? null : v })}>
+                  <SelectTrigger><SelectValue placeholder="Selecione o cargo" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">Sem cargo</SelectItem>
+                    {roles.map((r) => <SelectItem key={r.id} value={r.id}>{r.name}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </F>
+            )}
             <F label="Status">
               <Select value={value.status ?? "membro"} onValueChange={(v) => set({ status: v })}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
@@ -229,6 +250,26 @@ export function MemberForm({
               </Select>
             </F>
           </>
+        )}
+        {mode === "admin" && isLeadershipRole && departments && onLeaderDepartmentIdsChange && (
+          <div className="space-y-3 rounded-xl border bg-primary-soft/40 p-4 sm:col-span-2">
+            <p className="text-sm font-medium text-foreground">Este cargo é de liderança. A pessoa é líder de qual departamento?</p>
+            {selectedDepartments.length === 0 ? (
+              <p className="text-sm text-muted-foreground">Selecione acima o(s) departamento(s) da pessoa para definir a liderança.</p>
+            ) : (
+              selectedDepartments.map((d) => (
+                <label key={d.id} className="flex items-center justify-between gap-4 rounded-lg border bg-background px-4 py-2.5 text-sm">
+                  <span className="text-foreground">É líder do departamento {d.name}?</span>
+                  <Switch
+                    checked={(leaderDepartmentIds ?? []).includes(d.id)}
+                    onCheckedChange={(on) =>
+                      onLeaderDepartmentIdsChange(on ? [...(leaderDepartmentIds ?? []), d.id] : (leaderDepartmentIds ?? []).filter((x) => x !== d.id))
+                    }
+                  />
+                </label>
+              ))
+            )}
+          </div>
         )}
       </Section>
 

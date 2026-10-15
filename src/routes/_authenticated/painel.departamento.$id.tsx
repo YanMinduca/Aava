@@ -9,6 +9,7 @@ import { dateBR, MEMBER_STATUS } from "@/lib/church";
 import { downloadSheets } from "@/lib/export";
 import { siteMeta } from "@/lib/site-query";
 import { MemberAvatar } from "@/components/members/MemberForm";
+import { MemberCombobox } from "@/components/members/MemberCombobox";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -55,7 +56,6 @@ function DepartmentDetail() {
 
   const [adding, setAdding] = useState(false);
   const [candidate, setCandidate] = useState("");
-  const [candidateRole, setCandidateRole] = useState("");
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({ name: "", description: "" });
 
@@ -69,21 +69,15 @@ function DepartmentDetail() {
     },
   });
 
-  const volunteerRole = roles.data?.find((r) => r.code === "volunteer");
-  const leaderRole = roles.data?.find((r) => r.code === "leader");
-
   const addMember = useMutation({
     mutationFn: async () => {
-      const { error } = await supabase
-        .from("department_members")
-        .insert({ department_id: id, member_id: candidate, church_role_id: candidateRole || volunteerRole?.id || null });
+      const { error } = await supabase.from("department_members").insert({ department_id: id, member_id: candidate });
       if (error) throw error;
     },
     onSuccess: () => {
       toast.success("Voluntário adicionado");
       setAdding(false);
       setCandidate("");
-      setCandidateRole("");
       qc.invalidateQueries({ queryKey: ["department-candidates", id] });
       refresh();
     },
@@ -91,12 +85,8 @@ function DepartmentDetail() {
   });
 
   const changeRole = useMutation({
-    mutationFn: async ({ memberId, roleId }: { memberId: string; roleId: string }) => {
-      const { error } = await supabase
-        .from("department_members")
-        .update({ church_role_id: roleId })
-        .eq("department_id", id)
-        .eq("member_id", memberId);
+    mutationFn: async ({ memberId, roleId }: { memberId: string; roleId: string | null }) => {
+      const { error } = await supabase.rpc("set_member_church_role", { _member: memberId, _role: roleId as string });
       if (error) throw error;
     },
     onSuccess: refresh,
@@ -117,12 +107,6 @@ function DepartmentDetail() {
 
   const setLeader = useMutation({
     mutationFn: async (memberId: string | null) => {
-      if (memberId) {
-        const { error: e1 } = await supabase
-          .from("department_members")
-          .upsert({ department_id: id, member_id: memberId, church_role_id: leaderRole?.id ?? null }, { onConflict: "department_id,member_id" });
-        if (e1) throw e1;
-      }
       const { error } = await supabase.from("departments").update({ leader_member_id: memberId }).eq("id", id);
       if (error) throw error;
     },
@@ -236,12 +220,14 @@ function DepartmentDetail() {
               {manageAll ? (
                 <div className="flex items-center gap-2">
                   <Label className="text-sm">Líder do departamento</Label>
-                  <Select value={dept.leader_member_id ?? ""} onValueChange={(v) => setLeader.mutate(v || null)}>
-                    <SelectTrigger className="w-56"><SelectValue placeholder="Escolher líder" /></SelectTrigger>
-                    <SelectContent>
-                      {rows.map((r) => <SelectItem key={r.member_id} value={r.member_id}>{r.full_name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
+                  <div className="w-64">
+                    <MemberCombobox
+                      options={rows.map((r) => ({ id: r.member_id, label: r.full_name }))}
+                      value={dept.leader_member_id ?? ""}
+                      onChange={(v) => setLeader.mutate(v || null)}
+                      placeholder="Escolher líder"
+                    />
+                  </div>
                   {dept.leader_member_id && <Button size="sm" variant="ghost" onClick={() => setLeader.mutate(null)}>Remover líder</Button>}
                 </div>
               ) : <span />}
@@ -275,10 +261,11 @@ function DepartmentDetail() {
                       </td>
                       <td className="p-4 text-muted-foreground">{r.phone}<br />{r.email}</td>
                       <td className="p-4">
-                        {canManageMembers ? (
-                          <Select value={r.church_role_id ?? ""} onValueChange={(roleId) => changeRole.mutate({ memberId: r.member_id, roleId })}>
+                        {manageAll ? (
+                          <Select value={r.church_role_id ?? "none"} onValueChange={(roleId) => changeRole.mutate({ memberId: r.member_id, roleId: roleId === "none" ? null : roleId })}>
                             <SelectTrigger className="w-44"><SelectValue placeholder="Sem cargo" /></SelectTrigger>
                             <SelectContent>
+                              <SelectItem value="none">Sem cargo</SelectItem>
                               {(roles.data ?? []).map((role) => <SelectItem key={role.id} value={role.id}>{role.name}</SelectItem>)}
                             </SelectContent>
                           </Select>
@@ -345,22 +332,14 @@ function DepartmentDetail() {
           <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); if (candidate) addMember.mutate(); }}>
             <div className="space-y-1.5">
               <Label>Membro</Label>
-              <Select value={candidate} onValueChange={setCandidate}>
-                <SelectTrigger><SelectValue placeholder={candidates.isLoading ? "Carregando..." : "Selecione um membro"} /></SelectTrigger>
-                <SelectContent>
-                  {(candidates.data ?? []).map((c) => <SelectItem key={c.id} value={c.id}>{c.full_name}</SelectItem>)}
-                </SelectContent>
-              </Select>
+              <MemberCombobox
+                options={(candidates.data ?? []).map((c) => ({ id: c.id, label: c.full_name }))}
+                value={candidate}
+                onChange={setCandidate}
+                loading={candidates.isLoading}
+              />
               {!candidates.isLoading && (candidates.data ?? []).length === 0 && <p className="text-xs text-muted-foreground">Todos os membros aprovados já estão neste departamento.</p>}
-            </div>
-            <div className="space-y-1.5">
-              <Label>Cargo no departamento</Label>
-              <Select value={candidateRole || volunteerRole?.id || ""} onValueChange={setCandidateRole}>
-                <SelectTrigger><SelectValue placeholder="Voluntário" /></SelectTrigger>
-                <SelectContent>
-                  {(roles.data ?? []).map((role) => <SelectItem key={role.id} value={role.id}>{role.name}</SelectItem>)}
-                </SelectContent>
-              </Select>
+              <p className="text-xs text-muted-foreground">O cargo é definido no cadastro do membro.</p>
             </div>
             <Button type="submit" className="w-full" disabled={!candidate || addMember.isPending}>Adicionar</Button>
           </form>

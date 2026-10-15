@@ -14,33 +14,69 @@ export type Database = {
   }
   public: {
     Tables: {
+      church_role_departments: {
+        Row: {
+          department_id: string
+          role_id: string
+        }
+        Insert: {
+          department_id: string
+          role_id: string
+        }
+        Update: {
+          department_id?: string
+          role_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "church_role_departments_department_id_fkey"
+            columns: ["department_id"]
+            isOneToOne: false
+            referencedRelation: "departments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "church_role_departments_role_id_fkey"
+            columns: ["role_id"]
+            isOneToOne: false
+            referencedRelation: "church_roles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       church_roles: {
         Row: {
           code: string | null
           created_at: string
           description: string | null
           id: string
+          is_leadership: boolean
           is_system: boolean
           name: string
           permissions: string[]
+          scope: string
         }
         Insert: {
           code?: string | null
           created_at?: string
           description?: string | null
           id?: string
+          is_leadership?: boolean
           is_system?: boolean
           name: string
           permissions?: string[]
+          scope?: string
         }
         Update: {
           code?: string | null
           created_at?: string
           description?: string | null
           id?: string
+          is_leadership?: boolean
           is_system?: boolean
           name?: string
           permissions?: string[]
+          scope?: string
         }
         Relationships: []
       }
@@ -295,6 +331,7 @@ export type Database = {
           baptized: boolean
           birth_date: string | null
           church_role: string | null
+          church_role_id: string | null
           city: string | null
           cpf: string | null
           created_at: string
@@ -324,6 +361,7 @@ export type Database = {
           baptized?: boolean
           birth_date?: string | null
           church_role?: string | null
+          church_role_id?: string | null
           city?: string | null
           cpf?: string | null
           created_at?: string
@@ -353,6 +391,7 @@ export type Database = {
           baptized?: boolean
           birth_date?: string | null
           church_role?: string | null
+          church_role_id?: string | null
           city?: string | null
           cpf?: string | null
           created_at?: string
@@ -373,7 +412,15 @@ export type Database = {
           user_id?: string | null
           zip_code?: string | null
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "members_church_role_id_fkey"
+            columns: ["church_role_id"]
+            isOneToOne: false
+            referencedRelation: "church_roles"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       prayer_requests: {
         Row: {
@@ -584,6 +631,10 @@ export type Database = {
           department_name: string
           member_id: string
         }[]
+      }
+      set_member_church_role: {
+        Args: { _member: string; _role: string }
+        Returns: undefined
       }
       use_invite: { Args: { _code: string }; Returns: boolean }
     }
