@@ -11,3 +11,4 @@
 - [x] Pesquisa em todos os seletores de membro (financeiro e departamentos)
 - [x] Cargos com acesso geral, limitado a departamentos específicos ou onde a pessoa estiver vinculada
 - [x] Cargo de liderança no cadastro pergunta de quais departamentos a pessoa é líder
+- [x] Matrícula no cadastro de membros (única, só a equipe define)

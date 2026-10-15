@@ -1,0 +1,233 @@
+From 2637f3efeb4d18ffafb0434cbe3514b682652ce5 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 15 Oct 2026 16:15:32 +0000
+Subject: [PATCH] =?UTF-8?q?Matr=C3=ADcula=20no=20cadastro=20de=20membros?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Campo matrícula (única, ignora maiúsculas e espaços), definido só pela equipe
+- Aparece no cadastro, perfil, lista, busca e exportação XLS
+- Migration 0009 e members_guard protegendo o campo
+---
+ .../0009_member_registration_number.sql       | 35 +++++++++++++++++++
+ drizzle/migrations/meta/_journal.json         |  7 ++++
+ roadmap.md                                    |  1 +
+ src/components/members/MemberForm.tsx         |  1 +
+ src/integrations/supabase/types.ts            |  3 ++
+ src/lib/departments.ts                        |  5 +++
+ .../_authenticated/painel.membro.$id.tsx      |  5 +--
+ src/routes/_authenticated/painel.membros.tsx  | 14 ++++----
+ 8 files changed, 62 insertions(+), 9 deletions(-)
+ create mode 100644 drizzle/migrations/0009_member_registration_number.sql
+
+diff --git a/drizzle/migrations/0009_member_registration_number.sql b/drizzle/migrations/0009_member_registration_number.sql
+new file mode 100644
+index 0000000..937d543
+--- /dev/null
++++ b/drizzle/migrations/0009_member_registration_number.sql
+@@ -0,0 +1,35 @@
++-- Matrícula do membro: definida pela equipe (não editável pelo próprio membro) e única.
++alter table public.members add column if not exists registration_number text;
++create unique index if not exists members_registration_number_key
++  on public.members (lower(btrim(registration_number)))
++  where registration_number is not null and btrim(registration_number) <> '';
++
++create or replace function public.members_guard()
++returns trigger language plpgsql security definer set search_path = public as $$
++begin
++  new.registration_number := nullif(btrim(new.registration_number), '');
++  if public.has_permission(auth.uid(), 'approve_member') or public.has_permission(auth.uid(), 'edit_member') or public.has_permission(auth.uid(), 'create_member') then
++    if not public.has_permission(auth.uid(), 'manage_departments') then
++      if tg_op = 'INSERT' then new.church_role_id := null;
++      else new.church_role_id := old.church_role_id; end if;
++    end if;
++    new.updated_at := now();
++    return new;
++  end if;
++  if tg_op = 'INSERT' then
++    new.approval_status := 'pendente';
++    new.status := 'membro';
++    new.ministry := null; new.department := null; new.church_role := null; new.church_role_id := null;
++    new.affiliated_on := null;
++    new.registration_number := null;
++  else
++    new.approval_status := case when old.approval_status = 'recusado' then 'pendente' else old.approval_status end;
++    new.status := old.status;
++    new.ministry := old.ministry; new.department := old.department; new.church_role := old.church_role; new.church_role_id := old.church_role_id;
++    new.affiliated_on := old.affiliated_on;
++    new.registration_number := old.registration_number;
++    new.user_id := old.user_id;
++  end if;
++  new.updated_at := now();
++  return new;
++end $$;
+diff --git a/drizzle/migrations/meta/_journal.json b/drizzle/migrations/meta/_journal.json
+index 60bbdc1..dd8fec7 100644
+--- a/drizzle/migrations/meta/_journal.json
++++ b/drizzle/migrations/meta/_journal.json
+@@ -64,6 +64,13 @@
+       "when": 1791718800000,
+       "tag": "0008_role_scope_and_member_role",
+       "breakpoints": true
++    },
++    {
++      "idx": 9,
++      "version": "7",
++      "when": 1791805200000,
++      "tag": "0009_member_registration_number",
++      "breakpoints": true
+     }
+   ]
+ }
+diff --git a/roadmap.md b/roadmap.md
+index 845d9c1..81ae50a 100644
+--- a/roadmap.md
++++ b/roadmap.md
+@@ -11,3 +11,4 @@
+ - [x] Pesquisa em todos os seletores de membro (financeiro e departamentos)
+ - [x] Cargos com acesso geral, limitado a departamentos específicos ou onde a pessoa estiver vinculada
+ - [x] Cargo de liderança no cadastro pergunta de quais departamentos a pessoa é líder
++- [x] Matrícula no cadastro de membros (única, só a equipe define)
+diff --git a/src/components/members/MemberForm.tsx b/src/components/members/MemberForm.tsx
+index 07ad06d..e46632a 100644
+--- a/src/components/members/MemberForm.tsx
++++ b/src/components/members/MemberForm.tsx
+@@ -214,6 +214,7 @@ export function MemberForm({
+       </Section>
+ 
+       <Section title="Dados da igreja">
++        {mode === "admin" && <F label="Matrícula"><Input {...txt("registration_number")} placeholder="Ex.: 0001" /></F>}
+         {mode === "admin" && <F label="Data de filiação"><Input {...dt("affiliated_on")} /></F>}
+         <div className="flex items-center gap-3 pt-6">
+           <Switch checked={!!value.baptized} onCheckedChange={(v) => set({ baptized: v, baptism_date: v ? (value.baptism_date ?? null) : null, baptism_church: v ? (value.baptism_church ?? "") : "" })} />
+diff --git a/src/integrations/supabase/types.ts b/src/integrations/supabase/types.ts
+index 1b0a5bf..f54f020 100644
+--- a/src/integrations/supabase/types.ts
++++ b/src/integrations/supabase/types.ts
+@@ -346,6 +346,7 @@ export type Database = {
+           notes: string | null
+           phone: string | null
+           photo_path: string | null
++          registration_number: string | null
+           rg: string | null
+           status: string
+           updated_at: string
+@@ -376,6 +377,7 @@ export type Database = {
+           notes?: string | null
+           phone?: string | null
+           photo_path?: string | null
++          registration_number?: string | null
+           rg?: string | null
+           status?: string
+           updated_at?: string
+@@ -406,6 +408,7 @@ export type Database = {
+           notes?: string | null
+           phone?: string | null
+           photo_path?: string | null
++          registration_number?: string | null
+           rg?: string | null
+           status?: string
+           updated_at?: string
+diff --git a/src/lib/departments.ts b/src/lib/departments.ts
+index cdafc0a..24126fa 100644
+--- a/src/lib/departments.ts
++++ b/src/lib/departments.ts
+@@ -63,3 +63,8 @@ export async function saveMemberDepartmentLinks(args: {
+     args.currentLeaders,
+   );
+ }
++
++/** Traduz erros do banco ao salvar um membro. */
++export function memberSaveError(e: { message: string }) {
++  return e.message.includes("members_registration_number_key") ? "Já existe um membro com esta matrícula." : e.message;
++}
+diff --git a/src/routes/_authenticated/painel.membro.$id.tsx b/src/routes/_authenticated/painel.membro.$id.tsx
+index 6dee2f5..07c1b28 100644
+--- a/src/routes/_authenticated/painel.membro.$id.tsx
++++ b/src/routes/_authenticated/painel.membro.$id.tsx
+@@ -18,7 +18,7 @@ import {
+ import { MemberAvatar, MemberForm, type MemberDraft } from "@/components/members/MemberForm";
+ import { APPROVAL_LABELS, MEMBER_STATUS, ageFrom, brl, dateBR } from "@/lib/church";
+ import { siteMeta } from "@/lib/site-query";
+-import { saveMemberDepartmentLinks } from "@/lib/departments";
++import { memberSaveError, saveMemberDepartmentLinks } from "@/lib/departments";
+ import { useChurchRoles, useDepartments, useMemberDepartments } from "@/hooks/use-departments";
+ 
+ export const Route = createFileRoute("/_authenticated/painel/membro/$id")({
+@@ -124,7 +124,7 @@ function MemberProfile() {
+       qc.invalidateQueries({ queryKey: ["departments"] });
+       qc.invalidateQueries({ queryKey: ["my-dept-roles"] });
+     },
+-    onError: (e: Error) => toast.error(e.message),
++    onError: (e: Error) => toast.error(memberSaveError(e)),
+   });
+ 
+   const all = useMemo(() => contributions.data ?? [], [contributions.data]);
+@@ -219,6 +219,7 @@ function MemberProfile() {
+         </Block>
+ 
+         <Block title="Vida na igreja">
++          <Field label="Matrícula">{m.registration_number}</Field>
+           <Field label="Filiação">{dateBR(m.affiliated_on)}</Field>
+           <Field label="Batizado">
+             {m.baptized ? `Sim${m.baptism_date ? `, em ${dateBR(m.baptism_date)}` : ""}` : "Não"}
+diff --git a/src/routes/_authenticated/painel.membros.tsx b/src/routes/_authenticated/painel.membros.tsx
+index 56d1464..963d782 100644
+--- a/src/routes/_authenticated/painel.membros.tsx
++++ b/src/routes/_authenticated/painel.membros.tsx
+@@ -17,7 +17,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
+ import { MemberForm, MemberAvatar, emptyMember, type MemberDraft } from "@/components/members/MemberForm";
+ import { APPROVAL_LABELS, MEMBER_STATUS, ageFrom, dateBR } from "@/lib/church";
+ import { downloadXls } from "@/lib/export";
+-import { saveMemberDepartmentLinks } from "@/lib/departments";
++import { memberSaveError, saveMemberDepartmentLinks } from "@/lib/departments";
+ import { useChurchRoles, useDepartments, useMemberDepartments } from "@/hooks/use-departments";
+ 
+ export const Route = createFileRoute("/_authenticated/painel/membros")({
+@@ -96,7 +96,7 @@ function MembersPage() {
+       qc.invalidateQueries({ queryKey: ["departments"] });
+       qc.invalidateQueries({ queryKey: ["my-dept-roles"] });
+     },
+-    onError: (e) => toast.error(e.message),
++    onError: (e) => toast.error(memberSaveError(e)),
+   });
+ 
+   const setApproval = useMutation({
+@@ -127,12 +127,12 @@ function MembersPage() {
+   const filtered = approved.filter(
+     (m) =>
+       (statusFilter === "todos" || m.status === statusFilter) &&
+-      (m.full_name.toLowerCase().includes(search.toLowerCase()) || (m.cpf ?? "").includes(search)),
++      (m.full_name.toLowerCase().includes(search.toLowerCase()) || (m.cpf ?? "").includes(search) || (m.registration_number ?? "").toLowerCase().includes(search.toLowerCase())),
+   );
+ 
+   function exportXls() {
+-    const head = ["Nome", "Nascimento", "Idade", "CPF", "RG", "Telefone", "E-mail", "Endereço", "Bairro", "Cidade", "CEP", "Estado civil", "Filiação", "Batizado", "Data batismo", "Igreja do batismo", "Departamento", "Cargo", "Status"];
+-    const rows = filtered.map((m) => [m.full_name, dateBR(m.birth_date), ageFrom(m.birth_date) ?? "", m.cpf, m.rg, m.phone, m.email, m.address, m.neighborhood, m.city, m.zip_code, m.marital_status, dateBR(m.affiliated_on), m.baptized ? "Sim" : "Não", dateBR(m.baptism_date), m.baptism_church, deptNames(m.id).join(", "), roleName(m.church_role_id), MEMBER_STATUS[m.status] ?? m.status]);
++    const head = ["Matrícula", "Nome", "Nascimento", "Idade", "CPF", "RG", "Telefone", "E-mail", "Endereço", "Bairro", "Cidade", "CEP", "Estado civil", "Filiação", "Batizado", "Data batismo", "Igreja do batismo", "Departamento", "Cargo", "Status"];
++    const rows = filtered.map((m) => [m.registration_number, m.full_name, dateBR(m.birth_date), ageFrom(m.birth_date) ?? "", m.cpf, m.rg, m.phone, m.email, m.address, m.neighborhood, m.city, m.zip_code, m.marital_status, dateBR(m.affiliated_on), m.baptized ? "Sim" : "Não", dateBR(m.baptism_date), m.baptism_church, deptNames(m.id).join(", "), roleName(m.church_role_id), MEMBER_STATUS[m.status] ?? m.status]);
+     downloadXls("membros", [head, ...rows], "Membros");
+   }
+ 
+@@ -159,7 +159,7 @@ function MembersPage() {
+           <div className="mt-4 flex flex-wrap gap-3">
+             <div className="relative w-full max-w-sm">
+               <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+-              <Input className="pl-9" placeholder="Buscar por nome ou CPF" value={search} onChange={(e) => setSearch(e.target.value)} />
++              <Input className="pl-9" placeholder="Buscar por nome, CPF ou matrícula" value={search} onChange={(e) => setSearch(e.target.value)} />
+             </div>
+             <Select value={statusFilter} onValueChange={setStatusFilter}>
+               <SelectTrigger className="w-44"><SelectValue /></SelectTrigger>
+@@ -192,7 +192,7 @@ function MembersPage() {
+                           <MemberAvatar path={m.photo_path} />
+                           <div>
+                             <Link to="/painel/membro/$id" params={{ id: m.id }} className="font-medium text-foreground hover:text-primary hover:underline">{m.full_name}</Link>
+-                            <p className="text-xs text-muted-foreground">{age !== null ? `${age} anos` : ""}{m.baptized ? " · Batizado" : ""}</p>
++                            <p className="text-xs text-muted-foreground">{[m.registration_number ? `Matrícula ${m.registration_number}` : "", age !== null ? `${age} anos` : "", m.baptized ? "Batizado" : ""].filter(Boolean).join(" · ")}</p>
+                           </div>
+                         </div>
+                       </td>
+-- 
+2.43.0
+

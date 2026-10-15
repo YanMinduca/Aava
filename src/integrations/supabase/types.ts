@@ -346,6 +346,7 @@ export type Database = {
           notes: string | null
           phone: string | null
           photo_path: string | null
+          registration_number: string | null
           rg: string | null
           status: string
           updated_at: string
@@ -376,6 +377,7 @@ export type Database = {
           notes?: string | null
           phone?: string | null
           photo_path?: string | null
+          registration_number?: string | null
           rg?: string | null
           status?: string
           updated_at?: string
@@ -406,6 +408,7 @@ export type Database = {
           notes?: string | null
           phone?: string | null
           photo_path?: string | null
+          registration_number?: string | null
           rg?: string | null
           status?: string
           updated_at?: string
