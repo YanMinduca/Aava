@@ -10,6 +10,7 @@ import { useAccess } from "@/hooks/use-access";
 import { EXPENSE_CATEGORIES, INCOME_CATEGORIES, MEMBER_LINK_CATEGORIES, MONTHS, PAYMENT_METHODS, brl, dateBR } from "@/lib/church";
 import { byCategory, expenses, goalProgress, inPeriod, incomes, sum, txRows, type Goal, type Tx, type TxWithMember } from "@/lib/finance";
 import { downloadXls } from "@/lib/export";
+import { MemberCombobox } from "@/components/members/MemberCombobox";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -30,7 +31,6 @@ const today = () => new Date().toISOString().slice(0, 10);
 const GOAL_STATUS: Record<string, string> = { em_andamento: "Em andamento", concluida: "Concluída", pausada: "Pausada", cancelada: "Cancelada" };
 
 type TxDraft = { id?: string; kind: string; category: string; amount: string; occurred_on: string; description: string; responsible: string; payment_method: string; notes: string; receipt_path: string | null; member_id: string };
-const NO_MEMBER = "__none";
 const canLinkMember = (kind: string, category: string) => kind === "entrada" && MEMBER_LINK_CATEGORIES.includes(category);
 const emptyTx = (kind = "entrada"): TxDraft => ({ kind, category: kind === "entrada" ? "Dízimos" : "Aluguel", amount: "", occurred_on: today(), description: "", responsible: "", payment_method: "Pix", notes: "", receipt_path: null, member_id: "" });
 
@@ -361,11 +361,12 @@ function TxDialog({ draft, setDraft, onSave, saving }: { draft: TxDraft | null; 
           {linkable && (
             <div className="space-y-1.5">
               <Label>Membro (opcional)</Label>
-              <Sel
-                value={draft.member_id || NO_MEMBER}
-                onChange={(v) => set({ member_id: v === NO_MEMBER ? "" : v })}
-                placeholder={members.isLoading ? "Carregando..." : "Selecione o membro"}
-                options={[[NO_MEMBER, `Sem membro (${draft.category === "Ofertas" ? "oferta anônima" : "dízimo anônimo"})`], ...(members.data ?? []).map((m): [string, string] => [m.id, m.full_name])]}
+              <MemberCombobox
+                value={draft.member_id}
+                onChange={(v) => set({ member_id: v })}
+                loading={members.isLoading}
+                noneLabel={`Sem membro (${draft.category === "Ofertas" ? "oferta anônima" : "dízimo anônimo"})`}
+                options={(members.data ?? []).map((m) => ({ id: m.id, label: m.full_name }))}
               />
               <p className="text-xs text-muted-foreground">O lançamento aparece no histórico do membro, no perfil dele.</p>
             </div>

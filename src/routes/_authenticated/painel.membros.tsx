@@ -17,8 +17,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { MemberForm, MemberAvatar, emptyMember, type MemberDraft } from "@/components/members/MemberForm";
 import { APPROVAL_LABELS, MEMBER_STATUS, ageFrom, dateBR } from "@/lib/church";
 import { downloadXls } from "@/lib/export";
-import { syncMemberDepartments } from "@/lib/departments";
-import { useDepartments, useMemberDepartments } from "@/hooks/use-departments";
+import { saveMemberDepartmentLinks } from "@/lib/departments";
+import { useChurchRoles, useDepartments, useMemberDepartments } from "@/hooks/use-departments";
 
 export const Route = createFileRoute("/_authenticated/painel/membros")({
   head: () => siteMeta("Membros — Comunidade Aava", "Cadastros, aprovação e convites da Comunidade Aava."),
@@ -33,8 +33,12 @@ function MembersPage() {
   const [editing, setEditing] = useState<MemberDraft | null>(null);
   const [notes, setNotes] = useState("");
   const [deptIds, setDeptIds] = useState<string[]>([]);
+  const [leaderIds, setLeaderIds] = useState<string[]>([]);
   const canLinkDepartments = can("manage_departments");
   const departments = useDepartments();
+  const roles = useChurchRoles();
+  const roleName = (id: string | null) => roles.data?.find((r) => r.id === id)?.name ?? "";
+  const currentLeaders = () => Object.fromEntries((departments.data ?? []).map((d) => [d.id, d.leader_member_id]));
   const memberDepts = useMemberDepartments(can("view_members") || can("view_departments"));
   const deptNames = (id: string) => (memberDepts.data?.get(id) ?? []).map((d) => d.name);
 
@@ -51,6 +55,7 @@ function MembersPage() {
     setEditing(m);
     setNotes("");
     setDeptIds(m.id ? (memberDepts.data?.get(m.id) ?? []).map((d) => d.id) : []);
+    setLeaderIds(m.id ? (departments.data ?? []).filter((d) => d.leader_member_id === m.id).map((d) => d.id) : []);
     if (m.id && can("view_member_notes")) {
       const { data } = await supabase.from("member_notes").select("notes").eq("member_id", m.id).maybeSingle();
       setNotes(data?.notes ?? "");
@@ -73,7 +78,15 @@ function MembersPage() {
       if (memberId && can("view_member_notes")) {
         await supabase.from("member_notes").upsert({ member_id: memberId, notes });
       }
-      if (memberId && canLinkDepartments) await syncMemberDepartments(memberId, deptIds);
+      if (memberId && canLinkDepartments) {
+        await saveMemberDepartmentLinks({
+          memberId,
+          departmentIds: deptIds,
+          leaderDepartmentIds: leaderIds,
+          isLeadershipRole: !!roles.data?.find((r) => r.id === m.church_role_id)?.is_leadership,
+          currentLeaders: currentLeaders(),
+        });
+      }
     },
     onSuccess: () => {
       toast.success("Cadastro salvo");
@@ -81,6 +94,7 @@ function MembersPage() {
       qc.invalidateQueries({ queryKey: ["members"] });
       qc.invalidateQueries({ queryKey: ["member-departments"] });
       qc.invalidateQueries({ queryKey: ["departments"] });
+      qc.invalidateQueries({ queryKey: ["my-dept-roles"] });
     },
     onError: (e) => toast.error(e.message),
   });
@@ -118,7 +132,7 @@ function MembersPage() {
 
   function exportXls() {
     const head = ["Nome", "Nascimento", "Idade", "CPF", "RG", "Telefone", "E-mail", "Endereço", "Bairro", "Cidade", "CEP", "Estado civil", "Filiação", "Batizado", "Data batismo", "Igreja do batismo", "Departamento", "Cargo", "Status"];
-    const rows = filtered.map((m) => [m.full_name, dateBR(m.birth_date), ageFrom(m.birth_date) ?? "", m.cpf, m.rg, m.phone, m.email, m.address, m.neighborhood, m.city, m.zip_code, m.marital_status, dateBR(m.affiliated_on), m.baptized ? "Sim" : "Não", dateBR(m.baptism_date), m.baptism_church, deptNames(m.id).join(", "), m.church_role, MEMBER_STATUS[m.status] ?? m.status]);
+    const rows = filtered.map((m) => [m.full_name, dateBR(m.birth_date), ageFrom(m.birth_date) ?? "", m.cpf, m.rg, m.phone, m.email, m.address, m.neighborhood, m.city, m.zip_code, m.marital_status, dateBR(m.affiliated_on), m.baptized ? "Sim" : "Não", dateBR(m.baptism_date), m.baptism_church, deptNames(m.id).join(", "), roleName(m.church_role_id), MEMBER_STATUS[m.status] ?? m.status]);
     downloadXls("membros", [head, ...rows], "Membros");
   }
 
@@ -183,7 +197,7 @@ function MembersPage() {
                         </div>
                       </td>
                       <td className="p-4 text-muted-foreground">{m.phone}<br />{m.email}</td>
-                      <td className="p-4 text-muted-foreground">{[deptNames(m.id).join(", "), m.church_role].filter(Boolean).join(" · ") || "—"}</td>
+                      <td className="p-4 text-muted-foreground">{[deptNames(m.id).join(", "), roleName(m.church_role_id)].filter(Boolean).join(" · ") || "—"}</td>
                       <td className="p-4">
                         <Badge variant={m.status === "membro_ativo" ? "default" : "secondary"}>{MEMBER_STATUS[m.status] ?? m.status}</Badge>
                         {m.approval_status === "recusado" && <p className="mt-1 text-xs text-destructive">Recusado</p>}
@@ -266,6 +280,9 @@ function MembersPage() {
                       departments: (departments.data ?? []).map((d) => ({ id: d.id, name: d.name })),
                       departmentIds: deptIds,
                       onDepartmentIdsChange: setDeptIds,
+                      roles: (roles.data ?? []).map((r) => ({ id: r.id, name: r.name, is_leadership: r.is_leadership })),
+                      leaderDepartmentIds: leaderIds,
+                      onLeaderDepartmentIdsChange: setLeaderIds,
                     }
                   : {})}
               />

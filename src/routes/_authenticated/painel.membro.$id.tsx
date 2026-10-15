@@ -18,8 +18,8 @@ import {
 import { MemberAvatar, MemberForm, type MemberDraft } from "@/components/members/MemberForm";
 import { APPROVAL_LABELS, MEMBER_STATUS, ageFrom, brl, dateBR } from "@/lib/church";
 import { siteMeta } from "@/lib/site-query";
-import { syncMemberDepartments } from "@/lib/departments";
-import { useDepartments, useMemberDepartments } from "@/hooks/use-departments";
+import { saveMemberDepartmentLinks } from "@/lib/departments";
+import { useChurchRoles, useDepartments, useMemberDepartments } from "@/hooks/use-departments";
 
 export const Route = createFileRoute("/_authenticated/painel/membro/$id")({
   head: () =>
@@ -52,6 +52,8 @@ function MemberProfile() {
   const [editing, setEditing] = useState<MemberDraft | null>(null);
   const [year, setYear] = useState("todos");
   const [deptIds, setDeptIds] = useState<string[]>([]);
+  const [leaderIds, setLeaderIds] = useState<string[]>([]);
+  const roles = useChurchRoles();
   const canLinkDepartments = can("manage_departments");
   const departments = useDepartments();
   const memberDepts = useMemberDepartments(can("view_members") || can("view_departments"));
@@ -103,7 +105,15 @@ function MemberProfile() {
         .update({ ...rest, notes: null })
         .eq("id", id);
       if (error) throw error;
-      if (canLinkDepartments) await syncMemberDepartments(id, deptIds);
+      if (canLinkDepartments) {
+        await saveMemberDepartmentLinks({
+          memberId: id,
+          departmentIds: deptIds,
+          leaderDepartmentIds: leaderIds,
+          isLeadershipRole: !!roles.data?.find((r) => r.id === m.church_role_id)?.is_leadership,
+          currentLeaders: Object.fromEntries((departments.data ?? []).map((d) => [d.id, d.leader_member_id])),
+        });
+      }
     },
     onSuccess: () => {
       toast.success("Cadastro salvo");
@@ -112,6 +122,7 @@ function MemberProfile() {
       qc.invalidateQueries({ queryKey: ["members"] });
       qc.invalidateQueries({ queryKey: ["member-departments"] });
       qc.invalidateQueries({ queryKey: ["departments"] });
+      qc.invalidateQueries({ queryKey: ["my-dept-roles"] });
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -182,6 +193,7 @@ function MemberProfile() {
         {can("edit_member") && (
           <Button variant="outline" onClick={() => {
               setDeptIds((memberDepts.data?.get(m.id) ?? []).map((d) => d.id));
+              setLeaderIds((departments.data ?? []).filter((d) => d.leader_member_id === m.id).map((d) => d.id));
               setEditing({ ...m });
             }}>
             <Pencil className="h-4 w-4" /> Editar cadastro
@@ -213,7 +225,7 @@ function MemberProfile() {
           </Field>
           <Field label="Igreja onde se batizou">{m.baptized ? m.baptism_church : ""}</Field>
           <Field label="Departamento">{(memberDepts.data?.get(m.id) ?? []).map((d) => d.name).join(", ")}</Field>
-          <Field label="Cargo">{m.church_role}</Field>
+          <Field label="Cargo">{roles.data?.find((r) => r.id === m.church_role_id)?.name}</Field>
         </Block>
 
         {can("view_member_notes") && (
@@ -354,6 +366,9 @@ function MemberProfile() {
                       departments: (departments.data ?? []).map((d) => ({ id: d.id, name: d.name })),
                       departmentIds: deptIds,
                       onDepartmentIdsChange: setDeptIds,
+                      roles: (roles.data ?? []).map((r) => ({ id: r.id, name: r.name, is_leadership: r.is_leadership })),
+                      leaderDepartmentIds: leaderIds,
+                      onLeaderDepartmentIdsChange: setLeaderIds,
                     }
                   : {})}
               />

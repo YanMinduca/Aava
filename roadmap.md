@@ -7,3 +7,7 @@
 - [ ] Verify permissions, tests and pages- [x] Exportações em XLS (membros, financeiro e relatórios)
 - [x] Cadastro de membros: só data de filiação e departamento em menu de opções
 - [x] Página Departamentos: voluntários, líder, relatório e cargos com permissões por departamento
+- [x] Cargo no cadastro de membros limitado aos cargos criados em Departamentos
+- [x] Pesquisa em todos os seletores de membro (financeiro e departamentos)
+- [x] Cargos com acesso geral, limitado a departamentos específicos ou onde a pessoa estiver vinculada
+- [x] Cargo de liderança no cadastro pergunta de quais departamentos a pessoa é líder

@@ -57,6 +57,13 @@
       "when": 1791632400000,
       "tag": "0007_departments_and_church_roles",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1791718800000,
+      "tag": "0008_role_scope_and_member_role",
+      "breakpoints": true
     }
   ]
 }
