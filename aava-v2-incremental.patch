@@ -1,0 +1,1233 @@
+From 9030e99b22d0d3faffe15c862486c9becd44844d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 15 Oct 2026 03:14:28 +0000
+Subject: [PATCH] =?UTF-8?q?Cargo=20por=20membro=20com=20alcance=20por=20de?=
+ =?UTF-8?q?partamento,=20busca=20de=20membros=20e=20lideran=C3=A7a=20no=20?=
+ =?UTF-8?q?cadastro?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Cargo do membro escolhido no cadastro entre os cargos criados em Departamentos
+- Cada cargo: acesso geral, departamentos específicos ou onde a pessoa está vinculada
+- Cargo de liderança pergunta de quais departamentos selecionados o membro é líder
+- Seletor de membro com pesquisa (financeiro, departamentos)
+- Migration 0008 e members_guard protegendo a atribuição de cargo
+---
+ .../0008_role_scope_and_member_role.sql       | 118 ++++++++++++++++
+ drizzle/migrations/meta/_journal.json         |   7 +
+ roadmap.md                                    |   4 +
+ src/components/members/MemberCombobox.tsx     |  93 +++++++++++++
+ src/components/members/MemberForm.tsx         |  45 ++++++-
+ src/hooks/use-departments.ts                  |  41 ++++--
+ src/integrations/supabase/types.ts            |  53 +++++++-
+ src/lib/departments.ts                        |  60 +++++++--
+ .../painel.departamento.$id.tsx               |  65 +++------
+ .../_authenticated/painel.departamentos.tsx   | 127 +++++++++++++++---
+ .../_authenticated/painel.financeiro.tsx      |  13 +-
+ .../_authenticated/painel.membro.$id.tsx      |  23 +++-
+ src/routes/_authenticated/painel.membros.tsx  |  27 +++-
+ 13 files changed, 579 insertions(+), 97 deletions(-)
+ create mode 100644 drizzle/migrations/0008_role_scope_and_member_role.sql
+ create mode 100644 src/components/members/MemberCombobox.tsx
+
+diff --git a/drizzle/migrations/0008_role_scope_and_member_role.sql b/drizzle/migrations/0008_role_scope_and_member_role.sql
+new file mode 100644
+index 0000000..cb28501
+--- /dev/null
++++ b/drizzle/migrations/0008_role_scope_and_member_role.sql
+@@ -0,0 +1,118 @@
++-- Cargo passa a ser do MEMBRO (escolhido no cadastro) e cada cargo define seu alcance:
++--   'all'      = acesso geral (todos os departamentos)
++--   'selected' = só os departamentos escolhidos na criação do cargo
++--   'linked'   = só os departamentos em que a pessoa está vinculada (padrão)
++-- Pode rodar mais de uma vez.
++
++alter table public.church_roles
++  add column if not exists scope text not null default 'linked',
++  add column if not exists is_leadership boolean not null default false;
++do $$ begin
++  if not exists (select 1 from pg_constraint where conname = 'church_roles_scope_check') then
++    alter table public.church_roles add constraint church_roles_scope_check check (scope in ('all','selected','linked'));
++  end if;
++end $$;
++update public.church_roles set is_leadership = true where code = 'leader';
++
++create table if not exists public.church_role_departments (
++  role_id uuid not null references public.church_roles(id) on delete cascade,
++  department_id uuid not null references public.departments(id) on delete cascade,
++  primary key (role_id, department_id)
++);
++alter table public.church_role_departments enable row level security;
++drop policy if exists "role_departments read" on public.church_role_departments;
++create policy "role_departments read" on public.church_role_departments for select to authenticated using (true);
++drop policy if exists "role_departments leadership write" on public.church_role_departments;
++create policy "role_departments leadership write" on public.church_role_departments for all to authenticated
++  using (public.is_church_leadership(auth.uid())) with check (public.is_church_leadership(auth.uid()));
++revoke all on public.church_role_departments from anon;
++grant select, insert, update, delete on public.church_role_departments to authenticated;
++
++alter table public.members
++  add column if not exists church_role_id uuid references public.church_roles(id) on delete set null;
++create index if not exists members_church_role_idx on public.members (church_role_id) where church_role_id is not null;
++
++-- O cargo vinha do vínculo com o departamento; agora vem do membro.
++create or replace function public.has_dept_permission(_user_id uuid, _dept uuid, _perm text)
++returns boolean language sql stable security definer set search_path = public as $$
++  select _user_id is not null and (
++    public.is_church_leadership(_user_id)
++    or public.has_permission(_user_id, 'manage_departments')
++    or exists (
++      select 1 from public.members m
++      join public.church_roles r on r.id = m.church_role_id
++      where m.user_id = _user_id and _perm = any (r.permissions)
++        and (
++          r.scope = 'all'
++          or (r.scope = 'selected' and exists (
++                select 1 from public.church_role_departments rd where rd.role_id = r.id and rd.department_id = _dept))
++          or (r.scope = 'linked' and exists (
++                select 1 from public.department_members dm where dm.member_id = m.id and dm.department_id = _dept))
++        )
++    )
++    or exists (
++      select 1 from public.departments d
++      join public.members m on m.id = d.leader_member_id
++      where m.user_id = _user_id and d.id = _dept
++        and _perm in ('dept_view', 'dept_manage_members', 'dept_report')
++    )
++  );
++$$;
++
++create or replace function public.department_roster(_dept uuid)
++returns table (member_id uuid, full_name text, phone text, email text, photo_path text, status text,
++               church_role_id uuid, role_name text, joined_at timestamptz, is_leader boolean)
++language plpgsql stable security definer set search_path = public as $$
++begin
++  if not public.can_view_department(auth.uid(), _dept) then raise exception 'Acesso negado'; end if;
++  return query
++    select m.id, m.full_name, m.phone, m.email, m.photo_path, m.status,
++           m.church_role_id, r.name, dm.joined_at, (d.leader_member_id = m.id)
++    from public.department_members dm
++    join public.members m on m.id = dm.member_id
++    join public.departments d on d.id = dm.department_id
++    left join public.church_roles r on r.id = m.church_role_id
++    where dm.department_id = _dept
++    order by (d.leader_member_id = m.id) desc, m.full_name;
++end $$;
++
++-- department_members.church_role_id fica (obsoleto, só por compatibilidade): o cargo agora é members.church_role_id.
++comment on column public.department_members.church_role_id is 'DEPRECATED: o cargo agora fica em members.church_role_id';
++
++-- Quem pode atribuir cargo a um membro: só quem gerencia departamentos (CEO/Pastor Presidente têm por padrão)
++create or replace function public.set_member_church_role(_member uuid, _role uuid)
++returns void language plpgsql security definer set search_path = public as $$
++begin
++  if not public.has_permission(auth.uid(), 'manage_departments') then raise exception 'Acesso negado'; end if;
++  update public.members set church_role_id = _role where id = _member;
++end $$;
++revoke all on function public.set_member_church_role(uuid, uuid) from public, anon;
++grant execute on function public.set_member_church_role(uuid, uuid) to authenticated;
++
++-- members_guard: o cargo concede permissões, então só muda com 'manage_departments'
++create or replace function public.members_guard()
++returns trigger language plpgsql security definer set search_path = public as $$
++begin
++  if public.has_permission(auth.uid(), 'approve_member') or public.has_permission(auth.uid(), 'edit_member') or public.has_permission(auth.uid(), 'create_member') then
++    if not public.has_permission(auth.uid(), 'manage_departments') then
++      if tg_op = 'INSERT' then new.church_role_id := null;
++      else new.church_role_id := old.church_role_id; end if;
++    end if;
++    new.updated_at := now();
++    return new;
++  end if;
++  if tg_op = 'INSERT' then
++    new.approval_status := 'pendente';
++    new.status := 'membro';
++    new.ministry := null; new.department := null; new.church_role := null; new.church_role_id := null;
++    new.affiliated_on := null;
++  else
++    new.approval_status := case when old.approval_status = 'recusado' then 'pendente' else old.approval_status end;
++    new.status := old.status;
++    new.ministry := old.ministry; new.department := old.department; new.church_role := old.church_role; new.church_role_id := old.church_role_id;
++    new.affiliated_on := old.affiliated_on;
++    new.user_id := old.user_id;
++  end if;
++  new.updated_at := now();
++  return new;
++end $$;
+diff --git a/drizzle/migrations/meta/_journal.json b/drizzle/migrations/meta/_journal.json
+index 7e37567..60bbdc1 100644
+--- a/drizzle/migrations/meta/_journal.json
++++ b/drizzle/migrations/meta/_journal.json
+@@ -57,6 +57,13 @@
+       "when": 1791632400000,
+       "tag": "0007_departments_and_church_roles",
+       "breakpoints": true
++    },
++    {
++      "idx": 8,
++      "version": "7",
++      "when": 1791718800000,
++      "tag": "0008_role_scope_and_member_role",
++      "breakpoints": true
+     }
+   ]
+ }
+diff --git a/roadmap.md b/roadmap.md
+index 1df9eed..845d9c1 100644
+--- a/roadmap.md
++++ b/roadmap.md
+@@ -7,3 +7,7 @@
+ - [ ] Verify permissions, tests and pages- [x] Exportações em XLS (membros, financeiro e relatórios)
+ - [x] Cadastro de membros: só data de filiação e departamento em menu de opções
+ - [x] Página Departamentos: voluntários, líder, relatório e cargos com permissões por departamento
++- [x] Cargo no cadastro de membros limitado aos cargos criados em Departamentos
++- [x] Pesquisa em todos os seletores de membro (financeiro e departamentos)
++- [x] Cargos com acesso geral, limitado a departamentos específicos ou onde a pessoa estiver vinculada
++- [x] Cargo de liderança no cadastro pergunta de quais departamentos a pessoa é líder
+diff --git a/src/components/members/MemberCombobox.tsx b/src/components/members/MemberCombobox.tsx
+new file mode 100644
+index 0000000..0993983
+--- /dev/null
++++ b/src/components/members/MemberCombobox.tsx
+@@ -0,0 +1,93 @@
++import { useState } from "react";
++import { Check, ChevronsUpDown } from "lucide-react";
++import { cn } from "@/lib/utils";
++import { Button } from "@/components/ui/button";
++import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
++import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
++
++export type MemberOption = { id: string; label: string };
++
++const norm = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
++
++/**
++ * Seletor de membro com busca (ignora acentos e maiúsculas: "jose" encontra "José").
++ * Use em qualquer lugar onde antes havia um menu simples de membros.
++ * `noneLabel` adiciona uma primeira opção para limpar a seleção (ex.: "Sem membro").
++ */
++export function MemberCombobox({
++  options,
++  value,
++  onChange,
++  placeholder = "Selecione o membro",
++  noneLabel,
++  loading,
++  className,
++}: {
++  options: MemberOption[];
++  value: string;
++  onChange: (id: string) => void;
++  placeholder?: string;
++  noneLabel?: string;
++  loading?: boolean;
++  className?: string;
++}) {
++  const [open, setOpen] = useState(false);
++  const [search, setSearch] = useState("");
++  const selected = options.find((o) => o.id === value);
++  const q = norm(search.trim());
++  const shown = q ? options.filter((o) => norm(o.label).includes(q)) : options;
++
++  return (
++    <Popover
++      open={open}
++      onOpenChange={(o) => {
++        setOpen(o);
++        if (!o) setSearch("");
++      }}
++    >
++      <PopoverTrigger asChild>
++        <Button type="button" variant="outline" role="combobox" aria-expanded={open} className={cn("w-full justify-between font-normal", className)}>
++          <span className={cn("truncate", !selected && !(noneLabel && !value) && "text-muted-foreground")}>
++            {loading ? "Carregando..." : (selected?.label ?? (noneLabel && !value ? noneLabel : placeholder))}
++          </span>
++          <ChevronsUpDown className="h-4 w-4 shrink-0 opacity-50" />
++        </Button>
++      </PopoverTrigger>
++      <PopoverContent align="start" className="w-[var(--radix-popover-trigger-width)] min-w-64 p-0">
++        <Command shouldFilter={false}>
++          <CommandInput placeholder="Pesquisar membro..." value={search} onValueChange={setSearch} />
++          <CommandList>
++            <CommandEmpty>Nenhum membro encontrado.</CommandEmpty>
++            <CommandGroup>
++              {noneLabel && !q && (
++                <CommandItem
++                  value="__none__"
++                  onSelect={() => {
++                    onChange("");
++                    setOpen(false);
++                  }}
++                >
++                  <Check className={cn("mr-2 h-4 w-4", value ? "opacity-0" : "opacity-100")} />
++                  {noneLabel}
++                </CommandItem>
++              )}
++              {shown.map((o) => (
++                <CommandItem
++                  key={o.id}
++                  value={o.id}
++                  onSelect={() => {
++                    onChange(o.id);
++                    setOpen(false);
++                  }}
++                >
++                  <Check className={cn("mr-2 h-4 w-4", value === o.id ? "opacity-100" : "opacity-0")} />
++                  {o.label}
++                </CommandItem>
++              ))}
++            </CommandGroup>
++          </CommandList>
++        </Command>
++      </PopoverContent>
++    </Popover>
++  );
++}
+diff --git a/src/components/members/MemberForm.tsx b/src/components/members/MemberForm.tsx
+index 31ad92c..07ad06d 100644
+--- a/src/components/members/MemberForm.tsx
++++ b/src/components/members/MemberForm.tsx
+@@ -17,7 +17,7 @@ export type MemberDraft = TablesInsert<"members"> & { id?: string };
+ 
+ export const emptyMember: MemberDraft = {
+   full_name: "", email: "", phone: "", birth_date: null, address: "", cpf: "", rg: "", marital_status: null,
+-  affiliated_on: null, baptized: false, baptism_date: null, church_role: "",
++  affiliated_on: null, baptized: false, baptism_date: null, church_role_id: null,
+   status: "membro", photo_path: null,
+   neighborhood: "", city: "", zip_code: "", baptism_church: "",
+ };
+@@ -43,6 +43,7 @@ export function MemberAvatar({ path, size = "h-10 w-10" }: { path?: string | nul
+ }
+ 
+ export type DepartmentOption = { id: string; name: string };
++export type RoleOption = { id: string; name: string; is_leadership: boolean };
+ 
+ /** Menu de opções (seleção múltipla) com os departamentos cadastrados na página Departamentos. */
+ function DepartmentPicker({ options, value, onChange }: { options: DepartmentOption[]; value: string[]; onChange: (ids: string[]) => void }) {
+@@ -104,6 +105,9 @@ export function MemberForm({
+   departments,
+   departmentIds,
+   onDepartmentIdsChange,
++  roles,
++  leaderDepartmentIds,
++  onLeaderDepartmentIdsChange,
+ }: {
+   value: MemberDraft;
+   onChange: (v: MemberDraft) => void;
+@@ -115,10 +119,17 @@ export function MemberForm({
+   departments?: DepartmentOption[];
+   departmentIds?: string[];
+   onDepartmentIdsChange?: (ids: string[]) => void;
++  /** Cargos criados na área de Departamentos. Só é passado para quem pode atribuir cargos. */
++  roles?: RoleOption[];
++  /** Departamentos dos quais o membro é líder (perguntado quando o cargo é de liderança). */
++  leaderDepartmentIds?: string[];
++  onLeaderDepartmentIdsChange?: (ids: string[]) => void;
+ }) {
+   const set = (patch: Partial<MemberDraft>) => onChange({ ...value, ...patch });
+   const age = ageFrom(value.birth_date);
+   const [uploading, setUploading] = useState(false);
++  const isLeadershipRole = !!roles?.find((r) => r.id === value.church_role_id)?.is_leadership;
++  const selectedDepartments = (departments ?? []).filter((d) => (departmentIds ?? []).includes(d.id));
+ 
+   async function upload(file: File) {
+     setUploading(true);
+@@ -221,7 +232,17 @@ export function MemberForm({
+                 <DepartmentPicker options={departments} value={departmentIds ?? []} onChange={onDepartmentIdsChange} />
+               </F>
+             )}
+-            <F label="Cargo"><Input {...txt("church_role")} /></F>
++            {roles && (
++              <F label="Cargo">
++                <Select value={value.church_role_id ?? "none"} onValueChange={(v) => set({ church_role_id: v === "none" ? null : v })}>
++                  <SelectTrigger><SelectValue placeholder="Selecione o cargo" /></SelectTrigger>
++                  <SelectContent>
++                    <SelectItem value="none">Sem cargo</SelectItem>
++                    {roles.map((r) => <SelectItem key={r.id} value={r.id}>{r.name}</SelectItem>)}
++                  </SelectContent>
++                </Select>
++              </F>
++            )}
+             <F label="Status">
+               <Select value={value.status ?? "membro"} onValueChange={(v) => set({ status: v })}>
+                 <SelectTrigger><SelectValue /></SelectTrigger>
+@@ -230,6 +251,26 @@ export function MemberForm({
+             </F>
+           </>
+         )}
++        {mode === "admin" && isLeadershipRole && departments && onLeaderDepartmentIdsChange && (
++          <div className="space-y-3 rounded-xl border bg-primary-soft/40 p-4 sm:col-span-2">
++            <p className="text-sm font-medium text-foreground">Este cargo é de liderança. A pessoa é líder de qual departamento?</p>
++            {selectedDepartments.length === 0 ? (
++              <p className="text-sm text-muted-foreground">Selecione acima o(s) departamento(s) da pessoa para definir a liderança.</p>
++            ) : (
++              selectedDepartments.map((d) => (
++                <label key={d.id} className="flex items-center justify-between gap-4 rounded-lg border bg-background px-4 py-2.5 text-sm">
++                  <span className="text-foreground">É líder do departamento {d.name}?</span>
++                  <Switch
++                    checked={(leaderDepartmentIds ?? []).includes(d.id)}
++                    onCheckedChange={(on) =>
++                      onLeaderDepartmentIdsChange(on ? [...(leaderDepartmentIds ?? []), d.id] : (leaderDepartmentIds ?? []).filter((x) => x !== d.id))
++                    }
++                  />
++                </label>
++              ))
++            )}
++          </div>
++        )}
+       </Section>
+ 
+       {mode === "admin" && onNotesChange && (
+diff --git a/src/hooks/use-departments.ts b/src/hooks/use-departments.ts
+index c7244aa..efa5d74 100644
+--- a/src/hooks/use-departments.ts
++++ b/src/hooks/use-departments.ts
+@@ -27,6 +27,20 @@ export function useChurchRoles() {
+   });
+ }
+ 
++/** Departamentos liberados para cada cargo de alcance "selected": Map<role_id, department_id[]>. */
++export function useRoleDepartments() {
++  return useQuery({
++    queryKey: ["role-departments"],
++    queryFn: async () => {
++      const { data, error } = await supabase.from("church_role_departments").select("role_id, department_id");
++      if (error) throw error;
++      const map = new Map<string, string[]>();
++      for (const r of data ?? []) map.set(r.role_id, [...(map.get(r.role_id) ?? []), r.department_id]);
++      return map;
++    },
++  });
++}
++
+ /** Departamentos de cada membro: Map<member_id, {id, name}[]>. Só para quem vê membros/departamentos. */
+ export function useMemberDepartments(enabled = true) {
+   return useQuery({
+@@ -49,6 +63,8 @@ export function useMemberDepartments(enabled = true) {
+ /**
+  * Permissões por departamento no navegador (só para esconder botões).
+  * Quem de fato autoriza é o banco (RLS + funções), então isto nunca é a barreira de segurança.
++ * Regra espelhada do banco: o cargo do membro vale em todos os departamentos (scope "all"),
++ * só nos escolhidos ("selected") ou só nos que a pessoa participa ("linked").
+  */
+ export function useDeptAccess() {
+   const { can, isFullAccess, data: access } = useAccess();
+@@ -58,15 +74,22 @@ export function useDeptAccess() {
+     queryKey: ["my-dept-roles", uid],
+     enabled: !!uid,
+     queryFn: async () => {
+-      const { data: m } = await supabase.from("members").select("id").eq("user_id", uid!).maybeSingle();
+-      if (!m) return { memberId: null as string | null, rows: [] as { department_id: string; permissions: string[] }[] };
+-      const { data } = await supabase
+-        .from("department_members")
+-        .select("department_id, church_roles(permissions)")
+-        .eq("member_id", m.id);
++      const empty = { memberId: null as string | null, permissions: [] as string[], scope: "linked", selected: [] as string[], linked: [] as string[] };
++      const { data: m } = await supabase.from("members").select("id, church_role_id").eq("user_id", uid!).maybeSingle();
++      if (!m) return empty;
++      const [links, role] = await Promise.all([
++        supabase.from("department_members").select("department_id").eq("member_id", m.id),
++        m.church_role_id ? supabase.from("church_roles").select("permissions, scope").eq("id", m.church_role_id).maybeSingle() : Promise.resolve({ data: null }),
++      ]);
++      const selected = m.church_role_id
++        ? ((await supabase.from("church_role_departments").select("department_id").eq("role_id", m.church_role_id)).data ?? []).map((r) => r.department_id)
++        : [];
+       return {
+         memberId: m.id as string | null,
+-        rows: (data ?? []).map((r) => ({ department_id: r.department_id, permissions: r.church_roles?.permissions ?? [] })),
++        permissions: role.data?.permissions ?? [],
++        scope: role.data?.scope ?? "linked",
++        selected,
++        linked: (links.data ?? []).map((r) => r.department_id),
+       };
+     },
+   });
+@@ -76,7 +99,9 @@ export function useDeptAccess() {
+     if (manageAll) return true;
+     const dept = departments.data?.find((d) => d.id === deptId);
+     if (dept?.leader_member_id && dept.leader_member_id === mine.data?.memberId && LEADER_DEPT_PERMISSIONS.includes(perm)) return true;
+-    return (mine.data?.rows ?? []).some((r) => r.department_id === deptId && r.permissions.includes(perm));
++    const r = mine.data;
++    if (!r || !r.permissions.includes(perm)) return false;
++    return r.scope === "all" || (r.scope === "selected" && r.selected.includes(deptId)) || (r.scope === "linked" && r.linked.includes(deptId));
+   };
+   const canViewPage = manageAll || can("view_departments") || (departments.data?.length ?? 0) > 0;
+   return { canIn, manageAll, canViewPage, isLoading: departments.isLoading || mine.isLoading };
+diff --git a/src/integrations/supabase/types.ts b/src/integrations/supabase/types.ts
+index 1492ab3..1b0a5bf 100644
+--- a/src/integrations/supabase/types.ts
++++ b/src/integrations/supabase/types.ts
+@@ -14,33 +14,69 @@ export type Database = {
+   }
+   public: {
+     Tables: {
++      church_role_departments: {
++        Row: {
++          department_id: string
++          role_id: string
++        }
++        Insert: {
++          department_id: string
++          role_id: string
++        }
++        Update: {
++          department_id?: string
++          role_id?: string
++        }
++        Relationships: [
++          {
++            foreignKeyName: "church_role_departments_department_id_fkey"
++            columns: ["department_id"]
++            isOneToOne: false
++            referencedRelation: "departments"
++            referencedColumns: ["id"]
++          },
++          {
++            foreignKeyName: "church_role_departments_role_id_fkey"
++            columns: ["role_id"]
++            isOneToOne: false
++            referencedRelation: "church_roles"
++            referencedColumns: ["id"]
++          },
++        ]
++      }
+       church_roles: {
+         Row: {
+           code: string | null
+           created_at: string
+           description: string | null
+           id: string
++          is_leadership: boolean
+           is_system: boolean
+           name: string
+           permissions: string[]
++          scope: string
+         }
+         Insert: {
+           code?: string | null
+           created_at?: string
+           description?: string | null
+           id?: string
++          is_leadership?: boolean
+           is_system?: boolean
+           name: string
+           permissions?: string[]
++          scope?: string
+         }
+         Update: {
+           code?: string | null
+           created_at?: string
+           description?: string | null
+           id?: string
++          is_leadership?: boolean
+           is_system?: boolean
+           name?: string
+           permissions?: string[]
++          scope?: string
+         }
+         Relationships: []
+       }
+@@ -295,6 +331,7 @@ export type Database = {
+           baptized: boolean
+           birth_date: string | null
+           church_role: string | null
++          church_role_id: string | null
+           city: string | null
+           cpf: string | null
+           created_at: string
+@@ -324,6 +361,7 @@ export type Database = {
+           baptized?: boolean
+           birth_date?: string | null
+           church_role?: string | null
++          church_role_id?: string | null
+           city?: string | null
+           cpf?: string | null
+           created_at?: string
+@@ -353,6 +391,7 @@ export type Database = {
+           baptized?: boolean
+           birth_date?: string | null
+           church_role?: string | null
++          church_role_id?: string | null
+           city?: string | null
+           cpf?: string | null
+           created_at?: string
+@@ -373,7 +412,15 @@ export type Database = {
+           user_id?: string | null
+           zip_code?: string | null
+         }
+-        Relationships: []
++        Relationships: [
++          {
++            foreignKeyName: "members_church_role_id_fkey"
++            columns: ["church_role_id"]
++            isOneToOne: false
++            referencedRelation: "church_roles"
++            referencedColumns: ["id"]
++          },
++        ]
+       }
+       prayer_requests: {
+         Row: {
+@@ -585,6 +632,10 @@ export type Database = {
+           member_id: string
+         }[]
+       }
++      set_member_church_role: {
++        Args: { _member: string; _role: string }
++        Returns: undefined
++      }
+       use_invite: { Args: { _code: string }; Returns: boolean }
+     }
+     Enums: {
+diff --git a/src/lib/departments.ts b/src/lib/departments.ts
+index e9d1027..cdafc0a 100644
+--- a/src/lib/departments.ts
++++ b/src/lib/departments.ts
+@@ -1,29 +1,65 @@
+ import { supabase } from "@/integrations/supabase/client";
+ 
+-/** Deixa o membro exatamente nos departamentos escolhidos (novos entram como Voluntário). */
++/** Deixa o membro exatamente nos departamentos escolhidos. */
+ export async function syncMemberDepartments(memberId: string, wanted: string[]) {
+-  const { data: current, error } = await supabase
+-    .from("department_members")
+-    .select("department_id")
+-    .eq("member_id", memberId);
++  const { data: current, error } = await supabase.from("department_members").select("department_id").eq("member_id", memberId);
+   if (error) throw error;
+   const have = (current ?? []).map((r) => r.department_id);
+   const toAdd = wanted.filter((id) => !have.includes(id));
+   const toRemove = have.filter((id) => !wanted.includes(id));
+ 
+   if (toAdd.length) {
+-    const { data: vol } = await supabase.from("church_roles").select("id").eq("code", "volunteer").maybeSingle();
+     const { error: e } = await supabase
+       .from("department_members")
+-      .insert(toAdd.map((department_id) => ({ department_id, member_id: memberId, church_role_id: vol?.id ?? null })));
++      .insert(toAdd.map((department_id) => ({ department_id, member_id: memberId })));
+     if (e) throw e;
+   }
+   if (toRemove.length) {
+-    const { error: e } = await supabase
+-      .from("department_members")
+-      .delete()
+-      .eq("member_id", memberId)
+-      .in("department_id", toRemove);
++    // O banco limpa o líder automaticamente se quem sai era o líder.
++    const { error: e } = await supabase.from("department_members").delete().eq("member_id", memberId).in("department_id", toRemove);
+     if (e) throw e;
+   }
+ }
++
++/**
++ * Marca/desmarca o membro como líder nos departamentos escolhidos.
++ * `currentLeaders` = departamento -> id do líder atual (do department_overview).
++ * Só mexe nos departamentos em que o membro continua vinculado.
++ */
++export async function syncDepartmentLeadership(
++  memberId: string,
++  departmentIds: string[],
++  leaderOf: string[],
++  currentLeaders: Record<string, string | null>,
++) {
++  for (const deptId of departmentIds) {
++    const isLeaderNow = currentLeaders[deptId] === memberId;
++    const shouldLead = leaderOf.includes(deptId);
++    if (shouldLead === isLeaderNow) continue;
++    const { error } = await supabase
++      .from("departments")
++      .update({ leader_member_id: shouldLead ? memberId : null })
++      .eq("id", deptId);
++    if (error) throw error;
++  }
++}
++
++/**
++ * Salva os departamentos do membro e a liderança de cada um.
++ * Se o cargo não for de liderança, ele deixa de ser líder dos departamentos em que está.
++ */
++export async function saveMemberDepartmentLinks(args: {
++  memberId: string;
++  departmentIds: string[];
++  leaderDepartmentIds: string[];
++  isLeadershipRole: boolean;
++  currentLeaders: Record<string, string | null>;
++}) {
++  await syncMemberDepartments(args.memberId, args.departmentIds);
++  await syncDepartmentLeadership(
++    args.memberId,
++    args.departmentIds,
++    args.isLeadershipRole ? args.leaderDepartmentIds : [],
++    args.currentLeaders,
++  );
++}
+diff --git a/src/routes/_authenticated/painel.departamento.$id.tsx b/src/routes/_authenticated/painel.departamento.$id.tsx
+index 35a5f4d..518dec0 100644
+--- a/src/routes/_authenticated/painel.departamento.$id.tsx
++++ b/src/routes/_authenticated/painel.departamento.$id.tsx
+@@ -9,6 +9,7 @@ import { dateBR, MEMBER_STATUS } from "@/lib/church";
+ import { downloadSheets } from "@/lib/export";
+ import { siteMeta } from "@/lib/site-query";
+ import { MemberAvatar } from "@/components/members/MemberForm";
++import { MemberCombobox } from "@/components/members/MemberCombobox";
+ import { Button } from "@/components/ui/button";
+ import { Input } from "@/components/ui/input";
+ import { Label } from "@/components/ui/label";
+@@ -55,7 +56,6 @@ function DepartmentDetail() {
+ 
+   const [adding, setAdding] = useState(false);
+   const [candidate, setCandidate] = useState("");
+-  const [candidateRole, setCandidateRole] = useState("");
+   const [editing, setEditing] = useState(false);
+   const [form, setForm] = useState({ name: "", description: "" });
+ 
+@@ -69,21 +69,15 @@ function DepartmentDetail() {
+     },
+   });
+ 
+-  const volunteerRole = roles.data?.find((r) => r.code === "volunteer");
+-  const leaderRole = roles.data?.find((r) => r.code === "leader");
+-
+   const addMember = useMutation({
+     mutationFn: async () => {
+-      const { error } = await supabase
+-        .from("department_members")
+-        .insert({ department_id: id, member_id: candidate, church_role_id: candidateRole || volunteerRole?.id || null });
++      const { error } = await supabase.from("department_members").insert({ department_id: id, member_id: candidate });
+       if (error) throw error;
+     },
+     onSuccess: () => {
+       toast.success("Voluntário adicionado");
+       setAdding(false);
+       setCandidate("");
+-      setCandidateRole("");
+       qc.invalidateQueries({ queryKey: ["department-candidates", id] });
+       refresh();
+     },
+@@ -91,12 +85,8 @@ function DepartmentDetail() {
+   });
+ 
+   const changeRole = useMutation({
+-    mutationFn: async ({ memberId, roleId }: { memberId: string; roleId: string }) => {
+-      const { error } = await supabase
+-        .from("department_members")
+-        .update({ church_role_id: roleId })
+-        .eq("department_id", id)
+-        .eq("member_id", memberId);
++    mutationFn: async ({ memberId, roleId }: { memberId: string; roleId: string | null }) => {
++      const { error } = await supabase.rpc("set_member_church_role", { _member: memberId, _role: roleId as string });
+       if (error) throw error;
+     },
+     onSuccess: refresh,
+@@ -117,12 +107,6 @@ function DepartmentDetail() {
+ 
+   const setLeader = useMutation({
+     mutationFn: async (memberId: string | null) => {
+-      if (memberId) {
+-        const { error: e1 } = await supabase
+-          .from("department_members")
+-          .upsert({ department_id: id, member_id: memberId, church_role_id: leaderRole?.id ?? null }, { onConflict: "department_id,member_id" });
+-        if (e1) throw e1;
+-      }
+       const { error } = await supabase.from("departments").update({ leader_member_id: memberId }).eq("id", id);
+       if (error) throw error;
+     },
+@@ -236,12 +220,14 @@ function DepartmentDetail() {
+               {manageAll ? (
+                 <div className="flex items-center gap-2">
+                   <Label className="text-sm">Líder do departamento</Label>
+-                  <Select value={dept.leader_member_id ?? ""} onValueChange={(v) => setLeader.mutate(v || null)}>
+-                    <SelectTrigger className="w-56"><SelectValue placeholder="Escolher líder" /></SelectTrigger>
+-                    <SelectContent>
+-                      {rows.map((r) => <SelectItem key={r.member_id} value={r.member_id}>{r.full_name}</SelectItem>)}
+-                    </SelectContent>
+-                  </Select>
++                  <div className="w-64">
++                    <MemberCombobox
++                      options={rows.map((r) => ({ id: r.member_id, label: r.full_name }))}
++                      value={dept.leader_member_id ?? ""}
++                      onChange={(v) => setLeader.mutate(v || null)}
++                      placeholder="Escolher líder"
++                    />
++                  </div>
+                   {dept.leader_member_id && <Button size="sm" variant="ghost" onClick={() => setLeader.mutate(null)}>Remover líder</Button>}
+                 </div>
+               ) : <span />}
+@@ -275,10 +261,11 @@ function DepartmentDetail() {
+                       </td>
+                       <td className="p-4 text-muted-foreground">{r.phone}<br />{r.email}</td>
+                       <td className="p-4">
+-                        {canManageMembers ? (
+-                          <Select value={r.church_role_id ?? ""} onValueChange={(roleId) => changeRole.mutate({ memberId: r.member_id, roleId })}>
++                        {manageAll ? (
++                          <Select value={r.church_role_id ?? "none"} onValueChange={(roleId) => changeRole.mutate({ memberId: r.member_id, roleId: roleId === "none" ? null : roleId })}>
+                             <SelectTrigger className="w-44"><SelectValue placeholder="Sem cargo" /></SelectTrigger>
+                             <SelectContent>
++                              <SelectItem value="none">Sem cargo</SelectItem>
+                               {(roles.data ?? []).map((role) => <SelectItem key={role.id} value={role.id}>{role.name}</SelectItem>)}
+                             </SelectContent>
+                           </Select>
+@@ -345,22 +332,14 @@ function DepartmentDetail() {
+           <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); if (candidate) addMember.mutate(); }}>
+             <div className="space-y-1.5">
+               <Label>Membro</Label>
+-              <Select value={candidate} onValueChange={setCandidate}>
+-                <SelectTrigger><SelectValue placeholder={candidates.isLoading ? "Carregando..." : "Selecione um membro"} /></SelectTrigger>
+-                <SelectContent>
+-                  {(candidates.data ?? []).map((c) => <SelectItem key={c.id} value={c.id}>{c.full_name}</SelectItem>)}
+-                </SelectContent>
+-              </Select>
++              <MemberCombobox
++                options={(candidates.data ?? []).map((c) => ({ id: c.id, label: c.full_name }))}
++                value={candidate}
++                onChange={setCandidate}
++                loading={candidates.isLoading}
++              />
+               {!candidates.isLoading && (candidates.data ?? []).length === 0 && <p className="text-xs text-muted-foreground">Todos os membros aprovados já estão neste departamento.</p>}
+-            </div>
+-            <div className="space-y-1.5">
+-              <Label>Cargo no departamento</Label>
+-              <Select value={candidateRole || volunteerRole?.id || ""} onValueChange={setCandidateRole}>
+-                <SelectTrigger><SelectValue placeholder="Voluntário" /></SelectTrigger>
+-                <SelectContent>
+-                  {(roles.data ?? []).map((role) => <SelectItem key={role.id} value={role.id}>{role.name}</SelectItem>)}
+-                </SelectContent>
+-              </Select>
++              <p className="text-xs text-muted-foreground">O cargo é definido no cadastro do membro.</p>
+             </div>
+             <Button type="submit" className="w-full" disabled={!candidate || addMember.isPending}>Adicionar</Button>
+           </form>
+diff --git a/src/routes/_authenticated/painel.departamentos.tsx b/src/routes/_authenticated/painel.departamentos.tsx
+index 02c5b42..00d6c8c 100644
+--- a/src/routes/_authenticated/painel.departamentos.tsx
++++ b/src/routes/_authenticated/painel.departamentos.tsx
+@@ -5,7 +5,7 @@ import { toast } from "sonner";
+ import { Crown, Network, Pencil, Plus, Trash2, Users } from "lucide-react";
+ import { supabase } from "@/integrations/supabase/client";
+ import { useAccess } from "@/hooks/use-access";
+-import { useChurchRoles, useDeptAccess, useDepartments } from "@/hooks/use-departments";
++import { useChurchRoles, useDeptAccess, useDepartments, useRoleDepartments } from "@/hooks/use-departments";
+ import { DEPT_PERMISSIONS } from "@/lib/church";
+ import { siteMeta } from "@/lib/site-query";
+ import { Button } from "@/components/ui/button";
+@@ -14,6 +14,7 @@ import { Label } from "@/components/ui/label";
+ import { Textarea } from "@/components/ui/textarea";
+ import { Badge } from "@/components/ui/badge";
+ import { Checkbox } from "@/components/ui/checkbox";
++import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+ import type { Tables } from "@/integrations/supabase/types";
+@@ -137,25 +138,50 @@ function DepartmentList({ canManage }: { canManage: boolean }) {
+   );
+ }
+ 
+-type RoleDraft = { id?: string; name: string; description: string; permissions: string[]; is_system?: boolean };
++type RoleScope = "all" | "selected" | "linked";
++type RoleDraft = { id?: string; name: string; description: string; permissions: string[]; scope: RoleScope; departmentIds: string[]; is_leadership: boolean };
++
++const SCOPE_OPTIONS: { value: RoleScope; title: string; help: string }[] = [
++  { value: "all", title: "Acesso geral", help: "Vale em todos os departamentos, inclusive os criados depois. Ex.: Coordenador." },
++  { value: "selected", title: "Limitado a departamentos específicos", help: "Vale só nos departamentos que você marcar. Ex.: Líder do Louvor." },
++  { value: "linked", title: "Somente onde a pessoa estiver vinculada", help: "Vale nos departamentos em que o membro participa (padrão)." },
++];
+ 
+ function RolesManager() {
+   const qc = useQueryClient();
+   const { data = [], isLoading } = useChurchRoles();
++  const departments = useDepartments();
++  const roleDepts = useRoleDepartments();
+   const [editing, setEditing] = useState<RoleDraft | null>(null);
++  const deptName = (id: string) => departments.data?.find((d) => d.id === id)?.name ?? "";
+ 
+   const save = useMutation({
+     mutationFn: async (r: RoleDraft) => {
+-      const payload = { name: r.name.trim(), description: r.description.trim() || null, permissions: r.permissions };
+-      const { error } = r.id
+-        ? await supabase.from("church_roles").update(payload).eq("id", r.id)
+-        : await supabase.from("church_roles").insert(payload);
+-      if (error) throw new Error(error.code === "23505" ? "Já existe um cargo com esse nome." : error.message);
++      if (r.scope === "selected" && r.departmentIds.length === 0) throw new Error("Escolha pelo menos um departamento para este cargo.");
++      const payload = { name: r.name.trim(), description: r.description.trim() || null, permissions: r.permissions, scope: r.scope, is_leadership: r.is_leadership };
++      let roleId = r.id;
++      if (roleId) {
++        const { error } = await supabase.from("church_roles").update(payload).eq("id", roleId);
++        if (error) throw new Error(error.code === "23505" ? "Já existe um cargo com esse nome." : error.message);
++      } else {
++        const { data: created, error } = await supabase.from("church_roles").insert(payload).select("id").single();
++        if (error) throw new Error(error.code === "23505" ? "Já existe um cargo com esse nome." : error.message);
++        roleId = created.id;
++      }
++      const { error: e1 } = await supabase.from("church_role_departments").delete().eq("role_id", roleId);
++      if (e1) throw e1;
++      if (r.scope === "selected") {
++        const { error: e2 } = await supabase
++          .from("church_role_departments")
++          .insert(r.departmentIds.map((department_id) => ({ role_id: roleId as string, department_id })));
++        if (e2) throw e2;
++      }
+     },
+     onSuccess: () => {
+       toast.success("Cargo salvo");
+       setEditing(null);
+       qc.invalidateQueries({ queryKey: ["church-roles"] });
++      qc.invalidateQueries({ queryKey: ["role-departments"] });
+       qc.invalidateQueries({ queryKey: ["my-dept-roles"] });
+     },
+     onError: (e: Error) => toast.error(e.message),
+@@ -169,36 +195,64 @@ function RolesManager() {
+     onSuccess: () => {
+       qc.invalidateQueries({ queryKey: ["church-roles"] });
+       qc.invalidateQueries({ queryKey: ["department-roster"] });
++      qc.invalidateQueries({ queryKey: ["members"] });
+     },
+     onError: (e: Error) => toast.error(e.message),
+   });
+ 
+   const label = (k: string) => DEPT_PERMISSIONS.find((p) => p.key === k)?.label ?? k;
++  const scopeText = (r: Tables<"church_roles">) =>
++    r.scope === "all"
++      ? "Todos os departamentos"
++      : r.scope === "selected"
++        ? `Somente: ${(roleDepts.data?.get(r.id) ?? []).map(deptName).filter(Boolean).join(", ") || "nenhum departamento escolhido"}`
++        : "Somente onde a pessoa estiver vinculada";
++  const blank: RoleDraft = { name: "", description: "", permissions: ["dept_view"], scope: "linked", departmentIds: [], is_leadership: false };
+ 
+   return (
+     <div className="mt-4">
+       <div className="flex flex-wrap items-center justify-between gap-3">
+         <p className="max-w-2xl text-sm text-muted-foreground">
+-          Um cargo define o que a pessoa pode fazer no departamento em que está vinculada. Só o CEO e o Pastor Presidente criam cargos e liberam permissões.
++          O cargo é escolhido no cadastro do membro. Ele define o que a pessoa pode fazer e em quais departamentos. Só o CEO e o Pastor Presidente criam cargos e liberam permissões.
+         </p>
+-        <Button onClick={() => setEditing({ name: "", description: "", permissions: ["dept_view"] })}><Plus className="h-4 w-4" /> Criar cargo</Button>
++        <Button onClick={() => setEditing(blank)}><Plus className="h-4 w-4" /> Criar cargo</Button>
+       </div>
+       {isLoading && <p className="mt-4 text-muted-foreground">Carregando...</p>}
+       <div className="mt-4 divide-y rounded-2xl border bg-card">
+         {data.map((r: Tables<"church_roles">) => (
+           <div key={r.id} className="flex flex-wrap items-start justify-between gap-3 p-4">
+             <div className="min-w-0">
+-              <p className="font-medium text-foreground">{r.name} {r.is_system && <Badge variant="secondary" className="ml-2">Padrão</Badge>}</p>
++              <p className="font-medium text-foreground">
++                {r.name}
++                {r.is_system && <Badge variant="secondary" className="ml-2">Padrão</Badge>}
++                {r.is_leadership && <Badge variant="outline" className="ml-2">Liderança</Badge>}
++              </p>
+               {r.description && <p className="text-sm text-muted-foreground">{r.description}</p>}
++              <p className="mt-1 text-xs font-medium text-primary">{scopeText(r)}</p>
+               <div className="mt-2 flex flex-wrap gap-1.5">
+                 {r.permissions.length === 0 && <span className="text-xs text-muted-foreground">Sem permissões</span>}
+                 {r.permissions.map((p) => <Badge key={p} variant="outline">{label(p)}</Badge>)}
+               </div>
+             </div>
+             <div className="flex gap-1">
+-              <Button size="icon" variant="ghost" aria-label="Editar cargo" onClick={() => setEditing({ id: r.id, name: r.name, description: r.description ?? "", permissions: r.permissions, is_system: r.is_system })}><Pencil className="h-4 w-4" /></Button>
++              <Button
++                size="icon"
++                variant="ghost"
++                aria-label="Editar cargo"
++                onClick={() =>
++                  setEditing({
++                    id: r.id,
++                    name: r.name,
++                    description: r.description ?? "",
++                    permissions: r.permissions,
++                    scope: (r.scope as RoleScope) ?? "linked",
++                    departmentIds: roleDepts.data?.get(r.id) ?? [],
++                    is_leadership: r.is_leadership,
++                  })
++                }
++              ><Pencil className="h-4 w-4" /></Button>
+               {!r.is_system && (
+-                <Button size="icon" variant="ghost" aria-label="Excluir cargo" onClick={() => confirm(`Excluir o cargo ${r.name}? Quem tem esse cargo fica sem permissões no departamento.`) && remove.mutate(r.id)}><Trash2 className="h-4 w-4" /></Button>
++                <Button size="icon" variant="ghost" aria-label="Excluir cargo" onClick={() => confirm(`Excluir o cargo ${r.name}? Quem tem esse cargo fica sem cargo e sem as permissões dele.`) && remove.mutate(r.id)}><Trash2 className="h-4 w-4" /></Button>
+               )}
+             </div>
+           </div>
+@@ -206,11 +260,11 @@ function RolesManager() {
+       </div>
+ 
+       <Dialog open={!!editing} onOpenChange={(o) => !o && setEditing(null)}>
+-        <DialogContent>
++        <DialogContent className="max-h-[90vh] overflow-y-auto">
+           <DialogHeader><DialogTitle>{editing?.id ? "Editar cargo" : "Novo cargo"}</DialogTitle></DialogHeader>
+           {editing && (
+             <form
+-              className="space-y-4"
++              className="space-y-5"
+               onSubmit={(e) => {
+                 e.preventDefault();
+                 if (editing.name.trim()) save.mutate(editing);
+@@ -218,14 +272,47 @@ function RolesManager() {
+             >
+               <div className="space-y-1.5">
+                 <Label>Nome *</Label>
+-                <Input required value={editing.name} onChange={(e) => setEditing({ ...editing, name: e.target.value })} placeholder="Ex.: Vice-líder, Tesoureiro do departamento" />
++                <Input required value={editing.name} onChange={(e) => setEditing({ ...editing, name: e.target.value })} placeholder="Ex.: Coordenador, Líder, Vice-líder" />
+               </div>
+               <div className="space-y-1.5">
+                 <Label>Descrição</Label>
+                 <Textarea rows={2} value={editing.description} onChange={(e) => setEditing({ ...editing, description: e.target.value })} />
+               </div>
++
+               <div className="space-y-2">
+-                <Label>O que este cargo permite no departamento</Label>
++                <Label>O acesso deste cargo é geral ou limitado a departamentos?</Label>
++                <RadioGroup value={editing.scope} onValueChange={(v) => setEditing({ ...editing, scope: v as RoleScope })} className="gap-2">
++                  {SCOPE_OPTIONS.map((o) => (
++                    <label key={o.value} className="flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 text-sm">
++                      <RadioGroupItem value={o.value} className="mt-0.5" />
++                      <span>
++                        <span className="block font-medium text-foreground">{o.title}</span>
++                        <span className="block text-xs text-muted-foreground">{o.help}</span>
++                      </span>
++                    </label>
++                  ))}
++                </RadioGroup>
++                {editing.scope === "selected" && (
++                  <div className="space-y-1 rounded-lg border bg-muted/30 p-3">
++                    <p className="text-xs font-medium text-muted-foreground">Departamentos liberados (um ou mais)</p>
++                    {(departments.data ?? []).length === 0 && <p className="text-sm text-muted-foreground">Crie departamentos primeiro.</p>}
++                    {(departments.data ?? []).map((d) => (
++                      <label key={d.id} className="flex items-center gap-3 rounded-md px-2 py-1.5 text-sm hover:bg-accent">
++                        <Checkbox
++                          checked={editing.departmentIds.includes(d.id)}
++                          onCheckedChange={(on) =>
++                            setEditing({ ...editing, departmentIds: on ? [...editing.departmentIds, d.id] : editing.departmentIds.filter((x) => x !== d.id) })
++                          }
++                        />
++                        {d.name}
++                      </label>
++                    ))}
++                  </div>
++                )}
++              </div>
++
++              <div className="space-y-2">
++                <Label>O que este cargo permite nesses departamentos</Label>
+                 {DEPT_PERMISSIONS.map((p) => (
+                   <label key={p.key} className="flex items-center gap-3 rounded-lg border px-4 py-2.5 text-sm">
+                     <Checkbox
+@@ -238,6 +325,14 @@ function RolesManager() {
+                   </label>
+                 ))}
+               </div>
++
++              <label className="flex items-start gap-3 rounded-lg border px-4 py-3 text-sm">
++                <Checkbox checked={editing.is_leadership} onCheckedChange={(on) => setEditing({ ...editing, is_leadership: !!on })} className="mt-0.5" />
++                <span>
++                  <span className="block font-medium text-foreground">Cargo de liderança</span>
++                  <span className="block text-xs text-muted-foreground">Ao escolher este cargo no cadastro de um membro, o sistema pergunta de qual departamento ele é líder.</span>
++                </span>
++              </label>
+               <Button type="submit" className="w-full" disabled={save.isPending}>Salvar cargo</Button>
+             </form>
+           )}
+diff --git a/src/routes/_authenticated/painel.financeiro.tsx b/src/routes/_authenticated/painel.financeiro.tsx
+index 94c9233..9d8e450 100644
+--- a/src/routes/_authenticated/painel.financeiro.tsx
++++ b/src/routes/_authenticated/painel.financeiro.tsx
+@@ -10,6 +10,7 @@ import { useAccess } from "@/hooks/use-access";
+ import { EXPENSE_CATEGORIES, INCOME_CATEGORIES, MEMBER_LINK_CATEGORIES, MONTHS, PAYMENT_METHODS, brl, dateBR } from "@/lib/church";
+ import { byCategory, expenses, goalProgress, inPeriod, incomes, sum, txRows, type Goal, type Tx, type TxWithMember } from "@/lib/finance";
+ import { downloadXls } from "@/lib/export";
++import { MemberCombobox } from "@/components/members/MemberCombobox";
+ import { Button } from "@/components/ui/button";
+ import { Input } from "@/components/ui/input";
+ import { Label } from "@/components/ui/label";
+@@ -30,7 +31,6 @@ const today = () => new Date().toISOString().slice(0, 10);
+ const GOAL_STATUS: Record<string, string> = { em_andamento: "Em andamento", concluida: "Concluída", pausada: "Pausada", cancelada: "Cancelada" };
+ 
+ type TxDraft = { id?: string; kind: string; category: string; amount: string; occurred_on: string; description: string; responsible: string; payment_method: string; notes: string; receipt_path: string | null; member_id: string };
+-const NO_MEMBER = "__none";
+ const canLinkMember = (kind: string, category: string) => kind === "entrada" && MEMBER_LINK_CATEGORIES.includes(category);
+ const emptyTx = (kind = "entrada"): TxDraft => ({ kind, category: kind === "entrada" ? "Dízimos" : "Aluguel", amount: "", occurred_on: today(), description: "", responsible: "", payment_method: "Pix", notes: "", receipt_path: null, member_id: "" });
+ 
+@@ -361,11 +361,12 @@ function TxDialog({ draft, setDraft, onSave, saving }: { draft: TxDraft | null;
+           {linkable && (
+             <div className="space-y-1.5">
+               <Label>Membro (opcional)</Label>
+-              <Sel
+-                value={draft.member_id || NO_MEMBER}
+-                onChange={(v) => set({ member_id: v === NO_MEMBER ? "" : v })}
+-                placeholder={members.isLoading ? "Carregando..." : "Selecione o membro"}
+-                options={[[NO_MEMBER, `Sem membro (${draft.category === "Ofertas" ? "oferta anônima" : "dízimo anônimo"})`], ...(members.data ?? []).map((m): [string, string] => [m.id, m.full_name])]}
++              <MemberCombobox
++                value={draft.member_id}
++                onChange={(v) => set({ member_id: v })}
++                loading={members.isLoading}
++                noneLabel={`Sem membro (${draft.category === "Ofertas" ? "oferta anônima" : "dízimo anônimo"})`}
++                options={(members.data ?? []).map((m) => ({ id: m.id, label: m.full_name }))}
+               />
+               <p className="text-xs text-muted-foreground">O lançamento aparece no histórico do membro, no perfil dele.</p>
+             </div>
+diff --git a/src/routes/_authenticated/painel.membro.$id.tsx b/src/routes/_authenticated/painel.membro.$id.tsx
+index 5dd0347..6dee2f5 100644
+--- a/src/routes/_authenticated/painel.membro.$id.tsx
++++ b/src/routes/_authenticated/painel.membro.$id.tsx
+@@ -18,8 +18,8 @@ import {
+ import { MemberAvatar, MemberForm, type MemberDraft } from "@/components/members/MemberForm";
+ import { APPROVAL_LABELS, MEMBER_STATUS, ageFrom, brl, dateBR } from "@/lib/church";
+ import { siteMeta } from "@/lib/site-query";
+-import { syncMemberDepartments } from "@/lib/departments";
+-import { useDepartments, useMemberDepartments } from "@/hooks/use-departments";
++import { saveMemberDepartmentLinks } from "@/lib/departments";
++import { useChurchRoles, useDepartments, useMemberDepartments } from "@/hooks/use-departments";
+ 
+ export const Route = createFileRoute("/_authenticated/painel/membro/$id")({
+   head: () =>
+@@ -52,6 +52,8 @@ function MemberProfile() {
+   const [editing, setEditing] = useState<MemberDraft | null>(null);
+   const [year, setYear] = useState("todos");
+   const [deptIds, setDeptIds] = useState<string[]>([]);
++  const [leaderIds, setLeaderIds] = useState<string[]>([]);
++  const roles = useChurchRoles();
+   const canLinkDepartments = can("manage_departments");
+   const departments = useDepartments();
+   const memberDepts = useMemberDepartments(can("view_members") || can("view_departments"));
+@@ -103,7 +105,15 @@ function MemberProfile() {
+         .update({ ...rest, notes: null })
+         .eq("id", id);
+       if (error) throw error;
+-      if (canLinkDepartments) await syncMemberDepartments(id, deptIds);
++      if (canLinkDepartments) {
++        await saveMemberDepartmentLinks({
++          memberId: id,
++          departmentIds: deptIds,
++          leaderDepartmentIds: leaderIds,
++          isLeadershipRole: !!roles.data?.find((r) => r.id === m.church_role_id)?.is_leadership,
++          currentLeaders: Object.fromEntries((departments.data ?? []).map((d) => [d.id, d.leader_member_id])),
++        });
++      }
+     },
+     onSuccess: () => {
+       toast.success("Cadastro salvo");
+@@ -112,6 +122,7 @@ function MemberProfile() {
+       qc.invalidateQueries({ queryKey: ["members"] });
+       qc.invalidateQueries({ queryKey: ["member-departments"] });
+       qc.invalidateQueries({ queryKey: ["departments"] });
++      qc.invalidateQueries({ queryKey: ["my-dept-roles"] });
+     },
+     onError: (e: Error) => toast.error(e.message),
+   });
+@@ -182,6 +193,7 @@ function MemberProfile() {
+         {can("edit_member") && (
+           <Button variant="outline" onClick={() => {
+               setDeptIds((memberDepts.data?.get(m.id) ?? []).map((d) => d.id));
++              setLeaderIds((departments.data ?? []).filter((d) => d.leader_member_id === m.id).map((d) => d.id));
+               setEditing({ ...m });
+             }}>
+             <Pencil className="h-4 w-4" /> Editar cadastro
+@@ -213,7 +225,7 @@ function MemberProfile() {
+           </Field>
+           <Field label="Igreja onde se batizou">{m.baptized ? m.baptism_church : ""}</Field>
+           <Field label="Departamento">{(memberDepts.data?.get(m.id) ?? []).map((d) => d.name).join(", ")}</Field>
+-          <Field label="Cargo">{m.church_role}</Field>
++          <Field label="Cargo">{roles.data?.find((r) => r.id === m.church_role_id)?.name}</Field>
+         </Block>
+ 
+         {can("view_member_notes") && (
+@@ -354,6 +366,9 @@ function MemberProfile() {
+                       departments: (departments.data ?? []).map((d) => ({ id: d.id, name: d.name })),
+                       departmentIds: deptIds,
+                       onDepartmentIdsChange: setDeptIds,
++                      roles: (roles.data ?? []).map((r) => ({ id: r.id, name: r.name, is_leadership: r.is_leadership })),
++                      leaderDepartmentIds: leaderIds,
++                      onLeaderDepartmentIdsChange: setLeaderIds,
+                     }
+                   : {})}
+               />
+diff --git a/src/routes/_authenticated/painel.membros.tsx b/src/routes/_authenticated/painel.membros.tsx
+index 70e83ea..56d1464 100644
+--- a/src/routes/_authenticated/painel.membros.tsx
++++ b/src/routes/_authenticated/painel.membros.tsx
+@@ -17,8 +17,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
+ import { MemberForm, MemberAvatar, emptyMember, type MemberDraft } from "@/components/members/MemberForm";
+ import { APPROVAL_LABELS, MEMBER_STATUS, ageFrom, dateBR } from "@/lib/church";
+ import { downloadXls } from "@/lib/export";
+-import { syncMemberDepartments } from "@/lib/departments";
+-import { useDepartments, useMemberDepartments } from "@/hooks/use-departments";
++import { saveMemberDepartmentLinks } from "@/lib/departments";
++import { useChurchRoles, useDepartments, useMemberDepartments } from "@/hooks/use-departments";
+ 
+ export const Route = createFileRoute("/_authenticated/painel/membros")({
+   head: () => siteMeta("Membros — Comunidade Aava", "Cadastros, aprovação e convites da Comunidade Aava."),
+@@ -33,8 +33,12 @@ function MembersPage() {
+   const [editing, setEditing] = useState<MemberDraft | null>(null);
+   const [notes, setNotes] = useState("");
+   const [deptIds, setDeptIds] = useState<string[]>([]);
++  const [leaderIds, setLeaderIds] = useState<string[]>([]);
+   const canLinkDepartments = can("manage_departments");
+   const departments = useDepartments();
++  const roles = useChurchRoles();
++  const roleName = (id: string | null) => roles.data?.find((r) => r.id === id)?.name ?? "";
++  const currentLeaders = () => Object.fromEntries((departments.data ?? []).map((d) => [d.id, d.leader_member_id]));
+   const memberDepts = useMemberDepartments(can("view_members") || can("view_departments"));
+   const deptNames = (id: string) => (memberDepts.data?.get(id) ?? []).map((d) => d.name);
+ 
+@@ -51,6 +55,7 @@ function MembersPage() {
+     setEditing(m);
+     setNotes("");
+     setDeptIds(m.id ? (memberDepts.data?.get(m.id) ?? []).map((d) => d.id) : []);
++    setLeaderIds(m.id ? (departments.data ?? []).filter((d) => d.leader_member_id === m.id).map((d) => d.id) : []);
+     if (m.id && can("view_member_notes")) {
+       const { data } = await supabase.from("member_notes").select("notes").eq("member_id", m.id).maybeSingle();
+       setNotes(data?.notes ?? "");
+@@ -73,7 +78,15 @@ function MembersPage() {
+       if (memberId && can("view_member_notes")) {
+         await supabase.from("member_notes").upsert({ member_id: memberId, notes });
+       }
+-      if (memberId && canLinkDepartments) await syncMemberDepartments(memberId, deptIds);
++      if (memberId && canLinkDepartments) {
++        await saveMemberDepartmentLinks({
++          memberId,
++          departmentIds: deptIds,
++          leaderDepartmentIds: leaderIds,
++          isLeadershipRole: !!roles.data?.find((r) => r.id === m.church_role_id)?.is_leadership,
++          currentLeaders: currentLeaders(),
++        });
++      }
+     },
+     onSuccess: () => {
+       toast.success("Cadastro salvo");
+@@ -81,6 +94,7 @@ function MembersPage() {
+       qc.invalidateQueries({ queryKey: ["members"] });
+       qc.invalidateQueries({ queryKey: ["member-departments"] });
+       qc.invalidateQueries({ queryKey: ["departments"] });
++      qc.invalidateQueries({ queryKey: ["my-dept-roles"] });
+     },
+     onError: (e) => toast.error(e.message),
+   });
+@@ -118,7 +132,7 @@ function MembersPage() {
+ 
+   function exportXls() {
+     const head = ["Nome", "Nascimento", "Idade", "CPF", "RG", "Telefone", "E-mail", "Endereço", "Bairro", "Cidade", "CEP", "Estado civil", "Filiação", "Batizado", "Data batismo", "Igreja do batismo", "Departamento", "Cargo", "Status"];
+-    const rows = filtered.map((m) => [m.full_name, dateBR(m.birth_date), ageFrom(m.birth_date) ?? "", m.cpf, m.rg, m.phone, m.email, m.address, m.neighborhood, m.city, m.zip_code, m.marital_status, dateBR(m.affiliated_on), m.baptized ? "Sim" : "Não", dateBR(m.baptism_date), m.baptism_church, deptNames(m.id).join(", "), m.church_role, MEMBER_STATUS[m.status] ?? m.status]);
++    const rows = filtered.map((m) => [m.full_name, dateBR(m.birth_date), ageFrom(m.birth_date) ?? "", m.cpf, m.rg, m.phone, m.email, m.address, m.neighborhood, m.city, m.zip_code, m.marital_status, dateBR(m.affiliated_on), m.baptized ? "Sim" : "Não", dateBR(m.baptism_date), m.baptism_church, deptNames(m.id).join(", "), roleName(m.church_role_id), MEMBER_STATUS[m.status] ?? m.status]);
+     downloadXls("membros", [head, ...rows], "Membros");
+   }
+ 
+@@ -183,7 +197,7 @@ function MembersPage() {
+                         </div>
+                       </td>
+                       <td className="p-4 text-muted-foreground">{m.phone}<br />{m.email}</td>
+-                      <td className="p-4 text-muted-foreground">{[deptNames(m.id).join(", "), m.church_role].filter(Boolean).join(" · ") || "—"}</td>
++                      <td className="p-4 text-muted-foreground">{[deptNames(m.id).join(", "), roleName(m.church_role_id)].filter(Boolean).join(" · ") || "—"}</td>
+                       <td className="p-4">
+                         <Badge variant={m.status === "membro_ativo" ? "default" : "secondary"}>{MEMBER_STATUS[m.status] ?? m.status}</Badge>
+                         {m.approval_status === "recusado" && <p className="mt-1 text-xs text-destructive">Recusado</p>}
+@@ -266,6 +280,9 @@ function MembersPage() {
+                       departments: (departments.data ?? []).map((d) => ({ id: d.id, name: d.name })),
+                       departmentIds: deptIds,
+                       onDepartmentIdsChange: setDeptIds,
++                      roles: (roles.data ?? []).map((r) => ({ id: r.id, name: r.name, is_leadership: r.is_leadership })),
++                      leaderDepartmentIds: leaderIds,
++                      onLeaderDepartmentIdsChange: setLeaderIds,
+                     }
+                   : {})}
+               />
+-- 
+2.43.0
+
