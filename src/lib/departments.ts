@@ -63,3 +63,8 @@ export async function saveMemberDepartmentLinks(args: {
     args.currentLeaders,
   );
 }
+
+/** Traduz erros do banco ao salvar um membro. */
+export function memberSaveError(e: { message: string }) {
+  return e.message.includes("members_registration_number_key") ? "Já existe um membro com esta matrícula." : e.message;
+}

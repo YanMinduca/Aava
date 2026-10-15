@@ -18,7 +18,7 @@ import {
 import { MemberAvatar, MemberForm, type MemberDraft } from "@/components/members/MemberForm";
 import { APPROVAL_LABELS, MEMBER_STATUS, ageFrom, brl, dateBR } from "@/lib/church";
 import { siteMeta } from "@/lib/site-query";
-import { saveMemberDepartmentLinks } from "@/lib/departments";
+import { memberSaveError, saveMemberDepartmentLinks } from "@/lib/departments";
 import { useChurchRoles, useDepartments, useMemberDepartments } from "@/hooks/use-departments";
 
 export const Route = createFileRoute("/_authenticated/painel/membro/$id")({
@@ -124,7 +124,7 @@ function MemberProfile() {
       qc.invalidateQueries({ queryKey: ["departments"] });
       qc.invalidateQueries({ queryKey: ["my-dept-roles"] });
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: (e: Error) => toast.error(memberSaveError(e)),
   });
 
   const all = useMemo(() => contributions.data ?? [], [contributions.data]);
@@ -219,6 +219,7 @@ function MemberProfile() {
         </Block>
 
         <Block title="Vida na igreja">
+          <Field label="Matrícula">{m.registration_number}</Field>
           <Field label="Filiação">{dateBR(m.affiliated_on)}</Field>
           <Field label="Batizado">
             {m.baptized ? `Sim${m.baptism_date ? `, em ${dateBR(m.baptism_date)}` : ""}` : "Não"}

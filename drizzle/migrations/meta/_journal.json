@@ -64,6 +64,13 @@
       "when": 1791718800000,
       "tag": "0008_role_scope_and_member_role",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1791805200000,
+      "tag": "0009_member_registration_number",
+      "breakpoints": true
     }
   ]
 }

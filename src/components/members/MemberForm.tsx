@@ -214,6 +214,7 @@ export function MemberForm({
       </Section>
 
       <Section title="Dados da igreja">
+        {mode === "admin" && <F label="Matrícula"><Input {...txt("registration_number")} placeholder="Ex.: 0001" /></F>}
         {mode === "admin" && <F label="Data de filiação"><Input {...dt("affiliated_on")} /></F>}
         <div className="flex items-center gap-3 pt-6">
           <Switch checked={!!value.baptized} onCheckedChange={(v) => set({ baptized: v, baptism_date: v ? (value.baptism_date ?? null) : null, baptism_church: v ? (value.baptism_church ?? "") : "" })} />

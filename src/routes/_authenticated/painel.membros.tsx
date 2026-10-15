@@ -17,7 +17,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { MemberForm, MemberAvatar, emptyMember, type MemberDraft } from "@/components/members/MemberForm";
 import { APPROVAL_LABELS, MEMBER_STATUS, ageFrom, dateBR } from "@/lib/church";
 import { downloadXls } from "@/lib/export";
-import { saveMemberDepartmentLinks } from "@/lib/departments";
+import { memberSaveError, saveMemberDepartmentLinks } from "@/lib/departments";
 import { useChurchRoles, useDepartments, useMemberDepartments } from "@/hooks/use-departments";
 
 export const Route = createFileRoute("/_authenticated/painel/membros")({
@@ -96,7 +96,7 @@ function MembersPage() {
       qc.invalidateQueries({ queryKey: ["departments"] });
       qc.invalidateQueries({ queryKey: ["my-dept-roles"] });
     },
-    onError: (e) => toast.error(e.message),
+    onError: (e) => toast.error(memberSaveError(e)),
   });
 
   const setApproval = useMutation({
@@ -127,12 +127,12 @@ function MembersPage() {
   const filtered = approved.filter(
     (m) =>
       (statusFilter === "todos" || m.status === statusFilter) &&
-      (m.full_name.toLowerCase().includes(search.toLowerCase()) || (m.cpf ?? "").includes(search)),
+      (m.full_name.toLowerCase().includes(search.toLowerCase()) || (m.cpf ?? "").includes(search) || (m.registration_number ?? "").toLowerCase().includes(search.toLowerCase())),
   );
 
   function exportXls() {
-    const head = ["Nome", "Nascimento", "Idade", "CPF", "RG", "Telefone", "E-mail", "Endereço", "Bairro", "Cidade", "CEP", "Estado civil", "Filiação", "Batizado", "Data batismo", "Igreja do batismo", "Departamento", "Cargo", "Status"];
-    const rows = filtered.map((m) => [m.full_name, dateBR(m.birth_date), ageFrom(m.birth_date) ?? "", m.cpf, m.rg, m.phone, m.email, m.address, m.neighborhood, m.city, m.zip_code, m.marital_status, dateBR(m.affiliated_on), m.baptized ? "Sim" : "Não", dateBR(m.baptism_date), m.baptism_church, deptNames(m.id).join(", "), roleName(m.church_role_id), MEMBER_STATUS[m.status] ?? m.status]);
+    const head = ["Matrícula", "Nome", "Nascimento", "Idade", "CPF", "RG", "Telefone", "E-mail", "Endereço", "Bairro", "Cidade", "CEP", "Estado civil", "Filiação", "Batizado", "Data batismo", "Igreja do batismo", "Departamento", "Cargo", "Status"];
+    const rows = filtered.map((m) => [m.registration_number, m.full_name, dateBR(m.birth_date), ageFrom(m.birth_date) ?? "", m.cpf, m.rg, m.phone, m.email, m.address, m.neighborhood, m.city, m.zip_code, m.marital_status, dateBR(m.affiliated_on), m.baptized ? "Sim" : "Não", dateBR(m.baptism_date), m.baptism_church, deptNames(m.id).join(", "), roleName(m.church_role_id), MEMBER_STATUS[m.status] ?? m.status]);
     downloadXls("membros", [head, ...rows], "Membros");
   }
 
@@ -159,7 +159,7 @@ function MembersPage() {
           <div className="mt-4 flex flex-wrap gap-3">
             <div className="relative w-full max-w-sm">
               <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-              <Input className="pl-9" placeholder="Buscar por nome ou CPF" value={search} onChange={(e) => setSearch(e.target.value)} />
+              <Input className="pl-9" placeholder="Buscar por nome, CPF ou matrícula" value={search} onChange={(e) => setSearch(e.target.value)} />
             </div>
             <Select value={statusFilter} onValueChange={setStatusFilter}>
               <SelectTrigger className="w-44"><SelectValue /></SelectTrigger>
@@ -192,7 +192,7 @@ function MembersPage() {
                           <MemberAvatar path={m.photo_path} />
                           <div>
                             <Link to="/painel/membro/$id" params={{ id: m.id }} className="font-medium text-foreground hover:text-primary hover:underline">{m.full_name}</Link>
-                            <p className="text-xs text-muted-foreground">{age !== null ? `${age} anos` : ""}{m.baptized ? " · Batizado" : ""}</p>
+                            <p className="text-xs text-muted-foreground">{[m.registration_number ? `Matrícula ${m.registration_number}` : "", age !== null ? `${age} anos` : "", m.baptized ? "Batizado" : ""].filter(Boolean).join(" · ")}</p>
                           </div>
                         </div>
                       </td>
