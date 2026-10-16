@@ -242,7 +242,7 @@ function MemberProfile() {
       {can("view_finance") && (
         <section className="mt-10">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <h2 className="text-2xl text-foreground">Dízimos e ofertas</h2>
+            <h2 className="text-2xl text-foreground">Contribuições</h2>
             <Select value={year} onValueChange={setYear}>
               <SelectTrigger className="w-32">
                 <SelectValue />
@@ -339,7 +339,7 @@ function MemberProfile() {
             <Link to="/painel/financeiro" className="underline hover:text-foreground">
               Financeiro
             </Link>
-            , clique em Receita, escolha Dízimos ou Ofertas e selecione este membro.
+            , clique em Receita e selecione este membro.
           </p>
         </section>
       )}

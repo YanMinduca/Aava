@@ -149,4 +149,3 @@ export function formatCep(v: string) {
 }
 
 /** Receitas que podem ser ligadas a um membro (histórico no perfil dele). */
-export const MEMBER_LINK_CATEGORIES = ["Dízimos", "Ofertas"];
