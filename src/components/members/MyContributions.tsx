@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { brl, dateBR } from "@/lib/church";
 
-/** Dízimos e ofertas do próprio membro (somente leitura). */
+/** Receitas ligadas ao próprio membro: dízimos, ofertas etc. (somente leitura). */
 export function MyContributions({ memberId }: { memberId: string }) {
   const q = useQuery({
     queryKey: ["transactions", "mine", memberId],
@@ -26,7 +26,7 @@ export function MyContributions({ memberId }: { memberId: string }) {
   return (
     <section className="mt-10">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h2 className="text-2xl text-foreground">Meus dízimos e ofertas</h2>
+        <h2 className="text-2xl text-foreground">Minhas contribuições</h2>
         <p className="text-sm text-muted-foreground">
           Total em {year}: <span className="font-semibold text-foreground">{brl(totalYear)}</span>
         </p>

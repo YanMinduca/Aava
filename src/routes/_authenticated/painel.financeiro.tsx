@@ -7,7 +7,7 @@ import { Plus, Trash2, Download, Target, Paperclip, Pencil, FileText, Repeat, Ch
 import { Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { supabase } from "@/integrations/supabase/client";
 import { useAccess } from "@/hooks/use-access";
-import { EXPENSE_CATEGORIES, INCOME_CATEGORIES, MEMBER_LINK_CATEGORIES, MONTHS, PAYMENT_METHODS, brl, dateBR } from "@/lib/church";
+import { EXPENSE_CATEGORIES, INCOME_CATEGORIES, MONTHS, PAYMENT_METHODS, brl, dateBR } from "@/lib/church";
 import { byCategory, expenses, goalProgress, inPeriod, incomes, sum, txRows, type Goal, type Tx, type TxWithMember } from "@/lib/finance";
 import { downloadXls } from "@/lib/export";
 import { MemberCombobox } from "@/components/members/MemberCombobox";
@@ -31,7 +31,8 @@ const today = () => new Date().toISOString().slice(0, 10);
 const GOAL_STATUS: Record<string, string> = { em_andamento: "Em andamento", concluida: "Concluída", pausada: "Pausada", cancelada: "Cancelada" };
 
 type TxDraft = { id?: string; kind: string; category: string; amount: string; occurred_on: string; description: string; responsible: string; payment_method: string; notes: string; receipt_path: string | null; member_id: string };
-const canLinkMember = (kind: string, category: string) => kind === "entrada" && MEMBER_LINK_CATEGORIES.includes(category);
+/** Toda receita pode (opcionalmente) ser ligada a um membro; despesas não. */
+const canLinkMember = (kind: string) => kind === "entrada";
 const emptyTx = (kind = "entrada"): TxDraft => ({ kind, category: kind === "entrada" ? "Dízimos" : "Aluguel", amount: "", occurred_on: today(), description: "", responsible: "", payment_method: "Pix", notes: "", receipt_path: null, member_id: "" });
 
 function Sel({ value, onChange, options, placeholder }: { value: string; onChange: (v: string) => void; options: [string, string][]; placeholder?: string }) {
@@ -73,7 +74,7 @@ function FinancePage() {
         kind: d.kind, category: d.category, amount: Number(d.amount), occurred_on: d.occurred_on,
         description: d.description || null, responsible: d.responsible || null, payment_method: d.payment_method || null,
         notes: d.notes || null, receipt_path: d.receipt_path,
-        member_id: canLinkMember(d.kind, d.category) && d.member_id ? d.member_id : null,
+        member_id: canLinkMember(d.kind) && d.member_id ? d.member_id : null,
       };
       const { error } = d.id
         ? await supabase.from("financial_transactions").update(payload).eq("id", d.id)
@@ -131,7 +132,8 @@ function Summary({ all, year, month }: { all: Tx[]; year: number; month: number 
   const yi = sum(incomes(y)), ye = sum(expenses(y));
   const monthly = MONTHS.map((name, i) => {
     const l = inPeriod(all, year, i + 1);
-    return { mes: name.slice(0, 3), Receitas: sum(incomes(l)), Despesas: sum(expenses(l)), Saldo: sum(incomes(l)) - sum(expenses(l)) };
+    const dizimistas = new Set(incomes(l).filter((t) => t.category === "Dízimos" && t.member_id).map((t) => t.member_id)).size;
+    return { mes: name.slice(0, 3), Receitas: sum(incomes(l)), Despesas: sum(expenses(l)), Saldo: sum(incomes(l)) - sum(expenses(l)), Dizimistas: dizimistas };
   });
   const yearsAll = Array.from(new Set(all.map((t) => Number(t.occurred_on.slice(0, 4))))).sort();
   const annual = yearsAll.map((yy) => {
@@ -203,6 +205,22 @@ function Summary({ all, year, month }: { all: Tx[]; year: number; month: number 
                 </BarChart>
               </ResponsiveContainer>
             </ChartCard>
+          </div>
+          <div>
+            <ChartCard title={`Evolução de dizimistas mensal — ${year}`}>
+              <ResponsiveContainer>
+                <LineChart data={monthly}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                  <XAxis dataKey="mes" stroke="var(--muted-foreground)" fontSize={12} />
+                  <YAxis stroke="var(--muted-foreground)" fontSize={12} allowDecimals={false} />
+                  <Tooltip formatter={(v: number) => `${v} ${v === 1 ? "dizimista" : "dizimistas"}`} />
+                  <Line type="monotone" dataKey="Dizimistas" stroke="var(--primary)" strokeWidth={2} />
+                </LineChart>
+              </ResponsiveContainer>
+            </ChartCard>
+            <p className="mt-2 text-xs text-muted-foreground">
+              Conta quantas pessoas diferentes dizimaram em cada mês (cada membro vale 1, não importa o valor nem quantas vezes). Dízimos lançados sem membro não entram na contagem.
+            </p>
           </div>
         </>
       )}
@@ -320,7 +338,7 @@ function TxList({ all, year, month, onEdit, onChanged }: { all: TxWithMember[]; 
 
 function TxDialog({ draft, setDraft, onSave, saving }: { draft: TxDraft | null; setDraft: (d: TxDraft | null) => void; onSave: (d: TxDraft) => void; saving: boolean }) {
   const [uploading, setUploading] = useState(false);
-  const linkable = !!draft && canLinkMember(draft.kind, draft.category);
+  const linkable = !!draft && canLinkMember(draft.kind);
   const members = useQuery({
     queryKey: ["members-options"],
     enabled: linkable,
@@ -352,7 +370,7 @@ function TxDialog({ draft, setDraft, onSave, saving }: { draft: TxDraft | null; 
             <div className="space-y-1.5"><Label>Tipo</Label>
               <Sel value={draft.kind} onChange={(v) => set({ kind: v, category: (v === "entrada" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES)[0] ?? "", member_id: "" })} options={[["entrada", "Receita"], ["saida", "Despesa"]]} />
             </div>
-            <div className="space-y-1.5"><Label>Categoria</Label><Sel value={draft.category} onChange={(v) => set({ category: v, member_id: canLinkMember(draft.kind, v) ? draft.member_id : "" })} options={cats.map((c) => [c, c])} /></div>
+            <div className="space-y-1.5"><Label>Categoria</Label><Sel value={draft.category} onChange={(v) => set({ category: v })} options={cats.map((c) => [c, c])} /></div>
             <div className="space-y-1.5"><Label>Valor (R$)</Label><Input type="number" step="0.01" min="0.01" required value={draft.amount} onChange={(e) => set({ amount: e.target.value })} /></div>
             <div className="space-y-1.5"><Label>Data</Label><Input type="date" required value={draft.occurred_on} onChange={(e) => set({ occurred_on: e.target.value })} /></div>
             <div className="space-y-1.5"><Label>Responsável</Label><Input value={draft.responsible} onChange={(e) => set({ responsible: e.target.value })} /></div>
@@ -365,10 +383,10 @@ function TxDialog({ draft, setDraft, onSave, saving }: { draft: TxDraft | null; 
                 value={draft.member_id}
                 onChange={(v) => set({ member_id: v })}
                 loading={members.isLoading}
-                noneLabel={`Sem membro (${draft.category === "Ofertas" ? "oferta anônima" : "dízimo anônimo"})`}
+                noneLabel="Sem membro (anônimo)"
                 options={(members.data ?? []).map((m) => ({ id: m.id, label: m.full_name }))}
               />
-              <p className="text-xs text-muted-foreground">O lançamento aparece no histórico do membro, no perfil dele.</p>
+              <p className="text-xs text-muted-foreground">O lançamento aparece no histórico do membro, no perfil dele. Dízimos ligados a um membro entram no gráfico de dizimistas.</p>
             </div>
           )}
           <div className="space-y-1.5"><Label>Descrição</Label><Input value={draft.description} onChange={(e) => set({ description: e.target.value })} /></div>
