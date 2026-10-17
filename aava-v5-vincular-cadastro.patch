@@ -1,0 +1,497 @@
+From cdeac3b341efeeeb8d32bdeccf6dcadf2f509503 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 17 Oct 2026 02:52:49 +0000
+Subject: [PATCH] =?UTF-8?q?Vincular=20conta=20a=20cadastro=20existente:=20?=
+ =?UTF-8?q?'Este=20=C3=A9=20voc=C3=AA=3F'=20+=20confirma=C3=A7=C3=A3o=20de?=
+ =?UTF-8?q?=20CPF?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Ao digitar o nome completo em Meu cadastro, sugere o cadastro feito pela igreja com o mesmo nome
+- Confirmando o CPF, a conta é vinculada (sem criar membro duplicado)
+- Trava de segurança: 5 erros por usuário ou por cadastro bloqueiam por 24h
+- Migration 0010 (funções find_claimable_members/claim_member e members_guard) e testes
+---
+ .../migrations/0010_claim_existing_member.sql | 128 ++++++++++++++++++
+ drizzle/migrations/meta/_journal.json         |   7 +
+ roadmap.md                                    |   1 +
+ src/components/members/ClaimSuggestion.tsx    | 109 +++++++++++++++
+ src/components/members/MemberForm.tsx         |   6 +-
+ src/integrations/supabase/types.ts            |  40 ++++++
+ .../_authenticated/painel.meu-cadastro.tsx    |  20 ++-
+ src/test/claim-suggestion.test.tsx            |  52 +++++++
+ 8 files changed, 361 insertions(+), 2 deletions(-)
+ create mode 100644 drizzle/migrations/0010_claim_existing_member.sql
+ create mode 100644 src/components/members/ClaimSuggestion.tsx
+ create mode 100644 src/test/claim-suggestion.test.tsx
+
+diff --git a/drizzle/migrations/0010_claim_existing_member.sql b/drizzle/migrations/0010_claim_existing_member.sql
+new file mode 100644
+index 0000000..1a34a45
+--- /dev/null
++++ b/drizzle/migrations/0010_claim_existing_member.sql
+@@ -0,0 +1,128 @@
++-- Vínculo de conta a cadastro já existente (feito pelo pastor), com confirmação por CPF.
++-- Pode rodar mais de uma vez.
++
++create or replace function public.norm_name(_s text)
++returns text language sql immutable set search_path = public as $$
++  select regexp_replace(
++    lower(translate(btrim(coalesce(_s, '')),
++      'ÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇÑáàâãäéèêëíìîïóòôõöúùûüçñ',
++      'AAAAAEEEEIIIIOOOOOUUUUCNaaaaaeeeeiiiiooooouuuucn')),
++    '\s+', ' ', 'g');
++$$;
++
++-- Registro de buscas e tentativas (só as funções abaixo leem e gravam aqui)
++create table if not exists public.member_claim_attempts (
++  id bigint generated always as identity primary key,
++  user_id uuid not null,
++  member_id uuid,
++  kind text not null check (kind in ('lookup', 'claim')),
++  success boolean not null default false,
++  created_at timestamptz not null default now()
++);
++create index if not exists member_claim_attempts_user_idx on public.member_claim_attempts (user_id, kind, created_at);
++create index if not exists member_claim_attempts_member_idx on public.member_claim_attempts (member_id, created_at) where kind = 'claim';
++alter table public.member_claim_attempts enable row level security;
++revoke all on public.member_claim_attempts from anon, authenticated;
++
++-- Procura cadastros SEM conta cujo nome (sem acento/maiúscula) é igual ao digitado.
++-- Exige nome completo (2+ palavras), devolve no máximo 3 e só id + nome + se tem CPF.
++create or replace function public.find_claimable_members(_name text)
++returns table (id uuid, full_name text, has_cpf boolean)
++language plpgsql security definer set search_path = public as $$
++declare
++  uid uuid := auth.uid();
++  n text := public.norm_name(_name);
++begin
++  if uid is null then raise exception 'Acesso negado'; end if;
++  if exists (select 1 from public.members m where m.user_id = uid) then return; end if;
++  if coalesce(array_length(string_to_array(n, ' '), 1), 0) < 2 then return; end if;
++  if (select count(*) from public.member_claim_attempts a
++        where a.user_id = uid and a.kind = 'lookup' and a.created_at > now() - interval '1 hour') >= 30 then return; end if;
++  insert into public.member_claim_attempts (user_id, kind) values (uid, 'lookup');
++  return query
++    select m.id, m.full_name, length(regexp_replace(coalesce(m.cpf, ''), '\D', '', 'g')) = 11
++    from public.members m
++    where m.user_id is null and m.approval_status = 'aprovado' and public.norm_name(m.full_name) = n
++    order by m.full_name
++    limit 3;
++end $$;
++
++-- Vincula a conta de quem está logado ao cadastro, se o CPF conferir.
++-- Retorna: ok | wrong_cpf | locked | unavailable | no_cpf | already_linked
++create or replace function public.claim_member(_member uuid, _cpf text)
++returns text
++language plpgsql security definer set search_path = public as $$
++declare
++  uid uuid := auth.uid();
++  typed text := regexp_replace(coalesce(_cpf, ''), '\D', '', 'g');
++  real_cpf text;
++  fails_user int;
++  fails_member int;
++begin
++  if uid is null then raise exception 'Acesso negado'; end if;
++  if exists (select 1 from public.members m where m.user_id = uid) then return 'already_linked'; end if;
++
++  select count(*) into fails_user from public.member_claim_attempts a
++    where a.user_id = uid and a.kind = 'claim' and not a.success and a.created_at > now() - interval '24 hours';
++  select count(*) into fails_member from public.member_claim_attempts a
++    where a.member_id = _member and a.kind = 'claim' and not a.success and a.created_at > now() - interval '24 hours';
++  if fails_user >= 5 or fails_member >= 5 then return 'locked'; end if;
++
++  select regexp_replace(coalesce(m.cpf, ''), '\D', '', 'g') into real_cpf
++    from public.members m
++    where m.id = _member and m.user_id is null and m.approval_status = 'aprovado'
++    for update;
++  if not found then return 'unavailable'; end if;
++  if length(real_cpf) <> 11 then return 'no_cpf'; end if;
++
++  if typed <> real_cpf then
++    insert into public.member_claim_attempts (user_id, member_id, kind, success) values (uid, _member, 'claim', false);
++    return 'wrong_cpf';
++  end if;
++
++  perform set_config('app.claiming_member', 'on', true);
++  update public.members set user_id = uid where id = _member and user_id is null;
++  perform set_config('app.claiming_member', 'off', true);
++  insert into public.member_claim_attempts (user_id, member_id, kind, success) values (uid, _member, 'claim', true);
++  return 'ok';
++end $$;
++
++revoke all on function public.find_claimable_members(text), public.claim_member(uuid, text) from public, anon;
++grant execute on function public.find_claimable_members(text), public.claim_member(uuid, text) to authenticated;
++
++-- members_guard: libera SOMENTE a troca de user_id (null -> o próprio usuário) feita por claim_member
++create or replace function public.members_guard()
++returns trigger language plpgsql security definer set search_path = public as $$
++begin
++  if tg_op = 'UPDATE'
++     and current_setting('app.claiming_member', true) = 'on'
++     and old.user_id is null and new.user_id = auth.uid() then
++    new.updated_at := now();
++    return new;
++  end if;
++  new.registration_number := nullif(btrim(new.registration_number), '');
++  if public.has_permission(auth.uid(), 'approve_member') or public.has_permission(auth.uid(), 'edit_member') or public.has_permission(auth.uid(), 'create_member') then
++    if not public.has_permission(auth.uid(), 'manage_departments') then
++      if tg_op = 'INSERT' then new.church_role_id := null;
++      else new.church_role_id := old.church_role_id; end if;
++    end if;
++    new.updated_at := now();
++    return new;
++  end if;
++  if tg_op = 'INSERT' then
++    new.approval_status := 'pendente';
++    new.status := 'membro';
++    new.ministry := null; new.department := null; new.church_role := null; new.church_role_id := null;
++    new.affiliated_on := null;
++    new.registration_number := null;
++  else
++    new.approval_status := case when old.approval_status = 'recusado' then 'pendente' else old.approval_status end;
++    new.status := old.status;
++    new.ministry := old.ministry; new.department := old.department; new.church_role := old.church_role; new.church_role_id := old.church_role_id;
++    new.affiliated_on := old.affiliated_on;
++    new.registration_number := old.registration_number;
++    new.user_id := old.user_id;
++  end if;
++  new.updated_at := now();
++  return new;
++end $$;
+diff --git a/drizzle/migrations/meta/_journal.json b/drizzle/migrations/meta/_journal.json
+index dd8fec7..93bc0c7 100644
+--- a/drizzle/migrations/meta/_journal.json
++++ b/drizzle/migrations/meta/_journal.json
+@@ -71,6 +71,13 @@
+       "when": 1791805200000,
+       "tag": "0009_member_registration_number",
+       "breakpoints": true
++    },
++    {
++      "idx": 10,
++      "version": "7",
++      "when": 1791891600000,
++      "tag": "0010_claim_existing_member",
++      "breakpoints": true
+     }
+   ]
+ }
+diff --git a/roadmap.md b/roadmap.md
+index 4172564..ae24d69 100644
+--- a/roadmap.md
++++ b/roadmap.md
+@@ -13,3 +13,4 @@
+ - [x] Cargo de liderança no cadastro pergunta de quais departamentos a pessoa é líder
+ - [x] Matrícula no cadastro de membros (única, só a equipe define)
+ - [x] Financeiro: membro opcional em qualquer receita e gráfico de evolução mensal de dizimistas
++- [x] Vínculo da conta ao cadastro existente: "Este é você?" por nome + confirmação de CPF
+diff --git a/src/components/members/ClaimSuggestion.tsx b/src/components/members/ClaimSuggestion.tsx
+new file mode 100644
+index 0000000..3b63354
+--- /dev/null
++++ b/src/components/members/ClaimSuggestion.tsx
+@@ -0,0 +1,109 @@
++import { useEffect, useState } from "react";
++import { toast } from "sonner";
++import { UserCheck } from "lucide-react";
++import { supabase } from "@/integrations/supabase/client";
++import { Button } from "@/components/ui/button";
++import { Input } from "@/components/ui/input";
++
++type Candidate = { id: string; full_name: string; has_cpf: boolean };
++
++const MESSAGES: Record<string, string> = {
++  wrong_cpf: "O CPF não confere. Confira os números e tente de novo.",
++  locked: "Muitas tentativas. Procure a secretaria da igreja para vincular seu cadastro.",
++  no_cpf: "Este cadastro não tem CPF registrado. Procure a secretaria da igreja para vincular.",
++  unavailable: "Este cadastro não está mais disponível para vincular.",
++  already_linked: "Sua conta já está vinculada a um cadastro.",
++};
++
++/**
++ * Mostra "Este é você?" quando o nome digitado bate com um cadastro feito pela igreja que ainda não tem conta.
++ * Se a pessoa confirmar o CPF, a conta é vinculada ao cadastro existente (sem criar um novo).
++ */
++export function ClaimSuggestion({ name, onClaimed }: { name: string; onClaimed: () => void }) {
++  const [candidates, setCandidates] = useState<Candidate[]>([]);
++  const [dismissed, setDismissed] = useState<string[]>([]);
++  const [confirming, setConfirming] = useState<string | null>(null);
++  const [cpf, setCpf] = useState("");
++  const [busy, setBusy] = useState(false);
++  const [notice, setNotice] = useState("");
++
++  useEffect(() => {
++    setConfirming(null);
++    setNotice("");
++    if (name.trim().split(/\s+/).length < 2) {
++      setCandidates([]);
++      return;
++    }
++    const t = setTimeout(async () => {
++      const { data } = await supabase.rpc("find_claimable_members", { _name: name });
++      setCandidates(data ?? []);
++    }, 900);
++    return () => clearTimeout(t);
++  }, [name]);
++
++  const candidate = candidates.find((c) => !dismissed.includes(c.id));
++  if (!candidate) return null;
++
++  async function confirm() {
++    if (!candidate) return;
++    setBusy(true);
++    const { data, error } = await supabase.rpc("claim_member", { _member: candidate.id, _cpf: cpf });
++    setBusy(false);
++    if (error) {
++      toast.error(error.message);
++      return;
++    }
++    if (data === "ok") {
++      toast.success("Pronto! Sua conta foi vinculada ao seu cadastro.");
++      onClaimed();
++      return;
++    }
++    setNotice(MESSAGES[data ?? ""] ?? "Não foi possível vincular agora.");
++  }
++
++  return (
++    <div className="mt-3 rounded-xl border border-primary/30 bg-primary-soft p-4 text-sm">
++      <p className="flex items-start gap-2 text-foreground">
++        <UserCheck className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
++        <span>
++          A igreja já tem um cadastro com este nome: <strong>{candidate.full_name}</strong>. <strong>Este é você?</strong>
++        </span>
++      </p>
++      {confirming !== candidate.id ? (
++        <div className="mt-3 flex gap-2">
++          <Button
++            type="button"
++            size="sm"
++            onClick={() => {
++              if (!candidate.has_cpf) return setNotice(MESSAGES["no_cpf"] ?? "");
++              setConfirming(candidate.id);
++              setNotice("");
++            }}
++          >
++            Sim, sou eu
++          </Button>
++          <Button type="button" size="sm" variant="outline" onClick={() => { setDismissed([...dismissed, candidate.id]); setNotice(""); }}>
++            Não
++          </Button>
++        </div>
++      ) : (
++        <div className="mt-3 space-y-2">
++          <p className="text-muted-foreground">Para confirmar, digite o seu CPF:</p>
++          <div className="flex flex-wrap gap-2">
++            <Input
++              inputMode="numeric"
++              autoComplete="off"
++              placeholder="000.000.000-00"
++              value={cpf}
++              onChange={(e) => setCpf(e.target.value)}
++              className="max-w-52 bg-background"
++            />
++            <Button type="button" size="sm" disabled={busy || cpf.replace(/\D/g, "").length !== 11} onClick={confirm}>Confirmar</Button>
++            <Button type="button" size="sm" variant="ghost" onClick={() => { setConfirming(null); setCpf(""); setNotice(""); }}>Cancelar</Button>
++          </div>
++        </div>
++      )}
++      {notice && <p className="mt-3 text-destructive">{notice}</p>}
++    </div>
++  );
++}
+diff --git a/src/components/members/MemberForm.tsx b/src/components/members/MemberForm.tsx
+index e46632a..214a948 100644
+--- a/src/components/members/MemberForm.tsx
++++ b/src/components/members/MemberForm.tsx
+@@ -1,4 +1,5 @@
+ import { useEffect, useState } from "react";
++import type { ReactNode } from "react";
+ import { Camera, ChevronDown, User } from "lucide-react";
+ import { toast } from "sonner";
+ import { supabase } from "@/integrations/supabase/client";
+@@ -108,6 +109,7 @@ export function MemberForm({
+   roles,
+   leaderDepartmentIds,
+   onLeaderDepartmentIdsChange,
++  nameAddon,
+ }: {
+   value: MemberDraft;
+   onChange: (v: MemberDraft) => void;
+@@ -124,6 +126,8 @@ export function MemberForm({
+   /** Departamentos dos quais o membro é líder (perguntado quando o cargo é de liderança). */
+   leaderDepartmentIds?: string[];
+   onLeaderDepartmentIdsChange?: (ids: string[]) => void;
++  /** Conteúdo exibido logo abaixo do campo de nome (ex.: "Este é você?"). */
++  nameAddon?: ReactNode;
+ }) {
+   const set = (patch: Partial<MemberDraft>) => onChange({ ...value, ...patch });
+   const age = ageFrom(value.birth_date);
+@@ -180,7 +184,7 @@ export function MemberForm({
+             <input type="file" accept="image/*" className="hidden" onChange={(e) => e.target.files?.[0] && upload(e.target.files[0])} />
+           </label>
+         </div>
+-        <F label="Nome completo *" full><Input required {...txt("full_name")} /></F>
++        <F label="Nome completo *" full><Input required {...txt("full_name")} />{nameAddon}</F>
+         <F label="Data de nascimento"><Input {...dt("birth_date")} /></F>
+         <F label="Idade"><Input disabled value={age !== null ? `${age} anos` : "—"} /></F>
+         <F label="CPF"><Input value={value.cpf ?? ""} onChange={(e) => set({ cpf: formatCpf(e.target.value) })} placeholder="000.000.000-00" /></F>
+diff --git a/src/integrations/supabase/types.ts b/src/integrations/supabase/types.ts
+index f54f020..7aed96d 100644
+--- a/src/integrations/supabase/types.ts
++++ b/src/integrations/supabase/types.ts
+@@ -321,6 +321,33 @@ export type Database = {
+           },
+         ]
+       }
++      member_claim_attempts: {
++        Row: {
++          created_at: string
++          id: number
++          kind: string
++          member_id: string | null
++          success: boolean
++          user_id: string
++        }
++        Insert: {
++          created_at?: string
++          id?: never
++          kind: string
++          member_id?: string | null
++          success?: boolean
++          user_id: string
++        }
++        Update: {
++          created_at?: string
++          id?: never
++          kind?: string
++          member_id?: string | null
++          success?: boolean
++          user_id?: string
++        }
++        Relationships: []
++      }
+       members: {
+         Row: {
+           address: string | null
+@@ -615,6 +642,19 @@ export type Database = {
+         Args: { _dept: string; _perm: string; _user_id: string }
+         Returns: boolean
+       }
++      claim_member: {
++        Args: { _cpf: string; _member: string }
++        Returns: string
++      }
++      find_claimable_members: {
++        Args: { _name: string }
++        Returns: {
++          full_name: string
++          has_cpf: boolean
++          id: string
++        }[]
++      }
++      norm_name: { Args: { _s: string }; Returns: string }
+       has_permission: {
+         Args: { _permission: string; _user_id: string }
+         Returns: boolean
+diff --git a/src/routes/_authenticated/painel.meu-cadastro.tsx b/src/routes/_authenticated/painel.meu-cadastro.tsx
+index e8c65e4..74b3000 100644
+--- a/src/routes/_authenticated/painel.meu-cadastro.tsx
++++ b/src/routes/_authenticated/painel.meu-cadastro.tsx
+@@ -6,6 +6,7 @@ import { Clock, CheckCircle2, XCircle } from "lucide-react";
+ import { supabase } from "@/integrations/supabase/client";
+ import { Button } from "@/components/ui/button";
+ import { MyContributions } from "@/components/members/MyContributions";
++import { ClaimSuggestion } from "@/components/members/ClaimSuggestion";
+ import { MemberForm, emptyMember, type MemberDraft } from "@/components/members/MemberForm";
+ import { MEMBER_STATUS } from "@/lib/church";
+ import { siteMeta } from '@/lib/site-query';
+@@ -80,7 +81,24 @@ function MyProfile() {
+         </div>
+       )}
+       <form className="mt-6 space-y-6" onSubmit={(e) => { e.preventDefault(); save.mutate(draft); }}>
+-        <MemberForm mode="self" value={draft} onChange={setDraft} photoFolder={me.data.uid} />
++        <MemberForm
++          mode="self"
++          value={draft}
++          onChange={setDraft}
++          photoFolder={me.data.uid}
++          nameAddon={
++            !row ? (
++              <ClaimSuggestion
++                name={draft.full_name}
++                onClaimed={async () => {
++                  if (convite) await supabase.rpc("use_invite", { _code: convite });
++                  setDraft(null);
++                  qc.invalidateQueries({ queryKey: ["my-member"] });
++                }}
++              />
++            ) : undefined
++          }
++        />
+         <Button type="submit" size="lg" disabled={save.isPending}>{row ? "Salvar alterações" : "Enviar cadastro"}</Button>
+       </form>
+       {row?.approval_status === "aprovado" && <MyContributions memberId={row.id} />}
+diff --git a/src/test/claim-suggestion.test.tsx b/src/test/claim-suggestion.test.tsx
+new file mode 100644
+index 0000000..67bf90f
+--- /dev/null
++++ b/src/test/claim-suggestion.test.tsx
+@@ -0,0 +1,52 @@
++import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
++import { afterEach, describe, expect, it, vi } from "vitest";
++
++const rpc = vi.fn();
++vi.mock("@/integrations/supabase/client", () => ({ supabase: { rpc: (...a: unknown[]) => rpc(...a) } }));
++vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
++
++import { ClaimSuggestion } from "@/components/members/ClaimSuggestion";
++
++afterEach(() => {
++  cleanup();
++  rpc.mockReset();
++});
++
++describe("ClaimSuggestion", () => {
++  it("não busca com nome de uma palavra só", async () => {
++    render(<ClaimSuggestion name="Maria" onClaimed={() => {}} />);
++    await new Promise((r) => setTimeout(r, 1100));
++    expect(rpc).not.toHaveBeenCalled();
++  });
++
++  it("pergunta 'Este é você?', pede o CPF e vincula quando confere", async () => {
++    rpc.mockImplementation(async (fn: string) =>
++      fn === "find_claimable_members" ? { data: [{ id: "m1", full_name: "José da Silva", has_cpf: true }] } : { data: "ok", error: null },
++    );
++    const onClaimed = vi.fn();
++    render(<ClaimSuggestion name="Jose da Silva" onClaimed={onClaimed} />);
++    await screen.findByText(/Este é você\?/, undefined, { timeout: 3000 });
++    fireEvent.click(screen.getByText("Sim, sou eu"));
++    fireEvent.change(screen.getByPlaceholderText("000.000.000-00"), { target: { value: "123.456.789-09" } });
++    fireEvent.click(screen.getByText("Confirmar"));
++    await waitFor(() => expect(onClaimed).toHaveBeenCalled());
++    expect(rpc).toHaveBeenCalledWith("claim_member", { _member: "m1", _cpf: "123.456.789-09" });
++  });
++
++  it("mostra erro quando o CPF não confere e some quando a pessoa responde 'Não'", async () => {
++    rpc.mockImplementation(async (fn: string) =>
++      fn === "find_claimable_members" ? { data: [{ id: "m1", full_name: "José da Silva", has_cpf: true }] } : { data: "wrong_cpf", error: null },
++    );
++    const onClaimed = vi.fn();
++    render(<ClaimSuggestion name="Jose da Silva" onClaimed={onClaimed} />);
++    await screen.findByText(/Este é você\?/, undefined, { timeout: 3000 });
++    fireEvent.click(screen.getByText("Sim, sou eu"));
++    fireEvent.change(screen.getByPlaceholderText("000.000.000-00"), { target: { value: "00000000000" } });
++    fireEvent.click(screen.getByText("Confirmar"));
++    await screen.findByText(/CPF não confere/);
++    expect(onClaimed).not.toHaveBeenCalled();
++    fireEvent.click(screen.getByText("Cancelar"));
++    fireEvent.click(screen.getByText("Não"));
++    await waitFor(() => expect(screen.queryByText(/Este é você\?/)).toBeNull());
++  });
++});
+-- 
+2.43.0
+

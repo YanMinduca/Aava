@@ -321,6 +321,33 @@ export type Database = {
           },
         ]
       }
+      member_claim_attempts: {
+        Row: {
+          created_at: string
+          id: number
+          kind: string
+          member_id: string | null
+          success: boolean
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: never
+          kind: string
+          member_id?: string | null
+          success?: boolean
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: never
+          kind?: string
+          member_id?: string | null
+          success?: boolean
+          user_id?: string
+        }
+        Relationships: []
+      }
       members: {
         Row: {
           address: string | null
@@ -615,6 +642,19 @@ export type Database = {
         Args: { _dept: string; _perm: string; _user_id: string }
         Returns: boolean
       }
+      claim_member: {
+        Args: { _cpf: string; _member: string }
+        Returns: string
+      }
+      find_claimable_members: {
+        Args: { _name: string }
+        Returns: {
+          full_name: string
+          has_cpf: boolean
+          id: string
+        }[]
+      }
+      norm_name: { Args: { _s: string }; Returns: string }
       has_permission: {
         Args: { _permission: string; _user_id: string }
         Returns: boolean

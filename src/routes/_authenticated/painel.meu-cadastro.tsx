@@ -6,6 +6,7 @@ import { Clock, CheckCircle2, XCircle } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { MyContributions } from "@/components/members/MyContributions";
+import { ClaimSuggestion } from "@/components/members/ClaimSuggestion";
 import { MemberForm, emptyMember, type MemberDraft } from "@/components/members/MemberForm";
 import { MEMBER_STATUS } from "@/lib/church";
 import { siteMeta } from '@/lib/site-query';
@@ -80,7 +81,24 @@ function MyProfile() {
         </div>
       )}
       <form className="mt-6 space-y-6" onSubmit={(e) => { e.preventDefault(); save.mutate(draft); }}>
-        <MemberForm mode="self" value={draft} onChange={setDraft} photoFolder={me.data.uid} />
+        <MemberForm
+          mode="self"
+          value={draft}
+          onChange={setDraft}
+          photoFolder={me.data.uid}
+          nameAddon={
+            !row ? (
+              <ClaimSuggestion
+                name={draft.full_name}
+                onClaimed={async () => {
+                  if (convite) await supabase.rpc("use_invite", { _code: convite });
+                  setDraft(null);
+                  qc.invalidateQueries({ queryKey: ["my-member"] });
+                }}
+              />
+            ) : undefined
+          }
+        />
         <Button type="submit" size="lg" disabled={save.isPending}>{row ? "Salvar alterações" : "Enviar cadastro"}</Button>
       </form>
       {row?.approval_status === "aprovado" && <MyContributions memberId={row.id} />}

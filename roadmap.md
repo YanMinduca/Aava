@@ -13,3 +13,4 @@
 - [x] Cargo de liderança no cadastro pergunta de quais departamentos a pessoa é líder
 - [x] Matrícula no cadastro de membros (única, só a equipe define)
 - [x] Financeiro: membro opcional em qualquer receita e gráfico de evolução mensal de dizimistas
+- [x] Vínculo da conta ao cadastro existente: "Este é você?" por nome + confirmação de CPF
