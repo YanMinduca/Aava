@@ -1,0 +1,286 @@
+From d0ca8024579f8e4fae067414e51041d410a7b53e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 17 Oct 2026 14:20:02 +0000
+Subject: [PATCH] =?UTF-8?q?Corrige=20p=C3=A1gina=20do=20evento=20que=20n?=
+ =?UTF-8?q?=C3=A3o=20abria=20(rota=20filha=20sem=20Outlet)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- eventos.tsx vira eventos.index.tsx: /eventos/:slug deixa de ser filha de uma rota sem <Outlet />
+- Teste que impede rotas pai sem <Outlet /> em páginas filhas
+---
+ src/routeTree.gen.ts                          | 65 ++++++++-----------
+ src/routes/{eventos.tsx => eventos.index.tsx} |  2 +-
+ src/test/route-nesting.test.ts                | 32 +++++++++
+ 3 files changed, 61 insertions(+), 38 deletions(-)
+ rename src/routes/{eventos.tsx => eventos.index.tsx} (96%)
+ create mode 100644 src/test/route-nesting.test.ts
+
+diff --git a/src/routeTree.gen.ts b/src/routeTree.gen.ts
+index 4075bed..4f8a04d 100644
+--- a/src/routeTree.gen.ts
++++ b/src/routeTree.gen.ts
+@@ -15,11 +15,11 @@ import { Route as AuthRouteImport } from './routes/auth'
+ import { Route as ContatoRouteImport } from './routes/contato'
+ import { Route as ContribuicaoRouteImport } from './routes/contribuicao'
+ import { Route as CultosRouteImport } from './routes/cultos'
+-import { Route as EventosRouteImport } from './routes/eventos'
+ import { Route as OracaoRouteImport } from './routes/oracao'
+ import { Route as QuemSomosRouteImport } from './routes/quem-somos'
+ import { Route as AuthenticatedPainelRouteImport } from './routes/_authenticated/painel'
+ import { Route as ConviteCodeRouteImport } from './routes/convite.$code'
++import { Route as EventosIndexRouteImport } from './routes/eventos.index'
+ import { Route as EventosSlugRouteImport } from './routes/eventos.$slug'
+ import { Route as AuthenticatedPainelIndexRouteImport } from './routes/_authenticated/painel.index'
+ import { Route as AuthenticatedPainelDepartamentosRouteImport } from './routes/_authenticated/painel.departamentos'
+@@ -64,11 +64,6 @@ const CultosRoute = CultosRouteImport.update({
+   path: '/cultos',
+   getParentRoute: () => rootRouteImport,
+ } as any)
+-const EventosRoute = EventosRouteImport.update({
+-  id: '/eventos',
+-  path: '/eventos',
+-  getParentRoute: () => rootRouteImport,
+-} as any)
+ const OracaoRoute = OracaoRouteImport.update({
+   id: '/oracao',
+   path: '/oracao',
+@@ -89,10 +84,15 @@ const ConviteCodeRoute = ConviteCodeRouteImport.update({
+   path: '/convite/$code',
+   getParentRoute: () => rootRouteImport,
+ } as any)
++const EventosIndexRoute = EventosIndexRouteImport.update({
++  id: '/eventos/',
++  path: '/eventos/',
++  getParentRoute: () => rootRouteImport,
++} as any)
+ const EventosSlugRoute = EventosSlugRouteImport.update({
+-  id: '/$slug',
+-  path: '/$slug',
+-  getParentRoute: () => EventosRoute,
++  id: '/eventos/$slug',
++  path: '/eventos/$slug',
++  getParentRoute: () => rootRouteImport,
+ } as any)
+ const AuthenticatedPainelIndexRoute =
+   AuthenticatedPainelIndexRouteImport.update({
+@@ -178,12 +178,12 @@ export interface FileRoutesByFullPath {
+   '/contato': typeof ContatoRoute
+   '/contribuicao': typeof ContribuicaoRoute
+   '/cultos': typeof CultosRoute
+-  '/eventos': typeof EventosRouteWithChildren
+   '/oracao': typeof OracaoRoute
+   '/quem-somos': typeof QuemSomosRoute
+   '/painel': typeof AuthenticatedPainelRouteWithChildren
+   '/convite/$code': typeof ConviteCodeRoute
+   '/eventos/$slug': typeof EventosSlugRoute
++  '/eventos/': typeof EventosIndexRoute
+   '/painel/departamentos': typeof AuthenticatedPainelDepartamentosRoute
+   '/painel/eventos': typeof AuthenticatedPainelEventosRoute
+   '/painel/financeiro': typeof AuthenticatedPainelFinanceiroRoute
+@@ -204,11 +204,11 @@ export interface FileRoutesByTo {
+   '/contato': typeof ContatoRoute
+   '/contribuicao': typeof ContribuicaoRoute
+   '/cultos': typeof CultosRoute
+-  '/eventos': typeof EventosRouteWithChildren
+   '/oracao': typeof OracaoRoute
+   '/quem-somos': typeof QuemSomosRoute
+   '/convite/$code': typeof ConviteCodeRoute
+   '/eventos/$slug': typeof EventosSlugRoute
++  '/eventos': typeof EventosIndexRoute
+   '/painel/departamentos': typeof AuthenticatedPainelDepartamentosRoute
+   '/painel/eventos': typeof AuthenticatedPainelEventosRoute
+   '/painel/financeiro': typeof AuthenticatedPainelFinanceiroRoute
+@@ -231,12 +231,12 @@ export interface FileRoutesById {
+   '/contato': typeof ContatoRoute
+   '/contribuicao': typeof ContribuicaoRoute
+   '/cultos': typeof CultosRoute
+-  '/eventos': typeof EventosRouteWithChildren
+   '/oracao': typeof OracaoRoute
+   '/quem-somos': typeof QuemSomosRoute
+   '/_authenticated/painel': typeof AuthenticatedPainelRouteWithChildren
+   '/convite/$code': typeof ConviteCodeRoute
+   '/eventos/$slug': typeof EventosSlugRoute
++  '/eventos/': typeof EventosIndexRoute
+   '/_authenticated/painel/departamentos': typeof AuthenticatedPainelDepartamentosRoute
+   '/_authenticated/painel/eventos': typeof AuthenticatedPainelEventosRoute
+   '/_authenticated/painel/financeiro': typeof AuthenticatedPainelFinanceiroRoute
+@@ -259,12 +259,12 @@ export interface FileRouteTypes {
+     | '/contato'
+     | '/contribuicao'
+     | '/cultos'
+-    | '/eventos'
+     | '/oracao'
+     | '/quem-somos'
+     | '/painel'
+     | '/convite/$code'
+     | '/eventos/$slug'
++    | '/eventos/'
+     | '/painel/departamentos'
+     | '/painel/eventos'
+     | '/painel/financeiro'
+@@ -285,11 +285,11 @@ export interface FileRouteTypes {
+     | '/contato'
+     | '/contribuicao'
+     | '/cultos'
+-    | '/eventos'
+     | '/oracao'
+     | '/quem-somos'
+     | '/convite/$code'
+     | '/eventos/$slug'
++    | '/eventos'
+     | '/painel/departamentos'
+     | '/painel/eventos'
+     | '/painel/financeiro'
+@@ -311,12 +311,12 @@ export interface FileRouteTypes {
+     | '/contato'
+     | '/contribuicao'
+     | '/cultos'
+-    | '/eventos'
+     | '/oracao'
+     | '/quem-somos'
+     | '/_authenticated/painel'
+     | '/convite/$code'
+     | '/eventos/$slug'
++    | '/eventos/'
+     | '/_authenticated/painel/departamentos'
+     | '/_authenticated/painel/eventos'
+     | '/_authenticated/painel/financeiro'
+@@ -339,10 +339,11 @@ export interface RootRouteChildren {
+   ContatoRoute: typeof ContatoRoute
+   ContribuicaoRoute: typeof ContribuicaoRoute
+   CultosRoute: typeof CultosRoute
+-  EventosRoute: typeof EventosRouteWithChildren
+   OracaoRoute: typeof OracaoRoute
+   QuemSomosRoute: typeof QuemSomosRoute
+   ConviteCodeRoute: typeof ConviteCodeRoute
++  EventosSlugRoute: typeof EventosSlugRoute
++  EventosIndexRoute: typeof EventosIndexRoute
+ }
+ 
+ declare module '@tanstack/react-router' {
+@@ -389,13 +390,6 @@ declare module '@tanstack/react-router' {
+       preLoaderRoute: typeof CultosRouteImport
+       parentRoute: typeof rootRouteImport
+     }
+-    '/eventos': {
+-      id: '/eventos'
+-      path: '/eventos'
+-      fullPath: '/eventos'
+-      preLoaderRoute: typeof EventosRouteImport
+-      parentRoute: typeof rootRouteImport
+-    }
+     '/oracao': {
+       id: '/oracao'
+       path: '/oracao'
+@@ -424,12 +418,19 @@ declare module '@tanstack/react-router' {
+       preLoaderRoute: typeof ConviteCodeRouteImport
+       parentRoute: typeof rootRouteImport
+     }
++    '/eventos/': {
++      id: '/eventos/'
++      path: '/eventos'
++      fullPath: '/eventos/'
++      preLoaderRoute: typeof EventosIndexRouteImport
++      parentRoute: typeof rootRouteImport
++    }
+     '/eventos/$slug': {
+       id: '/eventos/$slug'
+-      path: '/$slug'
++      path: '/eventos/$slug'
+       fullPath: '/eventos/$slug'
+       preLoaderRoute: typeof EventosSlugRouteImport
+-      parentRoute: typeof EventosRoute
++      parentRoute: typeof rootRouteImport
+     }
+     '/_authenticated/painel/': {
+       id: '/_authenticated/painel/'
+@@ -572,17 +573,6 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
+ const AuthenticatedRouteRouteWithChildren =
+   AuthenticatedRouteRoute._addFileChildren(AuthenticatedRouteRouteChildren)
+ 
+-interface EventosRouteChildren {
+-  EventosSlugRoute: typeof EventosSlugRoute
+-}
+-
+-const EventosRouteChildren: EventosRouteChildren = {
+-  EventosSlugRoute: EventosSlugRoute,
+-}
+-
+-const EventosRouteWithChildren =
+-  EventosRoute._addFileChildren(EventosRouteChildren)
+-
+ const rootRouteChildren: RootRouteChildren = {
+   IndexRoute: IndexRoute,
+   AuthenticatedRouteRoute: AuthenticatedRouteRouteWithChildren,
+@@ -590,10 +580,11 @@ const rootRouteChildren: RootRouteChildren = {
+   ContatoRoute: ContatoRoute,
+   ContribuicaoRoute: ContribuicaoRoute,
+   CultosRoute: CultosRoute,
+-  EventosRoute: EventosRouteWithChildren,
+   OracaoRoute: OracaoRoute,
+   QuemSomosRoute: QuemSomosRoute,
+   ConviteCodeRoute: ConviteCodeRoute,
++  EventosSlugRoute: EventosSlugRoute,
++  EventosIndexRoute: EventosIndexRoute,
+ }
+ export const routeTree = rootRouteImport
+   ._addFileChildren(rootRouteChildren)
+diff --git a/src/routes/eventos.tsx b/src/routes/eventos.index.tsx
+similarity index 96%
+rename from src/routes/eventos.tsx
+rename to src/routes/eventos.index.tsx
+index dc22314..aa95ed4 100644
+--- a/src/routes/eventos.tsx
++++ b/src/routes/eventos.index.tsx
+@@ -4,7 +4,7 @@ import { PageError } from "@/components/site/PageError";
+ import { EventCard, usePublicEvents } from "@/components/events/EventsList";
+ import { siteMeta } from "@/lib/site-query";
+ 
+-export const Route = createFileRoute("/eventos")({
++export const Route = createFileRoute("/eventos/")({
+   head: () => siteMeta("Eventos — Comunidade Aava", "Veja os próximos eventos da Comunidade Aava e faça sua inscrição."),
+   errorComponent: PageError,
+   notFoundComponent: PageError,
+diff --git a/src/test/route-nesting.test.ts b/src/test/route-nesting.test.ts
+new file mode 100644
+index 0000000..4dd25a5
+--- /dev/null
++++ b/src/test/route-nesting.test.ts
+@@ -0,0 +1,32 @@
++import { readdirSync, readFileSync, existsSync } from "node:fs";
++import { join } from "node:path";
++import { describe, expect, it } from "vitest";
++
++/**
++ * No TanStack Router, "a.b.tsx" é FILHA de "a.tsx". Se "a.tsx" não renderiza <Outlet />,
++ * a URL de "a/b" muda mas a tela de "a" continua aparecendo (a página filha "não abre").
++ * Para páginas irmãs, use "a.index.tsx" (lista) + "a.$id.tsx" (detalhe), sem "a.tsx".
++ */
++function routeFiles(dir: string): string[] {
++  return readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
++    e.isDirectory() ? routeFiles(join(dir, e.name)) : e.name.endsWith(".tsx") ? [join(dir, e.name)] : [],
++  );
++}
++
++describe("rotas aninhadas", () => {
++  it("toda rota pai (a.tsx) de uma rota filha (a.b.tsx) renderiza <Outlet />", () => {
++    const root = join(process.cwd(), "src/routes");
++    const problems: string[] = [];
++    for (const file of routeFiles(root)) {
++      const base = file.replace(/\.tsx$/, "");
++      const name = base.split("/").pop()!;
++      const lastDot = name.lastIndexOf(".");
++      if (lastDot === -1) continue;
++      const parent = join(base.slice(0, base.length - name.length), `${name.slice(0, lastDot)}.tsx`);
++      if (existsSync(parent) && !readFileSync(parent, "utf8").includes("Outlet")) {
++        problems.push(`${parent.replace(root, "src/routes")} é pai de ${file.replace(root, "src/routes")} mas não tem <Outlet />`);
++      }
++    }
++    expect(problems).toEqual([]);
++  });
++});
+-- 
+2.43.0
+
