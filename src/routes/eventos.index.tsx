@@ -4,7 +4,7 @@ import { PageError } from "@/components/site/PageError";
 import { EventCard, usePublicEvents } from "@/components/events/EventsList";
 import { siteMeta } from "@/lib/site-query";
 
-export const Route = createFileRoute("/eventos")({
+export const Route = createFileRoute("/eventos/")({
   head: () => siteMeta("Eventos — Comunidade Aava", "Veja os próximos eventos da Comunidade Aava e faça sua inscrição."),
   errorComponent: PageError,
   notFoundComponent: PageError,
