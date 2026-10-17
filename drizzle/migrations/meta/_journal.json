@@ -71,6 +71,13 @@
       "when": 1791805200000,
       "tag": "0009_member_registration_number",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1791891600000,
+      "tag": "0010_claim_existing_member",
+      "breakpoints": true
     }
   ]
 }

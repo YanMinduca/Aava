@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
 import { Camera, ChevronDown, User } from "lucide-react";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
@@ -108,6 +109,7 @@ export function MemberForm({
   roles,
   leaderDepartmentIds,
   onLeaderDepartmentIdsChange,
+  nameAddon,
 }: {
   value: MemberDraft;
   onChange: (v: MemberDraft) => void;
@@ -124,6 +126,8 @@ export function MemberForm({
   /** Departamentos dos quais o membro é líder (perguntado quando o cargo é de liderança). */
   leaderDepartmentIds?: string[];
   onLeaderDepartmentIdsChange?: (ids: string[]) => void;
+  /** Conteúdo exibido logo abaixo do campo de nome (ex.: "Este é você?"). */
+  nameAddon?: ReactNode;
 }) {
   const set = (patch: Partial<MemberDraft>) => onChange({ ...value, ...patch });
   const age = ageFrom(value.birth_date);
@@ -180,7 +184,7 @@ export function MemberForm({
             <input type="file" accept="image/*" className="hidden" onChange={(e) => e.target.files?.[0] && upload(e.target.files[0])} />
           </label>
         </div>
-        <F label="Nome completo *" full><Input required {...txt("full_name")} /></F>
+        <F label="Nome completo *" full><Input required {...txt("full_name")} />{nameAddon}</F>
         <F label="Data de nascimento"><Input {...dt("birth_date")} /></F>
         <F label="Idade"><Input disabled value={age !== null ? `${age} anos` : "—"} /></F>
         <F label="CPF"><Input value={value.cpf ?? ""} onChange={(e) => set({ cpf: formatCpf(e.target.value) })} placeholder="000.000.000-00" /></F>
