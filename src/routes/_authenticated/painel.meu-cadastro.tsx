@@ -7,6 +7,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { MyContributions } from "@/components/members/MyContributions";
 import { ClaimSuggestion } from "@/components/members/ClaimSuggestion";
+import { MyTickets } from "@/components/events/MyTickets";
 import { MemberForm, emptyMember, type MemberDraft } from "@/components/members/MemberForm";
 import { MEMBER_STATUS } from "@/lib/church";
 import { siteMeta } from '@/lib/site-query';
@@ -101,6 +102,7 @@ function MyProfile() {
         />
         <Button type="submit" size="lg" disabled={save.isPending}>{row ? "Salvar alterações" : "Enviar cadastro"}</Button>
       </form>
+      <MyTickets uid={me.data.uid} />
       {row?.approval_status === "aprovado" && <MyContributions memberId={row.id} />}
     </div>
   );

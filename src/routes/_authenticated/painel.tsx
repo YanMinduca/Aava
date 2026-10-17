@@ -12,6 +12,7 @@ import {
   Heart,
   Settings,
   Network,
+  CalendarDays,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
@@ -42,6 +43,7 @@ function PanelLayout() {
     },
     { to: "/painel/membros", label: "Membros", icon: Users, show: can("view_members") },
     { to: "/painel/departamentos", label: "Departamentos", icon: Network, show: canViewDepartments },
+    { to: "/painel/eventos", label: "Eventos", icon: CalendarDays, show: can("manage_events") || can("verify_event_payments") || can("checkin_events") },
     { to: "/painel/financeiro", label: "Financeiro", icon: Wallet, show: can("view_finance") },
     {
       to: "/painel/permissoes",

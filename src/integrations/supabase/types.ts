@@ -158,6 +158,337 @@ export type Database = {
           },
         ]
       }
+      event_lots: {
+        Row: {
+          capacity: number | null
+          closes_at: string | null
+          created_at: string
+          event_id: string
+          id: string
+          name: string
+          opens_at: string | null
+          position: number
+          price: number
+          public_access: boolean
+        }
+        Insert: {
+          capacity?: number | null
+          closes_at?: string | null
+          created_at?: string
+          event_id: string
+          id?: string
+          name: string
+          opens_at?: string | null
+          position?: number
+          price?: number
+          public_access?: boolean
+        }
+        Update: {
+          capacity?: number | null
+          closes_at?: string | null
+          created_at?: string
+          event_id?: string
+          id?: string
+          name?: string
+          opens_at?: string | null
+          position?: number
+          price?: number
+          public_access?: boolean
+        }
+        Relationships: [
+          {
+            foreignKeyName: "event_lots_event_id_fkey"
+            columns: ["event_id"]
+            isOneToOne: false
+            referencedRelation: "events"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      event_payment_info: {
+        Row: {
+          card_contact_note: string | null
+          event_id: string
+          payment_link: string | null
+          pix_key: string | null
+          pix_qr_path: string | null
+        }
+        Insert: {
+          card_contact_note?: string | null
+          event_id: string
+          payment_link?: string | null
+          pix_key?: string | null
+          pix_qr_path?: string | null
+        }
+        Update: {
+          card_contact_note?: string | null
+          event_id?: string
+          payment_link?: string | null
+          pix_key?: string | null
+          pix_qr_path?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "event_payment_info_event_id_fkey"
+            columns: ["event_id"]
+            isOneToOne: false
+            referencedRelation: "events"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      event_payments: {
+        Row: {
+          amount: number
+          claimed_at: string | null
+          confirmed_at: string | null
+          confirmed_by: string | null
+          id: string
+          installment_no: number
+          proof_path: string | null
+          registration_id: string
+          status: string
+        }
+        Insert: {
+          amount: number
+          claimed_at?: string | null
+          confirmed_at?: string | null
+          confirmed_by?: string | null
+          id?: string
+          installment_no: number
+          proof_path?: string | null
+          registration_id: string
+          status?: string
+        }
+        Update: {
+          amount?: number
+          claimed_at?: string | null
+          confirmed_at?: string | null
+          confirmed_by?: string | null
+          id?: string
+          installment_no?: number
+          proof_path?: string | null
+          registration_id?: string
+          status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "event_payments_registration_id_fkey"
+            columns: ["registration_id"]
+            isOneToOne: false
+            referencedRelation: "event_registrations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      event_registrations: {
+        Row: {
+          attendee_cpf: string | null
+          attendee_email: string | null
+          attendee_name: string
+          attendee_phone: string | null
+          cancelled_at: string | null
+          created_at: string
+          event_id: string
+          id: string
+          installments: number
+          lot_id: string
+          member_id: string | null
+          quantity: number
+          released_at: string | null
+          released_by: string | null
+          released_manually: boolean
+          status: string
+          total: number
+          unit_price: number
+          user_id: string
+        }
+        Insert: {
+          attendee_cpf?: string | null
+          attendee_email?: string | null
+          attendee_name: string
+          attendee_phone?: string | null
+          cancelled_at?: string | null
+          created_at?: string
+          event_id: string
+          id?: string
+          installments?: number
+          lot_id: string
+          member_id?: string | null
+          quantity: number
+          released_at?: string | null
+          released_by?: string | null
+          released_manually?: boolean
+          status?: string
+          total: number
+          unit_price: number
+          user_id: string
+        }
+        Update: {
+          attendee_cpf?: string | null
+          attendee_email?: string | null
+          attendee_name?: string
+          attendee_phone?: string | null
+          cancelled_at?: string | null
+          created_at?: string
+          event_id?: string
+          id?: string
+          installments?: number
+          lot_id?: string
+          member_id?: string | null
+          quantity?: number
+          released_at?: string | null
+          released_by?: string | null
+          released_manually?: boolean
+          status?: string
+          total?: number
+          unit_price?: number
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "event_registrations_event_id_fkey"
+            columns: ["event_id"]
+            isOneToOne: false
+            referencedRelation: "events"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "event_registrations_lot_id_fkey"
+            columns: ["lot_id"]
+            isOneToOne: false
+            referencedRelation: "event_lots"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "event_registrations_member_id_fkey"
+            columns: ["member_id"]
+            isOneToOne: false
+            referencedRelation: "members"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      event_tickets: {
+        Row: {
+          checked_in_at: string | null
+          checked_in_by: string | null
+          code: string
+          created_at: string
+          event_id: string
+          holder_name: string
+          id: string
+          registration_id: string
+          seq: number
+          status: string
+        }
+        Insert: {
+          checked_in_at?: string | null
+          checked_in_by?: string | null
+          code: string
+          created_at?: string
+          event_id: string
+          holder_name: string
+          id?: string
+          registration_id: string
+          seq: number
+          status?: string
+        }
+        Update: {
+          checked_in_at?: string | null
+          checked_in_by?: string | null
+          code?: string
+          created_at?: string
+          event_id?: string
+          holder_name?: string
+          id?: string
+          registration_id?: string
+          seq?: number
+          status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "event_tickets_event_id_fkey"
+            columns: ["event_id"]
+            isOneToOne: false
+            referencedRelation: "events"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "event_tickets_registration_id_fkey"
+            columns: ["registration_id"]
+            isOneToOne: false
+            referencedRelation: "event_registrations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      events: {
+        Row: {
+          accepts_card: boolean
+          allow_installments: boolean
+          audience: string
+          created_at: string
+          created_by: string | null
+          description: string | null
+          ends_at: string | null
+          id: string
+          limit_per_person: boolean
+          location: string | null
+          max_installments: number
+          max_per_person: number | null
+          payment_enabled: boolean
+          published: boolean
+          registration_closes_at: string | null
+          registration_opens_at: string | null
+          slug: string
+          starts_at: string
+          title: string
+        }
+        Insert: {
+          accepts_card?: boolean
+          allow_installments?: boolean
+          audience?: string
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          ends_at?: string | null
+          id?: string
+          limit_per_person?: boolean
+          location?: string | null
+          max_installments?: number
+          max_per_person?: number | null
+          payment_enabled?: boolean
+          published?: boolean
+          registration_closes_at?: string | null
+          registration_opens_at?: string | null
+          slug: string
+          starts_at: string
+          title: string
+        }
+        Update: {
+          accepts_card?: boolean
+          allow_installments?: boolean
+          audience?: string
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          ends_at?: string | null
+          id?: string
+          limit_per_person?: boolean
+          location?: string | null
+          max_installments?: number
+          max_per_person?: number | null
+          payment_enabled?: boolean
+          published?: boolean
+          registration_closes_at?: string | null
+          registration_opens_at?: string | null
+          slug?: string
+          starts_at?: string
+          title?: string
+        }
+        Relationships: []
+      }
       financial_goals: {
         Row: {
           category: string | null
@@ -641,6 +972,51 @@ export type Database = {
       has_dept_permission: {
         Args: { _dept: string; _perm: string; _user_id: string }
         Returns: boolean
+      }
+      cancel_event_registration: { Args: { _reg: string }; Returns: undefined }
+      checkin_ticket: { Args: { _code: string }; Returns: Json }
+      claim_event_payment: {
+        Args: { _payment: string; _proof_path?: string }
+        Returns: undefined
+      }
+      ensure_visitor_profile: {
+        Args: { _cpf: string; _name: string; _phone: string }
+        Returns: string
+      }
+      event_admin_stats: { Args: { _event: string }; Returns: Json }
+      is_valid_cpf: { Args: { _cpf: string }; Returns: boolean }
+      public_event: { Args: { _slug: string }; Returns: Json }
+      public_events: {
+        Args: never
+        Returns: {
+          audience: string
+          description: string | null
+          ends_at: string | null
+          id: string
+          location: string | null
+          min_price: number | null
+          payment_enabled: boolean
+          registration_closes_at: string | null
+          registration_open: boolean
+          registration_opens_at: string | null
+          slug: string
+          spots_left: number | null
+          starts_at: string
+          title: string
+        }[]
+      }
+      register_for_event: {
+        Args: { _cpf: string; _event: string; _installments?: number; _lot: string; _quantity: number }
+        Returns: string
+      }
+      release_event_registration: { Args: { _reg: string }; Returns: undefined }
+      set_event_payment_status: {
+        Args: { _payment: string; _status: string }
+        Returns: undefined
+      }
+      set_ticket_presence: {
+        Args: { _present: boolean; _ticket: string }
+        Returns: undefined
       }
       claim_member: {
         Args: { _cpf: string; _member: string }

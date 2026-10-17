@@ -12,6 +12,7 @@ export function SiteLayout({ children }: { children: ReactNode }) {
     { to: "/", label: c.navHome },
     { to: "/quem-somos", label: c.navAbout },
     { to: "/cultos", label: c.navServices },
+    { to: "/eventos", label: "Eventos" },
     { to: "/oracao", label: c.navPrayer },
     { to: "/contribuicao", label: c.navContribution },
     { to: "/contato", label: c.navContact },
