@@ -19,8 +19,11 @@ import { Route as OracaoRouteImport } from './routes/oracao'
 import { Route as QuemSomosRouteImport } from './routes/quem-somos'
 import { Route as AuthenticatedPainelRouteImport } from './routes/_authenticated/painel'
 import { Route as ConviteCodeRouteImport } from './routes/convite.$code'
+import { Route as EventosIndexRouteImport } from './routes/eventos.index'
+import { Route as EventosSlugRouteImport } from './routes/eventos.$slug'
 import { Route as AuthenticatedPainelIndexRouteImport } from './routes/_authenticated/painel.index'
 import { Route as AuthenticatedPainelDepartamentosRouteImport } from './routes/_authenticated/painel.departamentos'
+import { Route as AuthenticatedPainelEventosRouteImport } from './routes/_authenticated/painel.eventos'
 import { Route as AuthenticatedPainelFinanceiroRouteImport } from './routes/_authenticated/painel.financeiro'
 import { Route as AuthenticatedPainelMembrosRouteImport } from './routes/_authenticated/painel.membros'
 import { Route as AuthenticatedPainelMeuCadastroRouteImport } from './routes/_authenticated/painel.meu-cadastro'
@@ -29,6 +32,7 @@ import { Route as AuthenticatedPainelPermissoesRouteImport } from './routes/_aut
 import { Route as AuthenticatedPainelRelatorioRouteImport } from './routes/_authenticated/painel.relatorio'
 import { Route as AuthenticatedPainelSiteRouteImport } from './routes/_authenticated/painel.site'
 import { Route as AuthenticatedPainelDepartamentoIdRouteImport } from './routes/_authenticated/painel.departamento.$id'
+import { Route as AuthenticatedPainelEventoIdRouteImport } from './routes/_authenticated/painel.evento.$id'
 import { Route as AuthenticatedPainelMembroIdRouteImport } from './routes/_authenticated/painel.membro.$id'
 
 const IndexRoute = IndexRouteImport.update({
@@ -80,6 +84,16 @@ const ConviteCodeRoute = ConviteCodeRouteImport.update({
   path: '/convite/$code',
   getParentRoute: () => rootRouteImport,
 } as any)
+const EventosIndexRoute = EventosIndexRouteImport.update({
+  id: '/eventos/',
+  path: '/eventos/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const EventosSlugRoute = EventosSlugRouteImport.update({
+  id: '/eventos/$slug',
+  path: '/eventos/$slug',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AuthenticatedPainelIndexRoute =
   AuthenticatedPainelIndexRouteImport.update({
     id: '/',
@@ -90,6 +104,12 @@ const AuthenticatedPainelDepartamentosRoute =
   AuthenticatedPainelDepartamentosRouteImport.update({
     id: '/departamentos',
     path: '/departamentos',
+    getParentRoute: () => AuthenticatedPainelRoute,
+  } as any)
+const AuthenticatedPainelEventosRoute =
+  AuthenticatedPainelEventosRouteImport.update({
+    id: '/eventos',
+    path: '/eventos',
     getParentRoute: () => AuthenticatedPainelRoute,
   } as any)
 const AuthenticatedPainelFinanceiroRoute =
@@ -139,6 +159,12 @@ const AuthenticatedPainelDepartamentoIdRoute =
     path: '/departamento/$id',
     getParentRoute: () => AuthenticatedPainelRoute,
   } as any)
+const AuthenticatedPainelEventoIdRoute =
+  AuthenticatedPainelEventoIdRouteImport.update({
+    id: '/evento/$id',
+    path: '/evento/$id',
+    getParentRoute: () => AuthenticatedPainelRoute,
+  } as any)
 const AuthenticatedPainelMembroIdRoute =
   AuthenticatedPainelMembroIdRouteImport.update({
     id: '/membro/$id',
@@ -156,7 +182,10 @@ export interface FileRoutesByFullPath {
   '/quem-somos': typeof QuemSomosRoute
   '/painel': typeof AuthenticatedPainelRouteWithChildren
   '/convite/$code': typeof ConviteCodeRoute
+  '/eventos/$slug': typeof EventosSlugRoute
+  '/eventos/': typeof EventosIndexRoute
   '/painel/departamentos': typeof AuthenticatedPainelDepartamentosRoute
+  '/painel/eventos': typeof AuthenticatedPainelEventosRoute
   '/painel/financeiro': typeof AuthenticatedPainelFinanceiroRoute
   '/painel/membros': typeof AuthenticatedPainelMembrosRoute
   '/painel/meu-cadastro': typeof AuthenticatedPainelMeuCadastroRoute
@@ -166,6 +195,7 @@ export interface FileRoutesByFullPath {
   '/painel/site': typeof AuthenticatedPainelSiteRoute
   '/painel/': typeof AuthenticatedPainelIndexRoute
   '/painel/departamento/$id': typeof AuthenticatedPainelDepartamentoIdRoute
+  '/painel/evento/$id': typeof AuthenticatedPainelEventoIdRoute
   '/painel/membro/$id': typeof AuthenticatedPainelMembroIdRoute
 }
 export interface FileRoutesByTo {
@@ -177,7 +207,10 @@ export interface FileRoutesByTo {
   '/oracao': typeof OracaoRoute
   '/quem-somos': typeof QuemSomosRoute
   '/convite/$code': typeof ConviteCodeRoute
+  '/eventos/$slug': typeof EventosSlugRoute
+  '/eventos': typeof EventosIndexRoute
   '/painel/departamentos': typeof AuthenticatedPainelDepartamentosRoute
+  '/painel/eventos': typeof AuthenticatedPainelEventosRoute
   '/painel/financeiro': typeof AuthenticatedPainelFinanceiroRoute
   '/painel/membros': typeof AuthenticatedPainelMembrosRoute
   '/painel/meu-cadastro': typeof AuthenticatedPainelMeuCadastroRoute
@@ -187,6 +220,7 @@ export interface FileRoutesByTo {
   '/painel/site': typeof AuthenticatedPainelSiteRoute
   '/painel': typeof AuthenticatedPainelIndexRoute
   '/painel/departamento/$id': typeof AuthenticatedPainelDepartamentoIdRoute
+  '/painel/evento/$id': typeof AuthenticatedPainelEventoIdRoute
   '/painel/membro/$id': typeof AuthenticatedPainelMembroIdRoute
 }
 export interface FileRoutesById {
@@ -201,7 +235,10 @@ export interface FileRoutesById {
   '/quem-somos': typeof QuemSomosRoute
   '/_authenticated/painel': typeof AuthenticatedPainelRouteWithChildren
   '/convite/$code': typeof ConviteCodeRoute
+  '/eventos/$slug': typeof EventosSlugRoute
+  '/eventos/': typeof EventosIndexRoute
   '/_authenticated/painel/departamentos': typeof AuthenticatedPainelDepartamentosRoute
+  '/_authenticated/painel/eventos': typeof AuthenticatedPainelEventosRoute
   '/_authenticated/painel/financeiro': typeof AuthenticatedPainelFinanceiroRoute
   '/_authenticated/painel/membros': typeof AuthenticatedPainelMembrosRoute
   '/_authenticated/painel/meu-cadastro': typeof AuthenticatedPainelMeuCadastroRoute
@@ -211,6 +248,7 @@ export interface FileRoutesById {
   '/_authenticated/painel/site': typeof AuthenticatedPainelSiteRoute
   '/_authenticated/painel/': typeof AuthenticatedPainelIndexRoute
   '/_authenticated/painel/departamento/$id': typeof AuthenticatedPainelDepartamentoIdRoute
+  '/_authenticated/painel/evento/$id': typeof AuthenticatedPainelEventoIdRoute
   '/_authenticated/painel/membro/$id': typeof AuthenticatedPainelMembroIdRoute
 }
 export interface FileRouteTypes {
@@ -225,7 +263,10 @@ export interface FileRouteTypes {
     | '/quem-somos'
     | '/painel'
     | '/convite/$code'
+    | '/eventos/$slug'
+    | '/eventos/'
     | '/painel/departamentos'
+    | '/painel/eventos'
     | '/painel/financeiro'
     | '/painel/membros'
     | '/painel/meu-cadastro'
@@ -235,6 +276,7 @@ export interface FileRouteTypes {
     | '/painel/site'
     | '/painel/'
     | '/painel/departamento/$id'
+    | '/painel/evento/$id'
     | '/painel/membro/$id'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -246,7 +288,10 @@ export interface FileRouteTypes {
     | '/oracao'
     | '/quem-somos'
     | '/convite/$code'
+    | '/eventos/$slug'
+    | '/eventos'
     | '/painel/departamentos'
+    | '/painel/eventos'
     | '/painel/financeiro'
     | '/painel/membros'
     | '/painel/meu-cadastro'
@@ -256,6 +301,7 @@ export interface FileRouteTypes {
     | '/painel/site'
     | '/painel'
     | '/painel/departamento/$id'
+    | '/painel/evento/$id'
     | '/painel/membro/$id'
   id:
     | '__root__'
@@ -269,7 +315,10 @@ export interface FileRouteTypes {
     | '/quem-somos'
     | '/_authenticated/painel'
     | '/convite/$code'
+    | '/eventos/$slug'
+    | '/eventos/'
     | '/_authenticated/painel/departamentos'
+    | '/_authenticated/painel/eventos'
     | '/_authenticated/painel/financeiro'
     | '/_authenticated/painel/membros'
     | '/_authenticated/painel/meu-cadastro'
@@ -279,6 +328,7 @@ export interface FileRouteTypes {
     | '/_authenticated/painel/site'
     | '/_authenticated/painel/'
     | '/_authenticated/painel/departamento/$id'
+    | '/_authenticated/painel/evento/$id'
     | '/_authenticated/painel/membro/$id'
   fileRoutesById: FileRoutesById
 }
@@ -292,6 +342,8 @@ export interface RootRouteChildren {
   OracaoRoute: typeof OracaoRoute
   QuemSomosRoute: typeof QuemSomosRoute
   ConviteCodeRoute: typeof ConviteCodeRoute
+  EventosSlugRoute: typeof EventosSlugRoute
+  EventosIndexRoute: typeof EventosIndexRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -366,6 +418,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ConviteCodeRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/eventos/': {
+      id: '/eventos/'
+      path: '/eventos'
+      fullPath: '/eventos/'
+      preLoaderRoute: typeof EventosIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/eventos/$slug': {
+      id: '/eventos/$slug'
+      path: '/eventos/$slug'
+      fullPath: '/eventos/$slug'
+      preLoaderRoute: typeof EventosSlugRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/_authenticated/painel/': {
       id: '/_authenticated/painel/'
       path: '/'
@@ -378,6 +444,13 @@ declare module '@tanstack/react-router' {
       path: '/departamentos'
       fullPath: '/painel/departamentos'
       preLoaderRoute: typeof AuthenticatedPainelDepartamentosRouteImport
+      parentRoute: typeof AuthenticatedPainelRoute
+    }
+    '/_authenticated/painel/eventos': {
+      id: '/_authenticated/painel/eventos'
+      path: '/eventos'
+      fullPath: '/painel/eventos'
+      preLoaderRoute: typeof AuthenticatedPainelEventosRouteImport
       parentRoute: typeof AuthenticatedPainelRoute
     }
     '/_authenticated/painel/financeiro': {
@@ -436,6 +509,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedPainelDepartamentoIdRouteImport
       parentRoute: typeof AuthenticatedPainelRoute
     }
+    '/_authenticated/painel/evento/$id': {
+      id: '/_authenticated/painel/evento/$id'
+      path: '/evento/$id'
+      fullPath: '/painel/evento/$id'
+      preLoaderRoute: typeof AuthenticatedPainelEventoIdRouteImport
+      parentRoute: typeof AuthenticatedPainelRoute
+    }
     '/_authenticated/painel/membro/$id': {
       id: '/_authenticated/painel/membro/$id'
       path: '/membro/$id'
@@ -448,6 +528,7 @@ declare module '@tanstack/react-router' {
 
 interface AuthenticatedPainelRouteChildren {
   AuthenticatedPainelDepartamentosRoute: typeof AuthenticatedPainelDepartamentosRoute
+  AuthenticatedPainelEventosRoute: typeof AuthenticatedPainelEventosRoute
   AuthenticatedPainelFinanceiroRoute: typeof AuthenticatedPainelFinanceiroRoute
   AuthenticatedPainelMembrosRoute: typeof AuthenticatedPainelMembrosRoute
   AuthenticatedPainelMeuCadastroRoute: typeof AuthenticatedPainelMeuCadastroRoute
@@ -457,11 +538,13 @@ interface AuthenticatedPainelRouteChildren {
   AuthenticatedPainelSiteRoute: typeof AuthenticatedPainelSiteRoute
   AuthenticatedPainelIndexRoute: typeof AuthenticatedPainelIndexRoute
   AuthenticatedPainelDepartamentoIdRoute: typeof AuthenticatedPainelDepartamentoIdRoute
+  AuthenticatedPainelEventoIdRoute: typeof AuthenticatedPainelEventoIdRoute
   AuthenticatedPainelMembroIdRoute: typeof AuthenticatedPainelMembroIdRoute
 }
 
 const AuthenticatedPainelRouteChildren: AuthenticatedPainelRouteChildren = {
   AuthenticatedPainelDepartamentosRoute: AuthenticatedPainelDepartamentosRoute,
+  AuthenticatedPainelEventosRoute: AuthenticatedPainelEventosRoute,
   AuthenticatedPainelFinanceiroRoute: AuthenticatedPainelFinanceiroRoute,
   AuthenticatedPainelMembrosRoute: AuthenticatedPainelMembrosRoute,
   AuthenticatedPainelMeuCadastroRoute: AuthenticatedPainelMeuCadastroRoute,
@@ -472,6 +555,7 @@ const AuthenticatedPainelRouteChildren: AuthenticatedPainelRouteChildren = {
   AuthenticatedPainelIndexRoute: AuthenticatedPainelIndexRoute,
   AuthenticatedPainelDepartamentoIdRoute:
     AuthenticatedPainelDepartamentoIdRoute,
+  AuthenticatedPainelEventoIdRoute: AuthenticatedPainelEventoIdRoute,
   AuthenticatedPainelMembroIdRoute: AuthenticatedPainelMembroIdRoute,
 }
 
@@ -499,6 +583,8 @@ const rootRouteChildren: RootRouteChildren = {
   OracaoRoute: OracaoRoute,
   QuemSomosRoute: QuemSomosRoute,
   ConviteCodeRoute: ConviteCodeRoute,
+  EventosSlugRoute: EventosSlugRoute,
+  EventosIndexRoute: EventosIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

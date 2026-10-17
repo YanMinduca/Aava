@@ -10,6 +10,7 @@ import { siteQuery, siteMeta, useSiteContent } from "@/lib/site-query";
 import { safeLink } from "@/lib/site-content";
 import { instagramEmbed } from "@/lib/access-rules";
 import { ContributionContent } from "@/components/site/ContributionContent";
+import { EventsSection } from "@/components/events/EventsList";
 export const Route = createFileRoute("/")({
   loader: ({ context }) => context.queryClient.ensureQueryData(siteQuery),
   head: ({ loaderData: c }) =>
@@ -109,6 +110,7 @@ function Home() {
           </div>
         </div>
       </section>
+      <EventsSection />
       {c.photos.length > 0 && (
         <section className="mx-auto max-w-7xl px-5 py-16 lg:px-10">
           <h2 className="mb-8 text-3xl">{c.galleryTitle}</h2>

@@ -7,7 +7,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
 export const Route = createFileRoute("/auth")({
-  validateSearch: (s: Record<string, unknown>): { next?: string } => ({ next: s['next'] === '/oracao' ? '/oracao' : undefined }),
+  validateSearch: (s: Record<string, unknown>): { next?: string | undefined; mode?: "up" | undefined } => ({
+    next: s['next'] === '/oracao' ? '/oracao' : typeof s['next'] === 'string' && /^\/eventos\/[a-z0-9-]+$/.test(s['next']) ? s['next'] : undefined,
+    mode: s['mode'] === 'up' ? 'up' : undefined,
+  }),
   head: () => ({
     meta: [
       { title: "Entrar — Comunidade Aava" },
@@ -22,8 +25,8 @@ export const Route = createFileRoute("/auth")({
 });
 
 function AuthPage() {
-  const { next } = Route.useSearch();
-  const [mode, setMode] = useState<"in" | "up">("in");
+  const { next, mode: initialMode } = Route.useSearch();
+  const [mode, setMode] = useState<"in" | "up">(initialMode ?? "in");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -37,14 +40,19 @@ function AuthPage() {
       if (mode === "in") {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
-        navigate({ to: next === '/oracao' ? '/oracao' : '/painel' });
+        navigate({ to: next ?? '/painel' });
       } else {
-        const { error } = await supabase.auth.signUp({
+        const { data: signed, error } = await supabase.auth.signUp({
           email,
           password,
-          options: { emailRedirectTo: window.location.origin + "/painel", data: { full_name: name } },
+          options: { emailRedirectTo: window.location.origin + (next ?? "/painel"), data: { full_name: name } },
         });
         if (error) throw error;
+        if (signed.session && next) {
+          toast.success("Conta criada!");
+          navigate({ to: next });
+          return;
+        }
         toast.success("Conta criada! Confira seu e-mail para confirmar o cadastro.");
         setMode("in");
       }

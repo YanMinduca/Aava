@@ -1,0 +1,3978 @@
+From 2d53a6b1e0c41054afd85f566f6b6cb789b2d322 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 17 Oct 2026 13:58:18 +0000
+Subject: [PATCH] =?UTF-8?q?Sistema=20de=20eventos:=20inscri=C3=A7=C3=A3o,?=
+ =?UTF-8?q?=20pagamento,=20ingresso=20com=20QR,=20check-in=20e=20gr=C3=A1f?=
+ =?UTF-8?q?icos?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Landing: seção Eventos, lista /eventos e detalhe /eventos/:slug com inscrição
+- Membro/visitante (visitante se cadastra pelo evento e fica salvo como visitante)
+- Lotes e vagas, janela de inscrição, evento só para membros com lotes públicos, limite por CPF validado
+- Pagamento opcional: link, QR/chave Pix, cartão (contato), parcelamento Pix, comprovante e 'já paguei'
+- Painel: eventos, inscrições com verificação de pagamento/parcelas, liberar ingresso, check-in por QR, gráficos
+- Meu cadastro: Meus ingressos com QR individual
+- Migration 0011 (tabelas, RLS, funções, buckets) e testes
+---
+ drizzle/migrations/0011_events.sql            | 532 ++++++++++++++++++
+ drizzle/migrations/meta/_journal.json         |   7 +
+ package-lock.json                             | 293 +++++++++-
+ package.json                                  |   3 +
+ roadmap.md                                    |   1 +
+ src/components/events/EventForm.tsx           | 311 ++++++++++
+ src/components/events/EventRegistration.tsx   | 311 ++++++++++
+ src/components/events/EventsList.tsx          |  98 ++++
+ src/components/events/MyTickets.tsx           | 220 ++++++++
+ src/components/events/QrScanner.tsx           |  70 +++
+ src/components/site/SiteLayout.tsx            |   1 +
+ src/integrations/supabase/types.ts            | 376 +++++++++++++
+ src/lib/church.ts                             |   8 +
+ src/lib/events.ts                             | 130 +++++
+ src/routeTree.gen.ts                          |  95 ++++
+ .../_authenticated/painel.evento.$id.tsx      | 504 +++++++++++++++++
+ src/routes/_authenticated/painel.eventos.tsx  |  75 +++
+ .../_authenticated/painel.meu-cadastro.tsx    |   2 +
+ src/routes/_authenticated/painel.tsx          |   2 +
+ src/routes/auth.tsx                           |  20 +-
+ src/routes/eventos.$slug.tsx                  |  99 ++++
+ src/routes/eventos.tsx                        |  34 ++
+ src/routes/index.tsx                          |   2 +
+ src/test/events.test.ts                       |  65 +++
+ 24 files changed, 3248 insertions(+), 11 deletions(-)
+ create mode 100644 drizzle/migrations/0011_events.sql
+ create mode 100644 src/components/events/EventForm.tsx
+ create mode 100644 src/components/events/EventRegistration.tsx
+ create mode 100644 src/components/events/EventsList.tsx
+ create mode 100644 src/components/events/MyTickets.tsx
+ create mode 100644 src/components/events/QrScanner.tsx
+ create mode 100644 src/lib/events.ts
+ create mode 100644 src/routes/_authenticated/painel.evento.$id.tsx
+ create mode 100644 src/routes/_authenticated/painel.eventos.tsx
+ create mode 100644 src/routes/eventos.$slug.tsx
+ create mode 100644 src/routes/eventos.tsx
+ create mode 100644 src/test/events.test.ts
+
+diff --git a/drizzle/migrations/0011_events.sql b/drizzle/migrations/0011_events.sql
+new file mode 100644
+index 0000000..21aa2ee
+--- /dev/null
++++ b/drizzle/migrations/0011_events.sql
+@@ -0,0 +1,532 @@
++-- Sistema de eventos: eventos, lotes, inscrições, pagamentos (parcelados), ingressos com QR e check-in.
++-- Permissões (em user_permissions; CEO/Pastor Presidente têm todas): manage_events, verify_event_payments, checkin_events.
++-- Pode rodar mais de uma vez.
++
++create or replace function public.is_valid_cpf(_cpf text)
++returns boolean language plpgsql immutable set search_path = public as $$
++declare d text := regexp_replace(coalesce(_cpf, ''), '\D', '', 'g'); s int; i int; r int;
++begin
++  if length(d) <> 11 or d ~ '^(\d)\1{10}$' then return false; end if;
++  s := 0; for i in 1..9 loop s := s + substr(d, i, 1)::int * (11 - i); end loop;
++  r := (s * 10) % 11; if r = 10 then r := 0; end if;
++  if r <> substr(d, 10, 1)::int then return false; end if;
++  s := 0; for i in 1..10 loop s := s + substr(d, i, 1)::int * (12 - i); end loop;
++  r := (s * 10) % 11; if r = 10 then r := 0; end if;
++  return r = substr(d, 11, 1)::int;
++end $$;
++
++create table if not exists public.events (
++  id uuid primary key default gen_random_uuid(),
++  slug text not null,
++  title text not null,
++  description text,
++  location text,
++  starts_at timestamptz not null,
++  ends_at timestamptz,
++  registration_opens_at timestamptz,
++  registration_closes_at timestamptz,
++  published boolean not null default false,
++  audience text not null default 'public' check (audience in ('public', 'members')),
++  payment_enabled boolean not null default false,
++  accepts_card boolean not null default false,
++  allow_installments boolean not null default false,
++  max_installments int not null default 1 check (max_installments between 1 and 12),
++  limit_per_person boolean not null default false,
++  max_per_person int check (max_per_person is null or max_per_person >= 1),
++  created_by uuid,
++  created_at timestamptz not null default now()
++);
++create unique index if not exists events_slug_key on public.events (lower(slug));
++
++create table if not exists public.event_lots (
++  id uuid primary key default gen_random_uuid(),
++  event_id uuid not null references public.events(id) on delete cascade,
++  name text not null,
++  position int not null default 0,
++  price numeric(12,2) not null default 0 check (price >= 0),
++  capacity int check (capacity is null or capacity >= 0),
++  public_access boolean not null default true,
++  opens_at timestamptz,
++  closes_at timestamptz,
++  created_at timestamptz not null default now()
++);
++create index if not exists event_lots_event_idx on public.event_lots (event_id);
++
++-- Dados de pagamento: só quem tem inscrição no evento (ou administra eventos) enxerga
++create table if not exists public.event_payment_info (
++  event_id uuid primary key references public.events(id) on delete cascade,
++  payment_link text,
++  pix_key text,
++  pix_qr_path text,
++  card_contact_note text
++);
++
++create table if not exists public.event_registrations (
++  id uuid primary key default gen_random_uuid(),
++  event_id uuid not null references public.events(id) on delete cascade,
++  lot_id uuid not null references public.event_lots(id),
++  user_id uuid not null,
++  member_id uuid references public.members(id) on delete set null,
++  attendee_name text not null,
++  attendee_cpf text,
++  attendee_phone text,
++  attendee_email text,
++  quantity int not null check (quantity between 1 and 10),
++  unit_price numeric(12,2) not null,
++  total numeric(12,2) not null,
++  installments int not null default 1,
++  status text not null default 'pending' check (status in ('pending', 'confirmed', 'cancelled')),
++  released_manually boolean not null default false,
++  released_by uuid,
++  released_at timestamptz,
++  cancelled_at timestamptz,
++  created_at timestamptz not null default now()
++);
++create index if not exists event_registrations_event_idx on public.event_registrations (event_id, status);
++create index if not exists event_registrations_user_idx on public.event_registrations (user_id);
++create index if not exists event_registrations_lot_idx on public.event_registrations (lot_id) where status <> 'cancelled';
++
++create table if not exists public.event_payments (
++  id uuid primary key default gen_random_uuid(),
++  registration_id uuid not null references public.event_registrations(id) on delete cascade,
++  installment_no int not null,
++  amount numeric(12,2) not null,
++  status text not null default 'pending' check (status in ('pending', 'claimed', 'paid')),
++  proof_path text,
++  claimed_at timestamptz,
++  confirmed_by uuid,
++  confirmed_at timestamptz,
++  unique (registration_id, installment_no)
++);
++
++create table if not exists public.event_tickets (
++  id uuid primary key default gen_random_uuid(),
++  registration_id uuid not null references public.event_registrations(id) on delete cascade,
++  event_id uuid not null references public.events(id) on delete cascade,
++  seq int not null,
++  code text not null unique,
++  holder_name text not null,
++  status text not null default 'valid' check (status in ('valid', 'checked_in', 'cancelled')),
++  checked_in_at timestamptz,
++  checked_in_by uuid,
++  created_at timestamptz not null default now(),
++  unique (registration_id, seq)
++);
++create index if not exists event_tickets_event_idx on public.event_tickets (event_id, status);
++
++-- Permissões
++create or replace function public.has_any_event_permission(_user_id uuid)
++returns boolean language sql stable security definer set search_path = public as $$
++  select public.has_permission(_user_id, 'manage_events') or public.has_permission(_user_id, 'verify_event_payments') or public.has_permission(_user_id, 'checkin_events');
++$$;
++
++create or replace function public.lot_taken(_lot uuid)
++returns int language sql stable security definer set search_path = public as $$
++  select coalesce(sum(quantity), 0)::int from public.event_registrations where lot_id = _lot and status in ('pending', 'confirmed');
++$$;
++
++-- RLS
++alter table public.events enable row level security;
++alter table public.event_lots enable row level security;
++alter table public.event_payment_info enable row level security;
++alter table public.event_registrations enable row level security;
++alter table public.event_payments enable row level security;
++alter table public.event_tickets enable row level security;
++
++drop policy if exists "events read" on public.events;
++create policy "events read" on public.events for select to authenticated using (published or public.has_any_event_permission(auth.uid()));
++drop policy if exists "events write" on public.events;
++create policy "events write" on public.events for all to authenticated
++  using (public.has_permission(auth.uid(), 'manage_events')) with check (public.has_permission(auth.uid(), 'manage_events'));
++
++drop policy if exists "event_lots read" on public.event_lots;
++create policy "event_lots read" on public.event_lots for select to authenticated using (exists (select 1 from public.events e where e.id = event_id));
++drop policy if exists "event_lots write" on public.event_lots;
++create policy "event_lots write" on public.event_lots for all to authenticated
++  using (public.has_permission(auth.uid(), 'manage_events')) with check (public.has_permission(auth.uid(), 'manage_events'));
++
++drop policy if exists "event_payment_info read" on public.event_payment_info;
++create policy "event_payment_info read" on public.event_payment_info for select to authenticated using (
++  public.has_permission(auth.uid(), 'manage_events')
++  or public.has_permission(auth.uid(), 'verify_event_payments')
++  or exists (select 1 from public.event_registrations r where r.event_id = event_payment_info.event_id and r.user_id = auth.uid() and r.status <> 'cancelled'));
++drop policy if exists "event_payment_info write" on public.event_payment_info;
++create policy "event_payment_info write" on public.event_payment_info for all to authenticated
++  using (public.has_permission(auth.uid(), 'manage_events')) with check (public.has_permission(auth.uid(), 'manage_events'));
++
++drop policy if exists "event_registrations read" on public.event_registrations;
++create policy "event_registrations read" on public.event_registrations for select to authenticated
++  using (user_id = auth.uid() or public.has_any_event_permission(auth.uid()));
++
++drop policy if exists "event_payments read" on public.event_payments;
++create policy "event_payments read" on public.event_payments for select to authenticated using (
++  public.has_permission(auth.uid(), 'manage_events') or public.has_permission(auth.uid(), 'verify_event_payments')
++  or exists (select 1 from public.event_registrations r where r.id = registration_id and r.user_id = auth.uid()));
++
++drop policy if exists "event_tickets read" on public.event_tickets;
++create policy "event_tickets read" on public.event_tickets for select to authenticated using (
++  public.has_any_event_permission(auth.uid())
++  or exists (select 1 from public.event_registrations r where r.id = registration_id and r.user_id = auth.uid()));
++
++revoke all on public.events, public.event_lots, public.event_payment_info, public.event_registrations, public.event_payments, public.event_tickets from anon;
++revoke all on public.event_registrations, public.event_payments, public.event_tickets from authenticated;
++grant select on public.event_registrations, public.event_payments, public.event_tickets to authenticated;
++grant select, insert, update, delete on public.events, public.event_lots, public.event_payment_info to authenticated;
++
++-- Visitante cadastrado pelo evento: o guard libera SÓ este insert (status visitante, da própria conta)
++create or replace function public.members_guard()
++returns trigger language plpgsql security definer set search_path = public as $$
++begin
++  if tg_op = 'INSERT' and current_setting('app.event_visitor', true) = 'on'
++     and new.user_id = auth.uid() and new.status = 'visitante' then
++    new.approval_status := 'aprovado'; new.registration_number := null; new.church_role_id := null;
++    new.ministry := null; new.department := null; new.church_role := null; new.affiliated_on := null;
++    new.updated_at := now();
++    return new;
++  end if;
++  if tg_op = 'UPDATE'
++     and current_setting('app.claiming_member', true) = 'on'
++     and old.user_id is null and new.user_id = auth.uid() then
++    new.updated_at := now();
++    return new;
++  end if;
++  new.registration_number := nullif(btrim(new.registration_number), '');
++  if public.has_permission(auth.uid(), 'approve_member') or public.has_permission(auth.uid(), 'edit_member') or public.has_permission(auth.uid(), 'create_member') then
++    if not public.has_permission(auth.uid(), 'manage_departments') then
++      if tg_op = 'INSERT' then new.church_role_id := null;
++      else new.church_role_id := old.church_role_id; end if;
++    end if;
++    new.updated_at := now();
++    return new;
++  end if;
++  if tg_op = 'INSERT' then
++    new.approval_status := 'pendente';
++    new.status := 'membro';
++    new.ministry := null; new.department := null; new.church_role := null; new.church_role_id := null;
++    new.affiliated_on := null;
++    new.registration_number := null;
++  else
++    new.approval_status := case when old.approval_status = 'recusado' then 'pendente' else old.approval_status end;
++    new.status := old.status;
++    new.ministry := old.ministry; new.department := old.department; new.church_role := old.church_role; new.church_role_id := old.church_role_id;
++    new.affiliated_on := old.affiliated_on;
++    new.registration_number := old.registration_number;
++    new.user_id := old.user_id;
++  end if;
++  new.updated_at := now();
++  return new;
++end $$;
++
++-- Vitrine pública (visitantes sem login também veem)
++create or replace function public.public_events()
++returns table (id uuid, slug text, title text, description text, location text, starts_at timestamptz, ends_at timestamptz,
++               registration_opens_at timestamptz, registration_closes_at timestamptz, audience text, payment_enabled boolean,
++               min_price numeric, spots_left int, registration_open boolean)
++language sql stable security definer set search_path = public as $$
++  select e.id, e.slug, e.title, e.description, e.location, e.starts_at, e.ends_at, e.registration_opens_at, e.registration_closes_at,
++         e.audience, e.payment_enabled,
++         (select min(l.price) from public.event_lots l where l.event_id = e.id),
++         case when exists (select 1 from public.event_lots l where l.event_id = e.id and l.capacity is null) then null
++              else (select coalesce(sum(greatest(l.capacity - public.lot_taken(l.id), 0)), 0)::int from public.event_lots l where l.event_id = e.id) end,
++         (coalesce(e.registration_opens_at, '-infinity') <= now() and coalesce(e.registration_closes_at, 'infinity') >= now())
++  from public.events e
++  where e.published and coalesce(e.ends_at, e.starts_at) >= now() - interval '1 day'
++  order by e.starts_at;
++$$;
++
++create or replace function public.public_event(_slug text)
++returns jsonb language sql stable security definer set search_path = public as $$
++  select jsonb_build_object(
++    'event', to_jsonb(e) - 'created_by',
++    'lots', coalesce((
++      select jsonb_agg(jsonb_build_object('id', l.id, 'name', l.name, 'price', l.price, 'capacity', l.capacity,
++        'spots_left', case when l.capacity is null then null else greatest(l.capacity - public.lot_taken(l.id), 0) end,
++        'public_access', l.public_access, 'opens_at', l.opens_at, 'closes_at', l.closes_at) order by l.position, l.created_at)
++      from public.event_lots l where l.event_id = e.id), '[]'::jsonb))
++  from public.events e where e.published and lower(e.slug) = lower(_slug);
++$$;
++
++-- Visitante: cria o cadastro (status "visitante") da conta que está logada
++create or replace function public.ensure_visitor_profile(_name text, _cpf text, _phone text)
++returns uuid language plpgsql security definer set search_path = public as $$
++declare uid uuid := auth.uid(); mid uuid; d text := regexp_replace(coalesce(_cpf, ''), '\D', '', 'g');
++begin
++  if uid is null then raise exception 'login_required'; end if;
++  select id into mid from public.members where user_id = uid;
++  if mid is not null then return mid; end if;
++  if coalesce(array_length(string_to_array(btrim(coalesce(_name, '')), ' '), 1), 0) < 2 then raise exception 'invalid_name'; end if;
++  if not public.is_valid_cpf(d) then raise exception 'invalid_cpf'; end if;
++  if btrim(coalesce(_phone, '')) = '' then raise exception 'invalid_phone'; end if;
++  if exists (select 1 from public.members m where regexp_replace(coalesce(m.cpf, ''), '\D', '', 'g') = d and m.user_id is null) then
++    raise exception 'cpf_belongs_to_member';
++  end if;
++  if exists (select 1 from public.members m where regexp_replace(coalesce(m.cpf, ''), '\D', '', 'g') = d) then
++    raise exception 'cpf_in_use';
++  end if;
++  perform set_config('app.event_visitor', 'on', true);
++  insert into public.members (full_name, cpf, phone, email, status, approval_status, user_id)
++  values (btrim(_name), substr(d,1,3)||'.'||substr(d,4,3)||'.'||substr(d,7,3)||'-'||substr(d,10,2), btrim(_phone),
++          (select u.email from auth.users u where u.id = uid), 'visitante', 'aprovado', uid)
++  returning id into mid;
++  perform set_config('app.event_visitor', 'off', true);
++  return mid;
++end $$;
++
++-- Gera os ingressos (um QR individual por vaga) — uso interno
++create or replace function public.issue_event_tickets(_reg uuid)
++returns void language plpgsql security definer set search_path = public as $$
++declare r public.event_registrations%rowtype; i int;
++begin
++  select * into r from public.event_registrations where id = _reg;
++  if not found then return; end if;
++  if exists (select 1 from public.event_tickets where registration_id = _reg) then return; end if;
++  for i in 1..r.quantity loop
++    insert into public.event_tickets (registration_id, event_id, seq, code, holder_name)
++    values (_reg, r.event_id, i, replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', ''),
++            case when i = 1 then r.attendee_name else r.attendee_name || ' (' || i || ')' end);
++  end loop;
++end $$;
++
++create or replace function public.refresh_event_registration(_reg uuid)
++returns void language plpgsql security definer set search_path = public as $$
++begin
++  if exists (select 1 from public.event_registrations where id = _reg and status = 'pending')
++     and not exists (select 1 from public.event_payments where registration_id = _reg and status <> 'paid') then
++    update public.event_registrations set status = 'confirmed' where id = _reg;
++    perform public.issue_event_tickets(_reg);
++  end if;
++end $$;
++
++-- Inscrição (valida janela, público, limite por CPF, vagas — tudo com trava no lote)
++create or replace function public.register_for_event(_event uuid, _lot uuid, _quantity int, _cpf text, _installments int default 1)
++returns uuid language plpgsql security definer set search_path = public as $$
++declare
++  uid uuid := auth.uid();
++  ev public.events%rowtype; lt public.event_lots%rowtype; m public.members%rowtype;
++  is_member boolean; d text; used int; total numeric; reg uuid; pay_required boolean; n int; base numeric; i int;
++begin
++  if uid is null then raise exception 'login_required'; end if;
++  select * into ev from public.events where id = _event and published;
++  if not found then raise exception 'event_not_found'; end if;
++  if now() < coalesce(ev.registration_opens_at, '-infinity') or now() > coalesce(ev.registration_closes_at, 'infinity') then
++    raise exception 'registration_closed';
++  end if;
++  select * into lt from public.event_lots where id = _lot and event_id = _event for update;
++  if not found then raise exception 'lot_not_found'; end if;
++  if (lt.opens_at is not null and now() < lt.opens_at) or (lt.closes_at is not null and now() > lt.closes_at) then
++    raise exception 'lot_closed';
++  end if;
++  select * into m from public.members where user_id = uid;
++  if not found then raise exception 'profile_required'; end if;
++  is_member := m.approval_status = 'aprovado' and m.status <> 'visitante';
++  if ev.audience = 'members' and not is_member and not lt.public_access then raise exception 'members_only'; end if;
++  if _quantity is null or _quantity < 1 or _quantity > 10 then raise exception 'invalid_quantity'; end if;
++
++  d := regexp_replace(coalesce(nullif(btrim(_cpf), ''), m.cpf, ''), '\D', '', 'g');
++  if ev.limit_per_person then
++    if not public.is_valid_cpf(d) then raise exception 'invalid_cpf'; end if;
++    select coalesce(sum(r.quantity), 0) into used from public.event_registrations r
++      where r.event_id = _event and r.status <> 'cancelled'
++        and (r.user_id = uid or regexp_replace(coalesce(r.attendee_cpf, ''), '\D', '', 'g') = d);
++    if used + _quantity > coalesce(ev.max_per_person, 1) then raise exception 'limit_exceeded'; end if;
++  elsif d <> '' and not public.is_valid_cpf(d) then
++    raise exception 'invalid_cpf';
++  end if;
++
++  if lt.capacity is not null and public.lot_taken(lt.id) + _quantity > lt.capacity then raise exception 'sold_out'; end if;
++
++  pay_required := ev.payment_enabled and lt.price > 0;
++  total := lt.price * _quantity;
++  n := case when pay_required and coalesce(_installments, 1) > 1 then _installments else 1 end;
++  if n > 1 and (not ev.allow_installments or n > ev.max_installments) then raise exception 'invalid_installments'; end if;
++
++  insert into public.event_registrations (event_id, lot_id, user_id, member_id, attendee_name, attendee_cpf, attendee_phone, attendee_email,
++                                          quantity, unit_price, total, installments, status)
++  values (_event, _lot, uid, m.id, m.full_name, nullif(d, ''), m.phone, coalesce(m.email, (select u.email from auth.users u where u.id = uid)),
++          _quantity, lt.price, total, n, case when pay_required then 'pending' else 'confirmed' end)
++  returning id into reg;
++
++  if pay_required then
++    base := round(total / n, 2);
++    for i in 1..n loop
++      insert into public.event_payments (registration_id, installment_no, amount)
++      values (reg, i, case when i = n then total - base * (n - 1) else base end);
++    end loop;
++  else
++    perform public.issue_event_tickets(reg);
++  end if;
++  return reg;
++end $$;
++
++-- Quem se inscreveu avisa que pagou (comprovante opcional, enviado ao bucket event-proofs na pasta do usuário)
++create or replace function public.claim_event_payment(_payment uuid, _proof_path text default null)
++returns void language plpgsql security definer set search_path = public as $$
++declare uid uuid := auth.uid(); p public.event_payments%rowtype; r public.event_registrations%rowtype;
++begin
++  if uid is null then raise exception 'login_required'; end if;
++  select * into p from public.event_payments where id = _payment;
++  if not found then raise exception 'not_found'; end if;
++  select * into r from public.event_registrations where id = p.registration_id;
++  if r.user_id <> uid then raise exception 'Acesso negado'; end if;
++  if r.status <> 'pending' or p.status = 'paid' then raise exception 'payment_closed'; end if;
++  if _proof_path is not null and _proof_path not like uid::text || '/%' then raise exception 'invalid_proof'; end if;
++  update public.event_payments
++     set status = 'claimed', claimed_at = coalesce(claimed_at, now()), proof_path = coalesce(_proof_path, proof_path)
++   where id = _payment;
++end $$;
++
++create or replace function public.set_event_payment_status(_payment uuid, _status text)
++returns void language plpgsql security definer set search_path = public as $$
++declare p public.event_payments%rowtype; r public.event_registrations%rowtype;
++begin
++  if not (public.has_permission(auth.uid(), 'verify_event_payments') or public.has_permission(auth.uid(), 'manage_events')) then
++    raise exception 'Acesso negado';
++  end if;
++  if _status not in ('pending', 'paid') then raise exception 'invalid_status'; end if;
++  select * into p from public.event_payments where id = _payment;
++  if not found then raise exception 'not_found'; end if;
++  select * into r from public.event_registrations where id = p.registration_id;
++  if r.status = 'cancelled' then raise exception 'registration_cancelled'; end if;
++  if _status = 'pending' and r.status = 'confirmed' then raise exception 'registration_already_confirmed'; end if;
++  update public.event_payments
++     set status = _status,
++         confirmed_by = case when _status = 'paid' then auth.uid() else null end,
++         confirmed_at = case when _status = 'paid' then now() else null end,
++         claimed_at = case when _status = 'pending' then null else claimed_at end
++   where id = _payment;
++  if _status = 'paid' then perform public.refresh_event_registration(p.registration_id); end if;
++end $$;
++
++create or replace function public.release_event_registration(_reg uuid)
++returns void language plpgsql security definer set search_path = public as $$
++begin
++  if not (public.has_permission(auth.uid(), 'verify_event_payments') or public.has_permission(auth.uid(), 'manage_events')) then
++    raise exception 'Acesso negado';
++  end if;
++  update public.event_registrations
++     set status = 'confirmed', released_manually = true, released_by = auth.uid(), released_at = now()
++   where id = _reg and status = 'pending';
++  if not found then raise exception 'not_pending'; end if;
++  perform public.issue_event_tickets(_reg);
++end $$;
++
++create or replace function public.cancel_event_registration(_reg uuid)
++returns void language plpgsql security definer set search_path = public as $$
++declare uid uuid := auth.uid(); r public.event_registrations%rowtype; staff boolean;
++begin
++  if uid is null then raise exception 'login_required'; end if;
++  select * into r from public.event_registrations where id = _reg;
++  if not found then raise exception 'not_found'; end if;
++  staff := public.has_permission(uid, 'verify_event_payments') or public.has_permission(uid, 'manage_events');
++  if not staff then
++    if r.user_id <> uid then raise exception 'Acesso negado'; end if;
++    if r.status <> 'pending' or exists (select 1 from public.event_payments p where p.registration_id = _reg and p.status in ('claimed', 'paid')) then
++      raise exception 'cannot_cancel';
++    end if;
++  end if;
++  if r.status = 'cancelled' then return; end if;
++  update public.event_registrations set status = 'cancelled', cancelled_at = now() where id = _reg;
++  update public.event_tickets set status = 'cancelled' where registration_id = _reg;
++end $$;
++
++-- Leitura do QR: marca como presente
++create or replace function public.checkin_ticket(_code text)
++returns jsonb language plpgsql security definer set search_path = public as $$
++declare t public.event_tickets%rowtype; ev_title text; r public.event_registrations%rowtype; lot_name text;
++begin
++  if not (public.has_permission(auth.uid(), 'checkin_events') or public.has_permission(auth.uid(), 'manage_events')) then
++    raise exception 'Acesso negado';
++  end if;
++  select * into t from public.event_tickets where code = btrim(coalesce(_code, ''));
++  if not found then return jsonb_build_object('result', 'invalid'); end if;
++  select title into ev_title from public.events where id = t.event_id;
++  select * into r from public.event_registrations where id = t.registration_id;
++  select name into lot_name from public.event_lots where id = r.lot_id;
++  if t.status = 'cancelled' or r.status <> 'confirmed' then
++    return jsonb_build_object('result', 'cancelled', 'holder_name', t.holder_name, 'event_title', ev_title);
++  end if;
++  if t.status = 'checked_in' then
++    return jsonb_build_object('result', 'already', 'holder_name', t.holder_name, 'event_title', ev_title, 'lot', lot_name, 'checked_in_at', t.checked_in_at);
++  end if;
++  update public.event_tickets set status = 'checked_in', checked_in_at = now(), checked_in_by = auth.uid() where id = t.id;
++  return jsonb_build_object('result', 'ok', 'holder_name', t.holder_name, 'event_title', ev_title, 'lot', lot_name, 'ticket_id', t.id);
++end $$;
++
++create or replace function public.set_ticket_presence(_ticket uuid, _present boolean)
++returns void language plpgsql security definer set search_path = public as $$
++begin
++  if not (public.has_permission(auth.uid(), 'checkin_events') or public.has_permission(auth.uid(), 'manage_events')) then
++    raise exception 'Acesso negado';
++  end if;
++  update public.event_tickets
++     set status = case when _present then 'checked_in' else 'valid' end,
++         checked_in_at = case when _present then now() else null end,
++         checked_in_by = case when _present then auth.uid() else null end
++   where id = _ticket and status <> 'cancelled';
++end $$;
++
++-- Números para os gráficos
++create or replace function public.event_admin_stats(_event uuid)
++returns jsonb language plpgsql stable security definer set search_path = public as $$
++declare res jsonb;
++begin
++  if not public.has_any_event_permission(auth.uid()) then raise exception 'Acesso negado'; end if;
++  select jsonb_build_object(
++    'registrations', (select count(*) from public.event_registrations where event_id = _event and status <> 'cancelled'),
++    'tickets_total', (select count(*) from public.event_tickets where event_id = _event and status <> 'cancelled'),
++    'checked_in', (select count(*) from public.event_tickets where event_id = _event and status = 'checked_in'),
++    'expected_total', (select coalesce(sum(r.total), 0) from public.event_registrations r
++                         where r.event_id = _event and r.status <> 'cancelled' and exists (select 1 from public.event_payments p where p.registration_id = r.id)),
++    'paid_total', (select coalesce(sum(p.amount), 0) from public.event_payments p
++                     join public.event_registrations r on r.id = p.registration_id
++                     where r.event_id = _event and r.status <> 'cancelled' and p.status = 'paid'),
++    'claimed_total', (select coalesce(sum(p.amount), 0) from public.event_payments p
++                        join public.event_registrations r on r.id = p.registration_id
++                        where r.event_id = _event and r.status <> 'cancelled' and p.status = 'claimed'),
++    'lots', coalesce((select jsonb_agg(jsonb_build_object('name', l.name, 'capacity', l.capacity, 'sold', public.lot_taken(l.id)) order by l.position, l.created_at)
++                        from public.event_lots l where l.event_id = _event), '[]'::jsonb)
++  ) into res;
++  return res;
++end $$;
++
++-- Execução das funções
++revoke all on function public.public_events(), public.public_event(text) from public;
++grant execute on function public.public_events(), public.public_event(text) to anon, authenticated;
++revoke all on function
++  public.ensure_visitor_profile(text, text, text), public.register_for_event(uuid, uuid, int, text, int),
++  public.claim_event_payment(uuid, text), public.set_event_payment_status(uuid, text), public.release_event_registration(uuid),
++  public.cancel_event_registration(uuid), public.checkin_ticket(text), public.set_ticket_presence(uuid, boolean),
++  public.event_admin_stats(uuid), public.has_any_event_permission(uuid), public.lot_taken(uuid),
++  public.issue_event_tickets(uuid), public.refresh_event_registration(uuid), public.is_valid_cpf(text)
++  from public, anon;
++grant execute on function
++  public.ensure_visitor_profile(text, text, text), public.register_for_event(uuid, uuid, int, text, int),
++  public.claim_event_payment(uuid, text), public.set_event_payment_status(uuid, text), public.release_event_registration(uuid),
++  public.cancel_event_registration(uuid), public.checkin_ticket(text), public.set_ticket_presence(uuid, boolean),
++  public.event_admin_stats(uuid), public.has_any_event_permission(uuid), public.is_valid_cpf(text)
++  to authenticated;
++revoke all on function public.issue_event_tickets(uuid), public.refresh_event_registration(uuid), public.lot_taken(uuid) from authenticated;
++
++-- Arquivos: QR do pagamento (pasta = id do evento) e comprovantes (pasta = id do usuário)
++insert into storage.buckets (id, name, public) values ('event-assets', 'event-assets', false) on conflict (id) do nothing;
++insert into storage.buckets (id, name, public) values ('event-proofs', 'event-proofs', false) on conflict (id) do nothing;
++
++drop policy if exists "event assets read" on storage.objects;
++create policy "event assets read" on storage.objects for select to authenticated using (
++  bucket_id = 'event-assets' and (
++    public.has_permission(auth.uid(), 'manage_events')
++    or exists (select 1 from public.event_registrations r where r.user_id = auth.uid() and r.status <> 'cancelled' and r.event_id::text = (storage.foldername(name))[1])));
++drop policy if exists "event assets write" on storage.objects;
++create policy "event assets write" on storage.objects for insert to authenticated
++  with check (bucket_id = 'event-assets' and public.has_permission(auth.uid(), 'manage_events'));
++drop policy if exists "event assets delete" on storage.objects;
++create policy "event assets delete" on storage.objects for delete to authenticated
++  using (bucket_id = 'event-assets' and public.has_permission(auth.uid(), 'manage_events'));
++
++drop policy if exists "event proofs read" on storage.objects;
++create policy "event proofs read" on storage.objects for select to authenticated using (
++  bucket_id = 'event-proofs' and ((storage.foldername(name))[1] = auth.uid()::text
++    or public.has_permission(auth.uid(), 'verify_event_payments') or public.has_permission(auth.uid(), 'manage_events')));
++drop policy if exists "event proofs write" on storage.objects;
++create policy "event proofs write" on storage.objects for insert to authenticated
++  with check (bucket_id = 'event-proofs' and (storage.foldername(name))[1] = auth.uid()::text);
+diff --git a/drizzle/migrations/meta/_journal.json b/drizzle/migrations/meta/_journal.json
+index 93bc0c7..d9d0866 100644
+--- a/drizzle/migrations/meta/_journal.json
++++ b/drizzle/migrations/meta/_journal.json
+@@ -78,6 +78,13 @@
+       "when": 1791891600000,
+       "tag": "0010_claim_existing_member",
+       "breakpoints": true
++    },
++    {
++      "idx": 11,
++      "version": "7",
++      "when": 1791978000000,
++      "tag": "0011_events",
++      "breakpoints": true
+     }
+   ]
+ }
+diff --git a/package-lock.json b/package-lock.json
+index 57a8e71..3ff4f56 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -45,7 +45,9 @@
+         "date-fns": "^4.1.0",
+         "embla-carousel-react": "^8.6.0",
+         "input-otp": "^1.4.2",
++        "jsqr": "^1.4.0",
+         "lucide-react": "^0.575.0",
++        "qrcode": "^1.5.4",
+         "react": "^19.2.0",
+         "react-day-picker": "^9.14.0",
+         "react-dom": "^19.2.0",
+@@ -69,6 +71,7 @@
+         "@testing-library/jest-dom": "^6.6.0",
+         "@testing-library/react": "^16.0.0",
+         "@types/node": "^22.16.5",
++        "@types/qrcode": "^1.5.6",
+         "@types/react": "^19.2.0",
+         "@types/react-dom": "^19.2.0",
+         "@vitejs/plugin-react": "^5.2.0",
+@@ -5251,6 +5254,16 @@
+         "undici-types": "~6.21.0"
+       }
+     },
++    "node_modules/@types/qrcode": {
++      "version": "1.5.6",
++      "resolved": "https://registry.npmjs.org/@types/qrcode/-/qrcode-1.5.6.tgz",
++      "integrity": "sha512-te7NQcV2BOvdj2b1hCAHzAoMNuj65kNBMz0KBaxM6c3VGBOhU0dURQKOtH8CFNI/dsKkwlv32p26qYQTWoB5bw==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "@types/node": "*"
++      }
++    },
+     "node_modules/@types/react": {
+       "version": "19.3.0",
+       "resolved": "https://registry.npmjs.org/@types/react/-/react-19.3.0.tgz",
+@@ -5792,9 +5805,7 @@
+       "version": "5.0.1",
+       "resolved": "https://registry.npmjs.org/ansi-regex/-/ansi-regex-5.0.1.tgz",
+       "integrity": "sha512-quJQXlTSUGL2LH9SUXo8VwsY4soanhgo6LNSm84E1LBcE8s3O0wpdiRzyR9z/ZZJMlMWv37qOOb9pdJlMUEKFQ==",
+-      "dev": true,
+       "license": "MIT",
+-      "peer": true,
+       "engines": {
+         "node": ">=8"
+       }
+@@ -5983,6 +5994,15 @@
+         "node": ">=6"
+       }
+     },
++    "node_modules/camelcase": {
++      "version": "5.3.1",
++      "resolved": "https://registry.npmjs.org/camelcase/-/camelcase-5.3.1.tgz",
++      "integrity": "sha512-L28STB170nwWS63UjtlEOE3dldQApaJXZkOI1uMFfzf3rRuPegHaHesyee+YxQ+W6SvRDQV6UrdOdRiR153wJg==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      }
++    },
+     "node_modules/caniuse-lite": {
+       "version": "1.0.30001815",
+       "resolved": "https://registry.npmjs.org/caniuse-lite/-/caniuse-lite-1.0.30001815.tgz",
+@@ -6116,6 +6136,17 @@
+         "url": "https://polar.sh/cva"
+       }
+     },
++    "node_modules/cliui": {
++      "version": "6.0.0",
++      "resolved": "https://registry.npmjs.org/cliui/-/cliui-6.0.0.tgz",
++      "integrity": "sha512-t6wbgtoCXvAzst7QgXxJYqPt0usEfbgQdftEPbLL/cvv6HPE5VgvqCuAIDR0NgU52ds6rFwqrgakNLrHEjCbrQ==",
++      "license": "ISC",
++      "dependencies": {
++        "string-width": "^4.2.0",
++        "strip-ansi": "^6.0.0",
++        "wrap-ansi": "^6.2.0"
++      }
++    },
+     "node_modules/clsx": {
+       "version": "2.1.1",
+       "resolved": "https://registry.npmjs.org/clsx/-/clsx-2.1.1.tgz",
+@@ -6154,7 +6185,6 @@
+       "version": "2.0.1",
+       "resolved": "https://registry.npmjs.org/color-convert/-/color-convert-2.0.1.tgz",
+       "integrity": "sha512-RRECPsj7iu/xb5oKYcsFHSppFNnsj/52OVTRKb4zP5onXwVF3zVmmToNcOfGC+CRDpfK/U584fMg38ZHCaElKQ==",
+-      "dev": true,
+       "license": "MIT",
+       "dependencies": {
+         "color-name": "~1.1.4"
+@@ -6167,7 +6197,6 @@
+       "version": "1.1.4",
+       "resolved": "https://registry.npmjs.org/color-name/-/color-name-1.1.4.tgz",
+       "integrity": "sha512-dOy+3AuW3a2wNbZHIuMZpTcgjGuLU/uBL/ubcZF9OXbDo8ff4O8yVp5Bf0efS8uEoYo5q4Fx7dY9OgQGXgAsQA==",
+-      "dev": true,
+       "license": "MIT"
+     },
+     "node_modules/combined-stream": {
+@@ -6508,6 +6537,15 @@
+         }
+       }
+     },
++    "node_modules/decamelize": {
++      "version": "1.2.0",
++      "resolved": "https://registry.npmjs.org/decamelize/-/decamelize-1.2.0.tgz",
++      "integrity": "sha512-z2S+W9X73hAUUki+N+9Za2lBlun89zigOyGrsax+KUQ6wKW4ZoWpEYBkGhQjwAjjDCkWxhY0VKEhk8wzY7F5cA==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=0.10.0"
++      }
++    },
+     "node_modules/decimal.js": {
+       "version": "10.6.0",
+       "resolved": "https://registry.npmjs.org/decimal.js/-/decimal.js-10.6.0.tgz",
+@@ -6597,6 +6635,12 @@
+         "node": ">=0.3.1"
+       }
+     },
++    "node_modules/dijkstrajs": {
++      "version": "1.0.3",
++      "resolved": "https://registry.npmjs.org/dijkstrajs/-/dijkstrajs-1.0.3.tgz",
++      "integrity": "sha512-qiSlmBq9+BCdCA/L46dw8Uy93mloxsPSbwnm5yrKn2vMPiy8KyAskTF6zuV/j5BMsmOGZDPs7KjU+mjb670kfA==",
++      "license": "MIT"
++    },
+     "node_modules/dom-accessibility-api": {
+       "version": "0.5.16",
+       "resolved": "https://registry.npmjs.org/dom-accessibility-api/-/dom-accessibility-api-0.5.16.tgz",
+@@ -7308,6 +7352,12 @@
+         "embla-carousel": "8.6.0"
+       }
+     },
++    "node_modules/emoji-regex": {
++      "version": "8.0.0",
++      "resolved": "https://registry.npmjs.org/emoji-regex/-/emoji-regex-8.0.0.tgz",
++      "integrity": "sha512-MSjYzcWNOA0ewAHpz0MxpYFvwg6yjy1NG3xteoqz644VCo/RPgnr1/GGt+ic3iJTzQ8Eu3TdM14SawnVUmGE6A==",
++      "license": "MIT"
++    },
+     "node_modules/enhanced-resolve": {
+       "version": "5.26.0",
+       "resolved": "https://registry.npmjs.org/enhanced-resolve/-/enhanced-resolve-5.26.0.tgz",
+@@ -8037,6 +8087,15 @@
+         "node": ">=6.9.0"
+       }
+     },
++    "node_modules/get-caller-file": {
++      "version": "2.0.5",
++      "resolved": "https://registry.npmjs.org/get-caller-file/-/get-caller-file-2.0.5.tgz",
++      "integrity": "sha512-DyFP3BM/3YHTQOCUL/w0OZHR0lpKeGrxotcHWcqNEdnltqFwXVfhEBQ94eIo34AfQpo0rGki4cyIiftY06h2Fg==",
++      "license": "ISC",
++      "engines": {
++        "node": "6.* || 8.* || >= 10.*"
++      }
++    },
+     "node_modules/get-intrinsic": {
+       "version": "1.3.0",
+       "resolved": "https://registry.npmjs.org/get-intrinsic/-/get-intrinsic-1.3.0.tgz",
+@@ -8522,6 +8581,15 @@
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/is-fullwidth-code-point": {
++      "version": "3.0.0",
++      "resolved": "https://registry.npmjs.org/is-fullwidth-code-point/-/is-fullwidth-code-point-3.0.0.tgz",
++      "integrity": "sha512-zymm5+u+sCsSWyD9qNaejV3DFvhCKclKdizYaJUuHA83RLjb7nSuGnddCHGv0hk+KY7BMAlsWeK4Ueg6EV6XQg==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=8"
++      }
++    },
+     "node_modules/is-glob": {
+       "version": "4.0.3",
+       "resolved": "https://registry.npmjs.org/is-glob/-/is-glob-4.0.3.tgz",
+@@ -8701,6 +8769,12 @@
+         "node": ">=6"
+       }
+     },
++    "node_modules/jsqr": {
++      "version": "1.4.0",
++      "resolved": "https://registry.npmjs.org/jsqr/-/jsqr-1.4.0.tgz",
++      "integrity": "sha512-dxLob7q65Xg2DvstYkRpkYtmKm2sPJ9oFhrhmudT1dZvNFFTlroai3AWSpLey/w5vMcLBXRgOJsbXpdN9HzU/A==",
++      "license": "Apache-2.0"
++    },
+     "node_modules/keyv": {
+       "version": "4.5.4",
+       "resolved": "https://registry.npmjs.org/keyv/-/keyv-4.5.4.tgz",
+@@ -10044,6 +10118,15 @@
+         "url": "https://github.com/sponsors/sindresorhus"
+       }
+     },
++    "node_modules/p-try": {
++      "version": "2.2.0",
++      "resolved": "https://registry.npmjs.org/p-try/-/p-try-2.2.0.tgz",
++      "integrity": "sha512-R4nPAVTAU0B9D35/Gk3uJf/7XYbQcyohSKdvAxIRSNghFl4e71hVoGnBNQz9cWaXxO2I10KTC+3jMdvvoKw6dQ==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      }
++    },
+     "node_modules/parent-module": {
+       "version": "1.0.1",
+       "resolved": "https://registry.npmjs.org/parent-module/-/parent-module-1.0.1.tgz",
+@@ -10099,7 +10182,6 @@
+       "version": "4.0.0",
+       "resolved": "https://registry.npmjs.org/path-exists/-/path-exists-4.0.0.tgz",
+       "integrity": "sha512-ak9Qy5Q7jYb2Wwcey5Fpvg2KoAc/ZIhLSLOSBmRmygPsGwkVVt0fZa0qrtMz+m6tJTAHfZQ8FnmB4MG4LWy7/w==",
+-      "dev": true,
+       "license": "MIT",
+       "engines": {
+         "node": ">=8"
+@@ -10139,6 +10221,15 @@
+         "url": "https://github.com/sponsors/jonschlinkert"
+       }
+     },
++    "node_modules/pngjs": {
++      "version": "5.0.0",
++      "resolved": "https://registry.npmjs.org/pngjs/-/pngjs-5.0.0.tgz",
++      "integrity": "sha512-40QW5YalBNfQo5yRYmiw7Yz6TKKVr3h6970B2YE+3fQpsWcrbj1PzJgxeJ19DRQjhMbKPIuMY8rFaXc8moolVw==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=10.13.0"
++      }
++    },
+     "node_modules/postcss": {
+       "version": "8.5.29",
+       "resolved": "https://registry.npmjs.org/postcss/-/postcss-8.5.29.tgz",
+@@ -10285,6 +10376,23 @@
+         "node": ">=6"
+       }
+     },
++    "node_modules/qrcode": {
++      "version": "1.5.4",
++      "resolved": "https://registry.npmjs.org/qrcode/-/qrcode-1.5.4.tgz",
++      "integrity": "sha512-1ca71Zgiu6ORjHqFBDpnSMTR2ReToX4l1Au1VFLyVeBTFavzQnv5JxMFr3ukHVKpSrSA2MCk0lNJSykjUfz7Zg==",
++      "license": "MIT",
++      "dependencies": {
++        "dijkstrajs": "^1.0.1",
++        "pngjs": "^5.0.0",
++        "yargs": "^15.3.1"
++      },
++      "bin": {
++        "qrcode": "bin/qrcode"
++      },
++      "engines": {
++        "node": ">=10.13.0"
++      }
++    },
+     "node_modules/querystringify": {
+       "version": "2.2.0",
+       "resolved": "https://registry.npmjs.org/querystringify/-/querystringify-2.2.0.tgz",
+@@ -10626,6 +10734,21 @@
+         "url": "https://opencollective.com/unified"
+       }
+     },
++    "node_modules/require-directory": {
++      "version": "2.1.1",
++      "resolved": "https://registry.npmjs.org/require-directory/-/require-directory-2.1.1.tgz",
++      "integrity": "sha512-fGxEI7+wsG9xrvdjsrlmL22OMTTiHRwAMroiEeMgq8gzoLC/PQr7RsRDSTLUg/bZAZtF+TVIkHc6/4RIKrui+Q==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=0.10.0"
++      }
++    },
++    "node_modules/require-main-filename": {
++      "version": "2.0.0",
++      "resolved": "https://registry.npmjs.org/require-main-filename/-/require-main-filename-2.0.0.tgz",
++      "integrity": "sha512-NKN5kMDylKuldxYLSUfrbo5Tuzh4hd+2E8NPPX02mZtn1VuREQToYe/ZdlJy+J3uCpfaiGF05e7B8W0iXbQHmg==",
++      "license": "ISC"
++    },
+     "node_modules/requires-port": {
+       "version": "1.0.0",
+       "resolved": "https://registry.npmjs.org/requires-port/-/requires-port-1.0.0.tgz",
+@@ -10763,6 +10886,12 @@
+         "seroval": "^1.0"
+       }
+     },
++    "node_modules/set-blocking": {
++      "version": "2.0.0",
++      "resolved": "https://registry.npmjs.org/set-blocking/-/set-blocking-2.0.0.tgz",
++      "integrity": "sha512-KiKBS8AnWGEyLzofFfmvKwpdPzqiy16LvQfK3yv/fVH7Bj13/wl3JSR1J+rfgRE9q7xUJK4qvgS8raSOeLUehw==",
++      "license": "ISC"
++    },
+     "node_modules/shebang-command": {
+       "version": "2.0.0",
+       "resolved": "https://registry.npmjs.org/shebang-command/-/shebang-command-2.0.0.tgz",
+@@ -10909,6 +11038,20 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/string-width": {
++      "version": "4.2.3",
++      "resolved": "https://registry.npmjs.org/string-width/-/string-width-4.2.3.tgz",
++      "integrity": "sha512-wKyQRQpjJ0sIp62ErSZdGsjMJWsap5oRNihHhu6G7JVO/9jIB6UyevL+tXuOqrng8j/cxKTWyWUwvSTriiZz/g==",
++      "license": "MIT",
++      "dependencies": {
++        "emoji-regex": "^8.0.0",
++        "is-fullwidth-code-point": "^3.0.0",
++        "strip-ansi": "^6.0.1"
++      },
++      "engines": {
++        "node": ">=8"
++      }
++    },
+     "node_modules/stringify-entities": {
+       "version": "4.0.4",
+       "resolved": "https://registry.npmjs.org/stringify-entities/-/stringify-entities-4.0.4.tgz",
+@@ -10923,6 +11066,18 @@
+         "url": "https://github.com/sponsors/wooorm"
+       }
+     },
++    "node_modules/strip-ansi": {
++      "version": "6.0.1",
++      "resolved": "https://registry.npmjs.org/strip-ansi/-/strip-ansi-6.0.1.tgz",
++      "integrity": "sha512-Y38VPSHcqkFrCpFnQ9vuSXmquuv5oXOKpGeT6aGrr3o3Gc9AlVa6JBfUSOCnbxGGZF+/0ooI7KrPuUSztUdU5A==",
++      "license": "MIT",
++      "dependencies": {
++        "ansi-regex": "^5.0.1"
++      },
++      "engines": {
++        "node": ">=8"
++      }
++    },
+     "node_modules/strip-indent": {
+       "version": "3.0.0",
+       "resolved": "https://registry.npmjs.org/strip-indent/-/strip-indent-3.0.0.tgz",
+@@ -11883,6 +12038,12 @@
+         "node": ">= 8"
+       }
+     },
++    "node_modules/which-module": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/which-module/-/which-module-2.0.1.tgz",
++      "integrity": "sha512-iBdZ57RDvnOR9AGBhML2vFZf7h8vmBjhoaZqODJBFWHVtKkDmKuHai3cx5PgVMrX5YDNp27AofYbAwctSS+vhQ==",
++      "license": "ISC"
++    },
+     "node_modules/why-is-node-running": {
+       "version": "2.3.0",
+       "resolved": "https://registry.npmjs.org/why-is-node-running/-/why-is-node-running-2.3.0.tgz",
+@@ -11928,6 +12089,35 @@
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/wrap-ansi": {
++      "version": "6.2.0",
++      "resolved": "https://registry.npmjs.org/wrap-ansi/-/wrap-ansi-6.2.0.tgz",
++      "integrity": "sha512-r6lPcBGxZXlIcymEu7InxDMhdW0KDxpLgoFLcguasxCaJ/SOIZwINatK9KY/tf+ZrlywOKU0UDj3ATXUBfxJXA==",
++      "license": "MIT",
++      "dependencies": {
++        "ansi-styles": "^4.0.0",
++        "string-width": "^4.1.0",
++        "strip-ansi": "^6.0.0"
++      },
++      "engines": {
++        "node": ">=8"
++      }
++    },
++    "node_modules/wrap-ansi/node_modules/ansi-styles": {
++      "version": "4.3.0",
++      "resolved": "https://registry.npmjs.org/ansi-styles/-/ansi-styles-4.3.0.tgz",
++      "integrity": "sha512-zbB9rCJAT1rbjiVDb2hqKFHNYLxgtk8NURxZ3IZwD3F6NtxbXZQCnnSi1Lkx+IDohdPlFp222wVALIheZJQSEg==",
++      "license": "MIT",
++      "dependencies": {
++        "color-convert": "^2.0.1"
++      },
++      "engines": {
++        "node": ">=8"
++      },
++      "funding": {
++        "url": "https://github.com/chalk/ansi-styles?sponsor=1"
++      }
++    },
+     "node_modules/ws": {
+       "version": "8.22.0",
+       "resolved": "https://registry.npmjs.org/ws/-/ws-8.22.0.tgz",
+@@ -12003,12 +12193,105 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/y18n": {
++      "version": "4.0.3",
++      "resolved": "https://registry.npmjs.org/y18n/-/y18n-4.0.3.tgz",
++      "integrity": "sha512-JKhqTOwSrqNA1NY5lSztJ1GrBiUodLMmIZuLiDaMRJ+itFd+ABVE8XBjOvIWL+rSqNDC74LCSFmlb/U4UZ4hJQ==",
++      "license": "ISC"
++    },
+     "node_modules/yallist": {
+       "version": "3.1.1",
+       "resolved": "https://registry.npmjs.org/yallist/-/yallist-3.1.1.tgz",
+       "integrity": "sha512-a4UGQaWPH59mOXUYnAG2ewncQS4i4F43Tv3JoAM+s2VDAmS9NsK8GpDMLrCHPksFT7h3K6TOoUNn2pb7RoXx4g==",
+       "license": "ISC"
+     },
++    "node_modules/yargs": {
++      "version": "15.4.1",
++      "resolved": "https://registry.npmjs.org/yargs/-/yargs-15.4.1.tgz",
++      "integrity": "sha512-aePbxDmcYW++PaqBsJ+HYUFwCdv4LVvdnhBy78E57PIor8/OVvhMrADFFEDh8DHDFRv/O9i3lPhsENjO7QX0+A==",
++      "license": "MIT",
++      "dependencies": {
++        "cliui": "^6.0.0",
++        "decamelize": "^1.2.0",
++        "find-up": "^4.1.0",
++        "get-caller-file": "^2.0.1",
++        "require-directory": "^2.1.1",
++        "require-main-filename": "^2.0.0",
++        "set-blocking": "^2.0.0",
++        "string-width": "^4.2.0",
++        "which-module": "^2.0.0",
++        "y18n": "^4.0.0",
++        "yargs-parser": "^18.1.2"
++      },
++      "engines": {
++        "node": ">=8"
++      }
++    },
++    "node_modules/yargs-parser": {
++      "version": "18.1.3",
++      "resolved": "https://registry.npmjs.org/yargs-parser/-/yargs-parser-18.1.3.tgz",
++      "integrity": "sha512-o50j0JeToy/4K6OZcaQmW6lyXXKhq7csREXcDwk2omFPJEwUNOVtJKvmDr9EI1fAJZUyZcRF7kxGBWmRXudrCQ==",
++      "license": "ISC",
++      "dependencies": {
++        "camelcase": "^5.0.0",
++        "decamelize": "^1.2.0"
++      },
++      "engines": {
++        "node": ">=6"
++      }
++    },
++    "node_modules/yargs/node_modules/find-up": {
++      "version": "4.1.0",
++      "resolved": "https://registry.npmjs.org/find-up/-/find-up-4.1.0.tgz",
++      "integrity": "sha512-PpOwAdQ/YlXQ2vj8a3h8IipDuYRi3wceVQQGYWxNINccq40Anw7BlsEXCMbt1Zt+OLA6Fq9suIpIWD0OsnISlw==",
++      "license": "MIT",
++      "dependencies": {
++        "locate-path": "^5.0.0",
++        "path-exists": "^4.0.0"
++      },
++      "engines": {
++        "node": ">=8"
++      }
++    },
++    "node_modules/yargs/node_modules/locate-path": {
++      "version": "5.0.0",
++      "resolved": "https://registry.npmjs.org/locate-path/-/locate-path-5.0.0.tgz",
++      "integrity": "sha512-t7hw9pI+WvuwNJXwk5zVHpyhIqzg2qTlklJOf0mVxGSbe3Fp2VieZcduNYjaLDoy6p9uGpQEGWG87WpMKlNq8g==",
++      "license": "MIT",
++      "dependencies": {
++        "p-locate": "^4.1.0"
++      },
++      "engines": {
++        "node": ">=8"
++      }
++    },
++    "node_modules/yargs/node_modules/p-limit": {
++      "version": "2.3.0",
++      "resolved": "https://registry.npmjs.org/p-limit/-/p-limit-2.3.0.tgz",
++      "integrity": "sha512-//88mFWSJx8lxCzwdAABTJL2MyWB12+eIY7MDL2SqLmAkeKU9qxRvWuSyTjm3FUmpBEMuFfckAIqEaVGUDxb6w==",
++      "license": "MIT",
++      "dependencies": {
++        "p-try": "^2.0.0"
++      },
++      "engines": {
++        "node": ">=6"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/sindresorhus"
++      }
++    },
++    "node_modules/yargs/node_modules/p-locate": {
++      "version": "4.1.0",
++      "resolved": "https://registry.npmjs.org/p-locate/-/p-locate-4.1.0.tgz",
++      "integrity": "sha512-R79ZZ/0wAxKGu3oYMlz8jy/kbhsNrS7SKZ7PxEHBgJ5+F2mtFW2fK2cOtBh1cHYkQsbzFV7I+EoRKe6Yt0oK7A==",
++      "license": "MIT",
++      "dependencies": {
++        "p-limit": "^2.2.0"
++      },
++      "engines": {
++        "node": ">=8"
++      }
++    },
+     "node_modules/yocto-queue": {
+       "version": "0.1.0",
+       "resolved": "https://registry.npmjs.org/yocto-queue/-/yocto-queue-0.1.0.tgz",
+diff --git a/package.json b/package.json
+index 76aa424..7f54cb5 100644
+--- a/package.json
++++ b/package.json
+@@ -56,7 +56,9 @@
+     "date-fns": "^4.1.0",
+     "embla-carousel-react": "^8.6.0",
+     "input-otp": "^1.4.2",
++    "jsqr": "^1.4.0",
+     "lucide-react": "^0.575.0",
++    "qrcode": "^1.5.4",
+     "react": "^19.2.0",
+     "react-day-picker": "^9.14.0",
+     "react-dom": "^19.2.0",
+@@ -80,6 +82,7 @@
+     "@testing-library/jest-dom": "^6.6.0",
+     "@testing-library/react": "^16.0.0",
+     "@types/node": "^22.16.5",
++    "@types/qrcode": "^1.5.6",
+     "@types/react": "^19.2.0",
+     "@types/react-dom": "^19.2.0",
+     "@vitejs/plugin-react": "^5.2.0",
+diff --git a/roadmap.md b/roadmap.md
+index ae24d69..735223a 100644
+--- a/roadmap.md
++++ b/roadmap.md
+@@ -14,3 +14,4 @@
+ - [x] Matrícula no cadastro de membros (única, só a equipe define)
+ - [x] Financeiro: membro opcional em qualquer receita e gráfico de evolução mensal de dizimistas
+ - [x] Vínculo da conta ao cadastro existente: "Este é você?" por nome + confirmação de CPF
++- [x] Sistema de eventos: landing, inscrição (membro/visitante), pagamento e parcelas, ingresso com QR, check-in e gráficos
+diff --git a/src/components/events/EventForm.tsx b/src/components/events/EventForm.tsx
+new file mode 100644
+index 0000000..16b0b4d
+--- /dev/null
++++ b/src/components/events/EventForm.tsx
+@@ -0,0 +1,311 @@
++import { useState } from "react";
++import { useMutation, useQueryClient } from "@tanstack/react-query";
++import { toast } from "sonner";
++import { Plus, Trash2 } from "lucide-react";
++import { supabase } from "@/integrations/supabase/client";
++import { useAccess } from "@/hooks/use-access";
++import { Button } from "@/components/ui/button";
++import { Input } from "@/components/ui/input";
++import { Label } from "@/components/ui/label";
++import { Switch } from "@/components/ui/switch";
++import { Textarea } from "@/components/ui/textarea";
++import { Checkbox } from "@/components/ui/checkbox";
++import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
++import { eventError, fromLocalInput, slugify, toLocalInput } from "@/lib/events";
++import type { Tables } from "@/integrations/supabase/types";
++
++export type LotDraft = { id?: string; name: string; price: string; capacity: string; public_access: boolean; opens_at: string; closes_at: string };
++export type EventDraft = {
++  id?: string;
++  slug?: string;
++  title: string;
++  description: string;
++  location: string;
++  starts_at: string;
++  ends_at: string;
++  registration_opens_at: string;
++  registration_closes_at: string;
++  published: boolean;
++  audience: "public" | "members";
++  useLots: boolean;
++  lots: LotDraft[];
++  payment_enabled: boolean;
++  payment_link: string;
++  pix_key: string;
++  pix_qr_path: string;
++  accepts_card: boolean;
++  card_contact_note: string;
++  allow_installments: boolean;
++  max_installments: string;
++  limit_per_person: boolean;
++  max_per_person: string;
++};
++
++const SINGLE_LOT = "Ingresso";
++const blankLot = (name = ""): LotDraft => ({ name, price: "0", capacity: "", public_access: true, opens_at: "", closes_at: "" });
++export const blankEvent = (): EventDraft => ({
++  title: "", description: "", location: "", starts_at: "", ends_at: "", registration_opens_at: "", registration_closes_at: "",
++  published: false, audience: "public", useLots: false, lots: [blankLot(SINGLE_LOT)],
++  payment_enabled: false, payment_link: "", pix_key: "", pix_qr_path: "", accepts_card: false,
++  card_contact_note: "Para pagar no cartão, entre em contato com a igreja.",
++  allow_installments: false, max_installments: "3", limit_per_person: false, max_per_person: "2",
++});
++
++export function draftFrom(
++  e: Tables<"events">,
++  lots: Tables<"event_lots">[],
++  info: Tables<"event_payment_info"> | null,
++): EventDraft {
++  const sorted = [...lots].sort((a, b) => a.position - b.position);
++  const single = sorted.length === 1 && sorted[0]!.name === SINGLE_LOT;
++  return {
++    id: e.id, slug: e.slug, title: e.title, description: e.description ?? "", location: e.location ?? "",
++    starts_at: toLocalInput(e.starts_at), ends_at: toLocalInput(e.ends_at),
++    registration_opens_at: toLocalInput(e.registration_opens_at), registration_closes_at: toLocalInput(e.registration_closes_at),
++    published: e.published, audience: e.audience === "members" ? "members" : "public", useLots: !single,
++    lots: sorted.map((l) => ({
++      id: l.id, name: l.name, price: String(l.price), capacity: l.capacity === null ? "" : String(l.capacity),
++      public_access: l.public_access, opens_at: toLocalInput(l.opens_at), closes_at: toLocalInput(l.closes_at),
++    })),
++    payment_enabled: e.payment_enabled, payment_link: info?.payment_link ?? "", pix_key: info?.pix_key ?? "",
++    pix_qr_path: info?.pix_qr_path ?? "", accepts_card: e.accepts_card,
++    card_contact_note: info?.card_contact_note ?? "Para pagar no cartão, entre em contato com a igreja.",
++    allow_installments: e.allow_installments, max_installments: String(Math.max(2, e.max_installments)),
++    limit_per_person: e.limit_per_person, max_per_person: String(e.max_per_person ?? 2),
++  };
++}
++
++function validate(d: EventDraft) {
++  if (!d.title.trim()) return "Informe o nome do evento.";
++  if (!d.starts_at) return "Informe a data e hora do evento.";
++  if (d.ends_at && new Date(d.ends_at) < new Date(d.starts_at)) return "O término não pode ser antes do início.";
++  if (d.registration_opens_at && d.registration_closes_at && new Date(d.registration_closes_at) < new Date(d.registration_opens_at))
++    return "O fim das inscrições não pode ser antes do início.";
++  const lots = d.useLots ? d.lots : d.lots.slice(0, 1);
++  if (lots.length === 0) return "Cadastre pelo menos um lote.";
++  for (const l of lots) {
++    if (!l.name.trim()) return "Dê um nome para cada lote.";
++    if (!(Number(l.price.replace(",", ".")) >= 0)) return `Preço inválido no lote “${l.name}”.`;
++    if (l.capacity !== "" && !(Number.isInteger(Number(l.capacity)) && Number(l.capacity) >= 0)) return `Vagas inválidas no lote “${l.name}”.`;
++  }
++  if (d.payment_enabled) {
++    if (!lots.some((l) => Number(l.price.replace(",", ".")) > 0)) return "Informe o preço do ingresso (maior que zero) ou desative o pagamento.";
++    if (!d.payment_link.trim() && !d.pix_key.trim() && !d.pix_qr_path && !d.accepts_card)
++      return "Informe como pagar: link, chave Pix, QR code ou pagamento no cartão.";
++    if (d.allow_installments && !(Number(d.max_installments) >= 2 && Number(d.max_installments) <= 12)) return "O parcelamento deve ter entre 2 e 12 parcelas.";
++  }
++  if (d.limit_per_person && !(Number.isInteger(Number(d.max_per_person)) && Number(d.max_per_person) >= 1)) return "Informe quantas inscrições cada pessoa pode fazer.";
++  return null;
++}
++
++async function saveEvent(d: EventDraft, userId: string | null | undefined, qrFile: File | null) {
++  const lots = (d.useLots ? d.lots : d.lots.slice(0, 1).map((l) => ({ ...l, name: SINGLE_LOT }))).map((l, i) => ({
++    ...l, position: i, price: Number(l.price.replace(",", ".")) || 0, capacity: l.capacity === "" ? null : Number(l.capacity),
++  }));
++  const base = {
++    title: d.title.trim(), description: d.description.trim() || null, location: d.location.trim() || null,
++    starts_at: fromLocalInput(d.starts_at)!, ends_at: fromLocalInput(d.ends_at),
++    registration_opens_at: fromLocalInput(d.registration_opens_at), registration_closes_at: fromLocalInput(d.registration_closes_at),
++    published: d.published, audience: d.audience, payment_enabled: d.payment_enabled, accepts_card: d.payment_enabled && d.accepts_card,
++    allow_installments: d.payment_enabled && d.allow_installments,
++    max_installments: d.payment_enabled && d.allow_installments ? Number(d.max_installments) : 1,
++    limit_per_person: d.limit_per_person, max_per_person: d.limit_per_person ? Number(d.max_per_person) : null,
++  };
++
++  let eventId = d.id;
++  if (eventId) {
++    const { error } = await supabase.from("events").update(base).eq("id", eventId);
++    if (error) throw error;
++  } else {
++    const baseSlug = slugify(d.title) || "evento";
++    let created: { id: string } | null = null;
++    for (const slug of [baseSlug, `${baseSlug}-${Math.random().toString(36).slice(2, 6)}`]) {
++      const { data, error } = await supabase.from("events").insert({ ...base, slug, created_by: userId ?? null }).select("id").single();
++      if (!error) { created = data; break; }
++      if (!error.message.includes("events_slug_key")) throw error;
++    }
++    if (!created) throw new Error("events_slug_key");
++    eventId = created.id;
++  }
++
++  // Lotes: atualiza, cria e remove (lote com inscrições não pode ser removido)
++  const { data: existing } = await supabase.from("event_lots").select("id, name").eq("event_id", eventId);
++  const keep = new Set(lots.filter((l) => l.id).map((l) => l.id!));
++  for (const old of existing ?? []) {
++    if (keep.has(old.id)) continue;
++    const { error } = await supabase.from("event_lots").delete().eq("id", old.id);
++    if (error) throw new Error(error.code === "23503" ? `Não dá para remover o lote “${old.name}” porque já tem inscrições.` : error.message);
++  }
++  for (const l of lots) {
++    const row = {
++      name: l.name.trim(), position: l.position, price: l.price, capacity: l.capacity, public_access: d.audience === "members" ? l.public_access : true,
++      opens_at: fromLocalInput(l.opens_at), closes_at: fromLocalInput(l.closes_at),
++    };
++    const { error } = l.id
++      ? await supabase.from("event_lots").update(row).eq("id", l.id)
++      : await supabase.from("event_lots").insert({ ...row, event_id: eventId! });
++    if (error) throw error;
++  }
++
++  // Dados de pagamento (privados: só quem se inscreveu e a equipe enxergam)
++  let qrPath = d.pix_qr_path || null;
++  if (qrFile) {
++    const ext = (qrFile.name.split(".").pop() ?? "png").toLowerCase().replace(/[^a-z0-9]/g, "") || "png";
++    const path = `${eventId}/qr-${Date.now()}.${ext}`;
++    const { error } = await supabase.storage.from("event-assets").upload(path, qrFile);
++    if (error) throw new Error("Não foi possível enviar a imagem do QR code.");
++    if (qrPath) await supabase.storage.from("event-assets").remove([qrPath]);
++    qrPath = path;
++  }
++  const { error: infoErr } = await supabase.from("event_payment_info").upsert({
++    event_id: eventId!, payment_link: d.payment_enabled ? d.payment_link.trim() || null : null,
++    pix_key: d.payment_enabled ? d.pix_key.trim() || null : null, pix_qr_path: d.payment_enabled ? qrPath : null,
++    card_contact_note: d.payment_enabled && d.accepts_card ? d.card_contact_note.trim() || null : null,
++  });
++  if (infoErr) throw infoErr;
++  return eventId!;
++}
++
++const Field = ({ label, children, hint }: { label: string; children: React.ReactNode; hint?: string | undefined }) => (
++  <div className="space-y-1.5">
++    <Label>{label}</Label>
++    {children}
++    {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
++  </div>
++);
++const Toggle = ({ checked, onChange, title, help }: { checked: boolean; onChange: (v: boolean) => void; title: string; help?: string }) => (
++  <label className="flex items-start justify-between gap-4 rounded-xl border px-4 py-3">
++    <span>
++      <span className="block text-sm font-medium text-foreground">{title}</span>
++      {help && <span className="block text-xs text-muted-foreground">{help}</span>}
++    </span>
++    <Switch checked={checked} onCheckedChange={onChange} />
++  </label>
++);
++
++export function EventForm({ initial, onSaved }: { initial: EventDraft; onSaved: (id: string) => void }) {
++  const qc = useQueryClient();
++  const { data: access } = useAccess();
++  const [d, setD] = useState<EventDraft>(initial);
++  const [qrFile, setQrFile] = useState<File | null>(null);
++  const [sameCap, setSameCap] = useState("");
++  const set = (p: Partial<EventDraft>) => setD((x) => ({ ...x, ...p }));
++  const setLot = (i: number, p: Partial<LotDraft>) => setD((x) => ({ ...x, lots: x.lots.map((l, j) => (j === i ? { ...l, ...p } : l)) }));
++
++  const save = useMutation({
++    mutationFn: async () => {
++      const problem = validate(d);
++      if (problem) throw new Error(problem);
++      return saveEvent(d, access?.uid, qrFile);
++    },
++    onSuccess: (id) => {
++      toast.success("Evento salvo");
++      qc.invalidateQueries({ queryKey: ["admin-events"] });
++      qc.invalidateQueries({ queryKey: ["admin-event"] });
++      qc.invalidateQueries({ queryKey: ["public-events"] });
++      qc.invalidateQueries({ queryKey: ["public-event"] });
++      onSaved(id);
++    },
++    onError: (e) => toast.error(eventError(e)),
++  });
++
++  const lots = d.useLots ? d.lots : d.lots.slice(0, 1);
++
++  return (
++    <form className="space-y-8" onSubmit={(e) => { e.preventDefault(); save.mutate(); }}>
++      <section className="space-y-4">
++        <h3 className="text-lg text-foreground">Informações</h3>
++        <Field label="Nome do evento *"><Input required value={d.title} onChange={(e) => set({ title: e.target.value })} /></Field>
++        <Field label="Descrição" hint="Aceita **negrito**, listas e links. Uma linha em branco separa parágrafos."><Textarea rows={5} value={d.description} onChange={(e) => set({ description: e.target.value })} /></Field>
++        <Field label="Local"><Input value={d.location} onChange={(e) => set({ location: e.target.value })} placeholder="Ex.: Sede da igreja" /></Field>
++        <div className="grid gap-4 sm:grid-cols-2">
++          <Field label="Data e hora de início *"><Input type="datetime-local" required value={d.starts_at} onChange={(e) => set({ starts_at: e.target.value })} /></Field>
++          <Field label="Término (opcional)"><Input type="datetime-local" value={d.ends_at} onChange={(e) => set({ ends_at: e.target.value })} /></Field>
++        </div>
++        <div className="grid gap-4 sm:grid-cols-2">
++          <Field label="Inscrições abrem em"><Input type="datetime-local" value={d.registration_opens_at} onChange={(e) => set({ registration_opens_at: e.target.value })} /></Field>
++          <Field label="Inscrições encerram em"><Input type="datetime-local" value={d.registration_closes_at} onChange={(e) => set({ registration_closes_at: e.target.value })} /></Field>
++        </div>
++        <Toggle checked={d.published} onChange={(v) => set({ published: v })} title="Publicar evento" help="Quando publicado, aparece na página inicial e em Eventos do site." />
++      </section>
++
++      <section className="space-y-4">
++        <h3 className="text-lg text-foreground">Quem pode se inscrever</h3>
++        <Field label="Público do evento">
++          <Select value={d.audience} onValueChange={(v) => set({ audience: v as "public" | "members" })}>
++            <SelectTrigger><SelectValue /></SelectTrigger>
++            <SelectContent>
++              <SelectItem value="public">Aberto ao público (membros e visitantes)</SelectItem>
++              <SelectItem value="members">Apenas membros (com lotes abertos ao público, se quiser)</SelectItem>
++            </SelectContent>
++          </Select>
++        </Field>
++        <Toggle checked={d.limit_per_person} onChange={(v) => set({ limit_per_person: v })} title="Limitar inscrições por pessoa" help="O limite é controlado pelo CPF (validado pelos dígitos verificadores)." />
++        {d.limit_per_person && (
++          <Field label="Quantas inscrições cada pessoa pode fazer?"><Input type="number" min={1} value={d.max_per_person} onChange={(e) => set({ max_per_person: e.target.value })} className="max-w-32" /></Field>
++        )}
++      </section>
++
++      <section className="space-y-4">
++        <h3 className="text-lg text-foreground">Ingressos, lotes e vagas</h3>
++        <Toggle checked={d.useLots} onChange={(v) => set({ useLots: v, lots: v && d.lots.length < 2 ? [...d.lots, blankLot()] : d.lots })} title="Usar lotes" help="Com lotes você define preço, vagas e período para cada um. Sem lotes, há um ingresso único." />
++        {lots.map((l, i) => (
++          <div key={l.id ?? i} className="space-y-3 rounded-xl border p-4">
++            <div className="flex items-center justify-between gap-3">
++              <p className="text-sm font-medium text-foreground">{d.useLots ? `Lote ${i + 1}` : "Ingresso único"}</p>
++              {d.useLots && lots.length > 1 && (
++                <Button type="button" size="icon" variant="ghost" aria-label="Remover lote" onClick={() => set({ lots: d.lots.filter((_, j) => j !== i) })}><Trash2 className="h-4 w-4" /></Button>
++              )}
++            </div>
++            <div className="grid gap-3 sm:grid-cols-3">
++              {d.useLots && <Field label="Nome do lote *"><Input value={l.name} onChange={(e) => setLot(i, { name: e.target.value })} placeholder={`Lote ${i + 1}`} /></Field>}
++              <Field label="Preço (R$)"><Input inputMode="decimal" value={l.price} onChange={(e) => setLot(i, { price: e.target.value })} /></Field>
++              <Field label="Vagas" hint="Vazio = ilimitadas"><Input type="number" min={0} value={l.capacity} onChange={(e) => setLot(i, { capacity: e.target.value })} /></Field>
++            </div>
++            {d.useLots && (
++              <div className="grid gap-3 sm:grid-cols-2">
++                <Field label="Lote abre em (opcional)"><Input type="datetime-local" value={l.opens_at} onChange={(e) => setLot(i, { opens_at: e.target.value })} /></Field>
++                <Field label="Lote fecha em (opcional)"><Input type="datetime-local" value={l.closes_at} onChange={(e) => setLot(i, { closes_at: e.target.value })} /></Field>
++              </div>
++            )}
++            {d.audience === "members" && (
++              <label className="flex items-center gap-3 text-sm">
++                <Checkbox checked={l.public_access} onCheckedChange={(on) => setLot(i, { public_access: !!on })} />
++                Aberto ao público (visitantes podem comprar este lote)
++              </label>
++            )}
++          </div>
++        ))}
++        {d.useLots && (
++          <div className="flex flex-wrap items-end gap-3">
++            <Button type="button" variant="outline" onClick={() => set({ lots: [...d.lots, blankLot()] })}><Plus className="h-4 w-4" /> Adicionar lote</Button>
++            <div className="flex items-end gap-2">
++              <Field label="Mesma quantidade de vagas em todos os lotes"><Input type="number" min={0} value={sameCap} onChange={(e) => setSameCap(e.target.value)} className="w-40" /></Field>
++              <Button type="button" variant="secondary" disabled={sameCap === ""} onClick={() => set({ lots: d.lots.map((l) => ({ ...l, capacity: sameCap })) })}>Aplicar</Button>
++            </div>
++          </div>
++        )}
++      </section>
++
++      <section className="space-y-4">
++        <h3 className="text-lg text-foreground">Pagamento</h3>
++        <Toggle checked={d.payment_enabled} onChange={(v) => set({ payment_enabled: v })} title="Evento com pagamento" help="Quem se inscreve vê como pagar, envia o comprovante ou avisa que pagou; a equipe confere." />
++        {d.payment_enabled && (
++          <div className="space-y-4 rounded-xl border p-4">
++            <Field label="Link de pagamento"><Input type="url" placeholder="https://..." value={d.payment_link} onChange={(e) => set({ payment_link: e.target.value })} /></Field>
++            <Field label="Chave Pix"><Input value={d.pix_key} onChange={(e) => set({ pix_key: e.target.value })} /></Field>
++            <Field label="Foto do QR code do Pix" hint={d.pix_qr_path && !qrFile ? "Já existe uma imagem enviada. Envie outra para substituir." : undefined}>
++              <Input type="file" accept="image/*" onChange={(e) => setQrFile(e.target.files?.[0] ?? null)} />
++            </Field>
++            <Toggle checked={d.accepts_card} onChange={(v) => set({ accepts_card: v })} title="Aceita cartão" help="O cartão é combinado direto com a igreja: a pessoa vê a mensagem abaixo." />
++            {d.accepts_card && <Field label="Mensagem para quem quer pagar no cartão"><Input value={d.card_contact_note} onChange={(e) => set({ card_contact_note: e.target.value })} /></Field>}
++            <Toggle checked={d.allow_installments} onChange={(v) => set({ allow_installments: v })} title="Permitir parcelamento no Pix" help="A equipe confirma cada parcela; o ingresso sai quando todas estiverem pagas (ou quando você liberar)." />
++            {d.allow_installments && <Field label="Máximo de parcelas"><Input type="number" min={2} max={12} value={d.max_installments} onChange={(e) => set({ max_installments: e.target.value })} className="max-w-32" /></Field>}
++          </div>
++        )}
++      </section>
++
++      <Button type="submit" size="lg" className="w-full sm:w-auto" disabled={save.isPending}>{d.id ? "Salvar alterações" : "Criar evento"}</Button>
++    </form>
++  );
++}
+diff --git a/src/components/events/EventRegistration.tsx b/src/components/events/EventRegistration.tsx
+new file mode 100644
+index 0000000..6efa9d6
+--- /dev/null
++++ b/src/components/events/EventRegistration.tsx
+@@ -0,0 +1,311 @@
++import { useEffect, useState } from "react";
++import { Link } from "@tanstack/react-router";
++import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
++import { toast } from "sonner";
++import { CheckCircle2 } from "lucide-react";
++import { supabase } from "@/integrations/supabase/client";
++import { useAccess } from "@/hooks/use-access";
++import { Button } from "@/components/ui/button";
++import { Input } from "@/components/ui/input";
++import { Label } from "@/components/ui/label";
++import { Badge } from "@/components/ui/badge";
++import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
++import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
++import {
++  eventError, fmtDate, formatCpf, isValidCpf, lotIsOpen, moneyBR, registrationIsOpen,
++  type PublicEventDetail, type PublicLot,
++} from "@/lib/events";
++
++const Box = ({ children }: { children: React.ReactNode }) => <div className="rounded-2xl border bg-card p-6 shadow-soft">{children}</div>;
++
++export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
++  const { event, lots } = detail;
++  const qc = useQueryClient();
++  const { data: access, isLoading: loadingAccess } = useAccess();
++  const uid = access?.uid;
++  const nextPath = `/eventos/${event.slug}`;
++  const visitorsAllowed = event.audience === "public" || lots.some((l) => l.public_access);
++
++  const profile = useQuery({
++    queryKey: ["event-profile", uid],
++    enabled: !!uid,
++    queryFn: async () => {
++      const { data } = await supabase
++        .from("members")
++        .select("id, full_name, cpf, phone, status, approval_status")
++        .eq("user_id", uid!)
++        .maybeSingle();
++      return data;
++    },
++  });
++  const mine = useQuery({
++    queryKey: ["event-my-regs", uid, event.id],
++    enabled: !!uid,
++    queryFn: async () => {
++      const { data } = await supabase.from("event_registrations").select("id").eq("event_id", event.id).eq("user_id", uid!).neq("status", "cancelled");
++      return data ?? [];
++    },
++  });
++
++  const [done, setDone] = useState<{ paid: boolean } | null>(null);
++  const [lotId, setLotId] = useState("");
++  const [qty, setQty] = useState(1);
++  const [cpf, setCpf] = useState("");
++  const [installments, setInstallments] = useState(1);
++  const [visitor, setVisitor] = useState({ name: "", cpf: "", phone: "" });
++
++  useEffect(() => {
++    if (profile.data?.cpf) setCpf(formatCpf(profile.data.cpf));
++  }, [profile.data?.cpf]);
++  useEffect(() => {
++    if (!uid) return;
++    supabase.auth.getUser().then(({ data }) => {
++      const n = (data.user?.user_metadata?.['full_name'] as string | undefined) ?? "";
++      if (n) setVisitor((v) => (v.name ? v : { ...v, name: n }));
++    });
++  }, [uid]);
++
++  const createVisitor = useMutation({
++    mutationFn: async () => {
++      const { error } = await supabase.rpc("ensure_visitor_profile", { _name: visitor.name, _cpf: visitor.cpf, _phone: visitor.phone });
++      if (error) throw error;
++    },
++    onSuccess: () => {
++      toast.success("Dados salvos! Agora é só escolher o ingresso.");
++      qc.invalidateQueries({ queryKey: ["event-profile", uid] });
++    },
++    onError: (e) => toast.error(eventError(e)),
++  });
++
++  const isMember = profile.data?.approval_status === "aprovado" && profile.data?.status !== "visitante";
++  const lotState = (l: PublicLot) => {
++    if (event.audience === "members" && !isMember && !l.public_access) return "Só para membros";
++    if (!lotIsOpen(l)) return "Fora do período";
++    if (l.spots_left === 0) return "Esgotado";
++    return null;
++  };
++  const selected = lots.find((l) => l.id === lotId);
++  const payRequired = event.payment_enabled && (selected?.price ?? 0) > 0;
++  const maxQty = Math.max(1, Math.min(10, selected?.spots_left ?? 10, event.limit_per_person ? (event.max_per_person ?? 10) : 10));
++  const total = (selected?.price ?? 0) * qty;
++
++  useEffect(() => {
++    if (!lotId) {
++      const first = lots.find((l) => !lotState(l));
++      if (first) setLotId(first.id);
++    }
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [lots, profile.data?.id]);
++  useEffect(() => {
++    if (qty > maxQty) setQty(maxQty);
++    if (!payRequired || !event.allow_installments) setInstallments(1);
++  }, [maxQty, qty, payRequired, event.allow_installments]);
++
++  const register = useMutation({
++    mutationFn: async () => {
++      if (event.limit_per_person && !isValidCpf(cpf)) throw new Error("invalid_cpf");
++      if (cpf && !isValidCpf(cpf)) throw new Error("invalid_cpf");
++      const { error } = await supabase.rpc("register_for_event", {
++        _event: event.id, _lot: lotId, _quantity: qty, _cpf: cpf, _installments: installments,
++      });
++      if (error) throw error;
++    },
++    onSuccess: () => {
++      setDone({ paid: payRequired });
++      qc.invalidateQueries({ queryKey: ["public-event", event.slug] });
++      qc.invalidateQueries({ queryKey: ["public-events"] });
++      qc.invalidateQueries({ queryKey: ["event-my-regs"] });
++      qc.invalidateQueries({ queryKey: ["my-registrations"] });
++    },
++    onError: (e) => {
++      toast.error(eventError(e));
++      qc.invalidateQueries({ queryKey: ["public-event", event.slug] });
++    },
++  });
++
++  if (!registrationIsOpen(event)) {
++    const early = event.registration_opens_at && new Date(event.registration_opens_at) > new Date();
++    return (
++      <Box>
++        <h3 className="text-xl text-foreground">Inscrições {early ? "ainda não abriram" : "encerradas"}</h3>
++        <p className="mt-2 text-sm text-muted-foreground">
++          {early ? `As inscrições abrem em ${fmtDate(event.registration_opens_at)}.` : "O período de inscrição deste evento terminou."}
++        </p>
++      </Box>
++    );
++  }
++
++  if (loadingAccess) return <Box><p className="text-sm text-muted-foreground">Carregando...</p></Box>;
++
++  if (!uid) {
++    return (
++      <Box>
++        <h3 className="text-xl text-foreground">Quero me inscrever</h3>
++        <p className="mt-2 text-sm text-muted-foreground">Você é membro da igreja ou visitante?</p>
++        <div className="mt-5 flex flex-wrap gap-3">
++          <Button asChild>
++            <Link to="/auth" search={{ next: nextPath }}>Sou membro</Link>
++          </Button>
++          {visitorsAllowed && (
++            <Button asChild variant="outline">
++              <Link to="/auth" search={{ next: nextPath, mode: "up" }}>Sou visitante</Link>
++            </Button>
++          )}
++        </div>
++        <p className="mt-4 text-xs text-muted-foreground">
++          {visitorsAllowed
++            ? "Membros entram com a conta de membro. Visitantes criam uma conta rápida e ficam salvos como visitantes."
++            : "Este evento é exclusivo para membros: entre com a sua conta de membro."}
++        </p>
++      </Box>
++    );
++  }
++
++  if (profile.isLoading) return <Box><p className="text-sm text-muted-foreground">Carregando...</p></Box>;
++
++  if (!profile.data) {
++    return (
++      <Box>
++        <h3 className="text-xl text-foreground">Complete seus dados</h3>
++        <p className="mt-2 text-sm text-muted-foreground">
++          Para se inscrever como visitante, precisamos de alguns dados. Você será salvo como visitante da igreja.
++        </p>
++        <form
++          className="mt-5 space-y-4"
++          onSubmit={(e) => {
++            e.preventDefault();
++            if (!isValidCpf(visitor.cpf)) {
++              toast.error(eventError(new Error("invalid_cpf")));
++              return;
++            }
++            createVisitor.mutate();
++          }}
++        >
++          <div className="space-y-1.5"><Label>Nome completo *</Label><Input required value={visitor.name} onChange={(e) => setVisitor({ ...visitor, name: e.target.value })} /></div>
++          <div className="space-y-1.5"><Label>CPF *</Label><Input required inputMode="numeric" placeholder="000.000.000-00" value={visitor.cpf} onChange={(e) => setVisitor({ ...visitor, cpf: formatCpf(e.target.value) })} /></div>
++          <div className="space-y-1.5"><Label>Telefone / WhatsApp *</Label><Input required inputMode="tel" value={visitor.phone} onChange={(e) => setVisitor({ ...visitor, phone: e.target.value })} /></div>
++          <Button type="submit" className="w-full" disabled={createVisitor.isPending}>Continuar</Button>
++        </form>
++        <p className="mt-4 text-xs text-muted-foreground">
++          Já é membro e ainda não fez seu cadastro? <Link to="/painel/meu-cadastro" search={{ convite: undefined }} className="text-primary underline">Faça em “Meu cadastro”</Link>.
++        </p>
++      </Box>
++    );
++  }
++
++  if (done) {
++    return (
++      <Box>
++        <div className="flex items-start gap-3">
++          <CheckCircle2 className="mt-1 h-6 w-6 shrink-0 text-primary" />
++          <div>
++            <h3 className="text-xl text-foreground">Inscrição realizada!</h3>
++            <p className="mt-2 text-sm text-muted-foreground">
++              {done.paid
++                ? "Agora faça o pagamento e avise a igreja pelo botão “Já efetuei o pagamento” (ou envie o comprovante). Seu ingresso é liberado depois que o pagamento for conferido."
++                : "Seu ingresso com QR code já está disponível."}
++            </p>
++            <Button asChild className="mt-4"><Link to="/painel/meu-cadastro" search={{ convite: undefined }}>Ver em Meu cadastro</Link></Button>
++          </div>
++        </div>
++      </Box>
++    );
++  }
++
++  const eligible = lots.filter((l) => !lotState(l));
++  if (eligible.length === 0) {
++    return (
++      <Box>
++        <h3 className="text-xl text-foreground">Sem lotes disponíveis para você</h3>
++        <p className="mt-2 text-sm text-muted-foreground">
++          {event.audience === "members" && !isMember
++            ? "Os lotes abertos agora são exclusivos para membros. Se você é membro, confira se o seu cadastro já foi aprovado."
++            : "Todos os lotes estão esgotados ou fora do período."}
++        </p>
++      </Box>
++    );
++  }
++
++  return (
++    <Box>
++      <h3 className="text-xl text-foreground">Inscrever-se</h3>
++      <p className="mt-1 text-sm text-muted-foreground">
++        Inscrevendo-se como <strong className="text-foreground">{profile.data.full_name}</strong> ({isMember ? "membro" : "visitante"}).
++      </p>
++      {(mine.data?.length ?? 0) > 0 && (
++        <p className="mt-3 rounded-lg bg-primary-soft p-3 text-sm text-foreground">
++          Você já tem inscrição neste evento. <Link to="/painel/meu-cadastro" search={{ convite: undefined }} className="text-primary underline">Ver em Meu cadastro</Link>
++        </p>
++      )}
++      <form
++        className="mt-5 space-y-5"
++        onSubmit={(e) => {
++          e.preventDefault();
++          register.mutate();
++        }}
++      >
++        <div className="space-y-2">
++          <Label>{lots.length > 1 ? "Escolha o lote" : "Ingresso"}</Label>
++          <RadioGroup value={lotId} onValueChange={setLotId} className="gap-2">
++            {lots.map((l) => {
++              const blocked = lotState(l);
++              return (
++                <label key={l.id} className={`flex items-center justify-between gap-3 rounded-lg border px-4 py-3 text-sm ${blocked ? "opacity-60" : "cursor-pointer"}`}>
++                  <span className="flex items-center gap-3">
++                    <RadioGroupItem value={l.id} disabled={!!blocked} />
++                    <span>
++                      <span className="block font-medium text-foreground">{l.name}</span>
++                      <span className="block text-xs text-muted-foreground">
++                        {l.spots_left === null ? "Vagas ilimitadas" : `${l.spots_left} vagas restantes`}
++                        {l.closes_at ? ` · até ${fmtDate(l.closes_at)}` : ""}
++                      </span>
++                    </span>
++                  </span>
++                  <span className="text-right">
++                    <span className="block font-semibold text-foreground">{event.payment_enabled && l.price > 0 ? moneyBR(l.price) : "Gratuito"}</span>
++                    {blocked && <Badge variant="secondary">{blocked}</Badge>}
++                  </span>
++                </label>
++              );
++            })}
++          </RadioGroup>
++        </div>
++
++        <div className="grid gap-4 sm:grid-cols-2">
++          <div className="space-y-1.5">
++            <Label>Quantidade de ingressos</Label>
++            <Input type="number" min={1} max={maxQty} value={qty} onChange={(e) => setQty(Math.max(1, Math.min(maxQty, Number(e.target.value) || 1)))} />
++            {event.limit_per_person && <p className="text-xs text-muted-foreground">Limite de {event.max_per_person} por pessoa (controlado pelo CPF).</p>}
++          </div>
++          <div className="space-y-1.5">
++            <Label>CPF{event.limit_per_person ? " *" : " (opcional)"}</Label>
++            <Input inputMode="numeric" placeholder="000.000.000-00" required={event.limit_per_person} value={cpf} onChange={(e) => setCpf(formatCpf(e.target.value))} />
++          </div>
++        </div>
++
++        {payRequired && event.allow_installments && event.max_installments > 1 && (
++          <div className="space-y-1.5">
++            <Label>Forma de pagamento (Pix)</Label>
++            <Select value={String(installments)} onValueChange={(v) => setInstallments(Number(v))}>
++              <SelectTrigger><SelectValue /></SelectTrigger>
++              <SelectContent>
++                {Array.from({ length: event.max_installments }, (_, i) => i + 1).map((n) => (
++                  <SelectItem key={n} value={String(n)}>
++                    {n === 1 ? `À vista — ${moneyBR(total)}` : `${n}x de ${moneyBR(total / n)}`}
++                  </SelectItem>
++                ))}
++              </SelectContent>
++            </Select>
++          </div>
++        )}
++
++        <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4">
++          <p className="text-sm text-muted-foreground">
++            Total: <strong className="text-lg text-foreground">{payRequired ? moneyBR(total) : "Gratuito"}</strong>
++          </p>
++          <Button type="submit" size="lg" disabled={register.isPending || !lotId}>Inscrever-se</Button>
++        </div>
++      </form>
++    </Box>
++  );
++}
+diff --git a/src/components/events/EventsList.tsx b/src/components/events/EventsList.tsx
+new file mode 100644
+index 0000000..dd7ba6f
+--- /dev/null
++++ b/src/components/events/EventsList.tsx
+@@ -0,0 +1,98 @@
++import { Link } from "@tanstack/react-router";
++import { useQuery } from "@tanstack/react-query";
++import { ArrowUpRight, CalendarDays, MapPin, Ticket, Users } from "lucide-react";
++import { supabase } from "@/integrations/supabase/client";
++import { Badge } from "@/components/ui/badge";
++import { Button } from "@/components/ui/button";
++import { fmtDate, fmtLongDate, fmtTime, moneyBR } from "@/lib/events";
++import type { Database } from "@/integrations/supabase/types";
++
++type EventRow = Database["public"]["Functions"]["public_events"]["Returns"][number];
++
++export function usePublicEvents() {
++  return useQuery({
++    queryKey: ["public-events"],
++    queryFn: async () => {
++      const { data, error } = await supabase.rpc("public_events");
++      if (error) throw error;
++      return data ?? [];
++    },
++  });
++}
++
++function registrationLabel(e: EventRow) {
++  const now = new Date();
++  if (e.registration_opens_at && new Date(e.registration_opens_at) > now) return `Inscrições a partir de ${fmtDate(e.registration_opens_at)}`;
++  if (e.registration_closes_at && new Date(e.registration_closes_at) < now) return "Inscrições encerradas";
++  if (e.spots_left === 0) return "Vagas esgotadas";
++  return e.registration_closes_at ? `Inscrições até ${fmtDate(e.registration_closes_at)}` : "Inscrições abertas";
++}
++
++export function EventCard({ e }: { e: EventRow }) {
++  const open = e.registration_open && e.spots_left !== 0;
++  return (
++    <Link
++      to="/eventos/$slug"
++      params={{ slug: e.slug }}
++      className="group flex flex-col rounded-2xl border bg-card p-6 transition-colors hover:border-primary"
++    >
++      <div className="flex flex-wrap items-center gap-2">
++        <Badge variant={open ? "default" : "secondary"}>{registrationLabel(e)}</Badge>
++        {e.audience === "members" && <Badge variant="outline">Para membros</Badge>}
++      </div>
++      <h3 className="mt-4 text-xl text-foreground">{e.title}</h3>
++      <p className="mt-3 flex items-center gap-2 text-sm text-muted-foreground">
++        <CalendarDays className="h-4 w-4 shrink-0" />
++        <span className="capitalize">{fmtLongDate(e.starts_at)}</span> · {fmtTime(e.starts_at)}
++      </p>
++      {e.location && (
++        <p className="mt-1 flex items-center gap-2 text-sm text-muted-foreground">
++          <MapPin className="h-4 w-4 shrink-0" /> {e.location}
++        </p>
++      )}
++      <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-foreground">
++        <span className="inline-flex items-center gap-1.5">
++          <Ticket className="h-4 w-4 text-primary" />
++          {!e.payment_enabled || !e.min_price ? "Gratuito" : `A partir de ${moneyBR(e.min_price)}`}
++        </span>
++        {e.spots_left !== null && (
++          <span className="inline-flex items-center gap-1.5">
++            <Users className="h-4 w-4 text-primary" /> {e.spots_left === 0 ? "Esgotado" : `${e.spots_left} vagas`}
++          </span>
++        )}
++      </div>
++      <span className="mt-5 inline-flex items-center gap-1.5 text-sm font-medium text-primary">
++        Ver detalhes <ArrowUpRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
++      </span>
++    </Link>
++  );
++}
++
++/** Seção da landing page: próximos eventos. Some sozinha se não houver nenhum evento publicado. */
++export function EventsSection() {
++  const { data = [] } = usePublicEvents();
++  if (data.length === 0) return null;
++  const shown = data.slice(0, 3);
++  return (
++    <section className="mx-auto max-w-7xl px-5 py-16 lg:px-10" id="eventos">
++      <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
++        <div>
++          <p className="text-xs font-bold text-primary">AGENDA</p>
++          <h2 className="mt-2 text-3xl">Eventos</h2>
++        </div>
++        {data.length > shown.length && (
++          <Button asChild variant="outline">
++            <Link to="/eventos">
++              Ver todos os eventos <ArrowUpRight />
++            </Link>
++          </Button>
++        )}
++      </div>
++      <div className="grid gap-5 md:grid-cols-2 lg:grid-cols-3">
++        {shown.map((e) => (
++          <EventCard key={e.id} e={e} />
++        ))}
++      </div>
++    </section>
++  );
++}
+diff --git a/src/components/events/MyTickets.tsx b/src/components/events/MyTickets.tsx
+new file mode 100644
+index 0000000..95f06f8
+--- /dev/null
++++ b/src/components/events/MyTickets.tsx
+@@ -0,0 +1,220 @@
++import { useEffect, useRef, useState } from "react";
++import { Link } from "@tanstack/react-router";
++import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
++import QRCode from "qrcode";
++import { toast } from "sonner";
++import { CalendarDays, Copy, Download, ExternalLink, Upload } from "lucide-react";
++import { supabase } from "@/integrations/supabase/client";
++import { safeLink } from "@/lib/site-content";
++import { Badge } from "@/components/ui/badge";
++import { Button } from "@/components/ui/button";
++import { eventError, fmtDateTime, moneyBR, PAYMENT_STATUS, REGISTRATION_STATUS, TICKET_STATUS } from "@/lib/events";
++
++function TicketQr({ code, name }: { code: string; name: string }) {
++  const [url, setUrl] = useState("");
++  useEffect(() => {
++    QRCode.toDataURL(code, { width: 280, margin: 1, errorCorrectionLevel: "M" }).then(setUrl);
++  }, [code]);
++  if (!url) return <div className="h-44 w-44 animate-pulse rounded-lg bg-muted" />;
++  return (
++    <div className="flex flex-col items-center gap-2">
++      <img src={url} alt={`QR code do ingresso de ${name}`} className="h-44 w-44 rounded-lg border bg-white p-1" />
++      <a href={url} download={`ingresso-${name.replace(/\s+/g, "-").toLowerCase()}.png`} className="inline-flex items-center gap-1 text-xs text-primary underline">
++        <Download className="h-3 w-3" /> Salvar imagem
++      </a>
++    </div>
++  );
++}
++
++function PaymentInstructions({ eventId }: { eventId: string }) {
++  const info = useQuery({
++    queryKey: ["event-payment-info", eventId],
++    queryFn: async () => (await supabase.from("event_payment_info").select("*").eq("event_id", eventId).maybeSingle()).data,
++  });
++  const qr = useQuery({
++    queryKey: ["event-qr", info.data?.pix_qr_path],
++    enabled: !!info.data?.pix_qr_path,
++    queryFn: async () => (await supabase.storage.from("event-assets").createSignedUrl(info.data!.pix_qr_path!, 3600)).data?.signedUrl ?? null,
++  });
++  const d = info.data;
++  if (!d) return null;
++  const link = d.payment_link ? safeLink(d.payment_link) : "";
++  return (
++    <div className="rounded-xl border bg-primary-soft p-4 text-sm">
++      <p className="font-medium text-foreground">Como pagar</p>
++      <div className="mt-3 flex flex-wrap items-start gap-6">
++        {qr.data && <img src={qr.data} alt="QR code do pagamento" className="h-40 w-40 rounded-lg border bg-white p-1" />}
++        <div className="space-y-3">
++          {link && (
++            <Button asChild size="sm"><a href={link} target="_blank" rel="noreferrer noopener"><ExternalLink className="h-4 w-4" /> Pagar pelo link</a></Button>
++          )}
++          {d.pix_key && (
++            <div>
++              <p className="text-xs text-muted-foreground">Chave Pix</p>
++              <p className="flex items-center gap-2 break-all font-mono text-foreground">
++                {d.pix_key}
++                <Button type="button" size="icon" variant="ghost" aria-label="Copiar chave Pix" onClick={() => navigator.clipboard.writeText(d.pix_key!).then(() => toast.success("Chave Pix copiada"))}><Copy className="h-4 w-4" /></Button>
++              </p>
++            </div>
++          )}
++          {d.card_contact_note && <p className="max-w-xs text-muted-foreground">{d.card_contact_note}</p>}
++        </div>
++      </div>
++    </div>
++  );
++}
++
++export function MyTickets({ uid }: { uid: string }) {
++  const qc = useQueryClient();
++  const fileRef = useRef<HTMLInputElement>(null);
++  const [uploadFor, setUploadFor] = useState<string | null>(null);
++
++  const regs = useQuery({
++    queryKey: ["my-registrations", uid],
++    queryFn: async () => {
++      const { data, error } = await supabase
++        .from("event_registrations")
++        .select("*, events(title, slug, starts_at, location), event_lots(name), event_payments(*), event_tickets(*)")
++        .eq("user_id", uid)
++        .order("created_at", { ascending: false });
++      if (error) throw error;
++      return data ?? [];
++    },
++  });
++  const refresh = () => qc.invalidateQueries({ queryKey: ["my-registrations", uid] });
++
++  const claim = useMutation({
++    mutationFn: async ({ paymentId, proofPath }: { paymentId: string; proofPath?: string }) => {
++      const { error } = await supabase.rpc("claim_event_payment", proofPath ? { _payment: paymentId, _proof_path: proofPath } : { _payment: paymentId });
++      if (error) throw error;
++    },
++    onSuccess: () => {
++      toast.success("Pronto! A igreja vai conferir o pagamento.");
++      refresh();
++    },
++    onError: (e) => toast.error(eventError(e)),
++  });
++
++  const cancel = useMutation({
++    mutationFn: async (id: string) => {
++      const { error } = await supabase.rpc("cancel_event_registration", { _reg: id });
++      if (error) throw error;
++    },
++    onSuccess: () => {
++      toast.success("Inscrição cancelada");
++      refresh();
++      qc.invalidateQueries({ queryKey: ["public-events"] });
++    },
++    onError: (e) => toast.error(eventError(e)),
++  });
++
++  async function onFile(file: File | undefined) {
++    const paymentId = uploadFor;
++    setUploadFor(null);
++    if (!file || !paymentId) return;
++    if (file.size > 8 * 1024 * 1024) {
++      toast.error("O arquivo deve ter até 8 MB.");
++      return;
++    }
++    const ext = (file.name.split(".").pop() ?? "jpg").toLowerCase().replace(/[^a-z0-9]/g, "");
++    const path = `${uid}/${paymentId}-${Date.now()}.${ext || "jpg"}`;
++    const { error } = await supabase.storage.from("event-proofs").upload(path, file);
++    if (error) {
++      toast.error("Não foi possível enviar o comprovante.");
++      return;
++    }
++    claim.mutate({ paymentId, proofPath: path });
++  }
++
++  async function openProof(path: string) {
++    const { data } = await supabase.storage.from("event-proofs").createSignedUrl(path, 300);
++    if (data?.signedUrl) window.open(data.signedUrl, "_blank", "noopener");
++  }
++
++  const list = regs.data ?? [];
++  if (list.length === 0) return null;
++
++  return (
++    <section id="ingressos" className="mt-12">
++      <h2 className="text-2xl text-foreground">Meus ingressos</h2>
++      <input ref={fileRef} type="file" accept="image/*,application/pdf" className="hidden" onChange={(e) => { onFile(e.target.files?.[0]); e.target.value = ""; }} />
++      <div className="mt-5 space-y-6">
++        {list.map((r) => {
++          const payments = [...(r.event_payments ?? [])].sort((a, b) => a.installment_no - b.installment_no);
++          const tickets = [...(r.event_tickets ?? [])].sort((a, b) => a.seq - b.seq);
++          const canCancel = r.status === "pending" && !payments.some((p) => p.status !== "pending");
++          return (
++            <article key={r.id} className={`rounded-2xl border bg-card p-6 ${r.status === "cancelled" ? "opacity-60" : ""}`}>
++              <div className="flex flex-wrap items-start justify-between gap-3">
++                <div>
++                  <h3 className="text-xl text-foreground">
++                    {r.events ? <Link to="/eventos/$slug" params={{ slug: r.events.slug }} className="hover:underline">{r.events.title}</Link> : "Evento"}
++                  </h3>
++                  <p className="mt-1 flex items-center gap-2 text-sm text-muted-foreground">
++                    <CalendarDays className="h-4 w-4" /> {r.events ? fmtDateTime(r.events.starts_at) : ""}
++                    {r.events?.location ? ` · ${r.events.location}` : ""}
++                  </p>
++                  <p className="mt-1 text-sm text-muted-foreground">
++                    {r.event_lots?.name} · {r.quantity} {r.quantity === 1 ? "ingresso" : "ingressos"}
++                    {r.total > 0 ? ` · ${moneyBR(r.total)}` : ""}
++                  </p>
++                </div>
++                <Badge variant={r.status === "confirmed" ? "default" : "secondary"}>{REGISTRATION_STATUS[r.status] ?? r.status}</Badge>
++              </div>
++
++              {r.status === "pending" && (
++                <div className="mt-5 space-y-4">
++                  <PaymentInstructions eventId={r.event_id} />
++                  <div className="divide-y rounded-xl border">
++                    {payments.map((p) => (
++                      <div key={p.id} className="flex flex-wrap items-center justify-between gap-3 p-4 text-sm">
++                        <div>
++                          <p className="font-medium text-foreground">
++                            {payments.length > 1 ? `Parcela ${p.installment_no} de ${payments.length}` : "Pagamento"} — {moneyBR(p.amount)}
++                          </p>
++                          <Badge variant={p.status === "paid" ? "default" : "outline"} className="mt-1">{PAYMENT_STATUS[p.status] ?? p.status}</Badge>
++                          {p.proof_path && (
++                            <button type="button" className="ml-3 text-xs text-primary underline" onClick={() => openProof(p.proof_path!)}>Ver comprovante enviado</button>
++                          )}
++                        </div>
++                        {p.status !== "paid" && (
++                          <div className="flex flex-wrap gap-2">
++                            <Button type="button" size="sm" variant="outline" disabled={claim.isPending} onClick={() => { setUploadFor(p.id); fileRef.current?.click(); }}>
++                              <Upload className="h-4 w-4" /> Enviar comprovante
++                            </Button>
++                            {p.status === "pending" && (
++                              <Button type="button" size="sm" disabled={claim.isPending} onClick={() => claim.mutate({ paymentId: p.id })}>Já efetuei o pagamento</Button>
++                            )}
++                          </div>
++                        )}
++                      </div>
++                    ))}
++                  </div>
++                  <p className="text-xs text-muted-foreground">O ingresso é liberado depois que a igreja confirmar {payments.length > 1 ? "todas as parcelas" : "o pagamento"}.</p>
++                  {canCancel && (
++                    <Button type="button" variant="ghost" size="sm" onClick={() => confirm("Cancelar esta inscrição?") && cancel.mutate(r.id)}>Cancelar inscrição</Button>
++                  )}
++                </div>
++              )}
++
++              {r.status === "confirmed" && (
++                <div className="mt-5 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
++                  {tickets.map((t) => (
++                    <div key={t.id} className="flex flex-col items-center gap-3 rounded-xl border bg-background p-4 text-center">
++                      <TicketQr code={t.code} name={t.holder_name} />
++                      <div>
++                        <p className="font-medium text-foreground">{t.holder_name}</p>
++                        <p className="text-xs text-muted-foreground">Ingresso {t.seq} de {r.quantity}</p>
++                        <Badge className="mt-2" variant={t.status === "checked_in" ? "default" : "outline"}>{TICKET_STATUS[t.status] ?? t.status}</Badge>
++                      </div>
++                    </div>
++                  ))}
++                </div>
++              )}
++            </article>
++          );
++        })}
++      </div>
++    </section>
++  );
++}
+diff --git a/src/components/events/QrScanner.tsx b/src/components/events/QrScanner.tsx
+new file mode 100644
+index 0000000..faa9820
+--- /dev/null
++++ b/src/components/events/QrScanner.tsx
+@@ -0,0 +1,70 @@
++import { useEffect, useRef, useState } from "react";
++import jsQR from "jsqr";
++
++/** Lê QR codes pela câmera (precisa de HTTPS ou localhost). Chama onScan uma vez por leitura. */
++export function QrScanner({ onScan }: { onScan: (code: string) => void }) {
++  const videoRef = useRef<HTMLVideoElement>(null);
++  const [error, setError] = useState("");
++  const [ready, setReady] = useState(false);
++  const onScanRef = useRef(onScan);
++  onScanRef.current = onScan;
++
++  useEffect(() => {
++    let stream: MediaStream | null = null;
++    let timer: ReturnType<typeof setTimeout> | undefined;
++    let stopped = false;
++    const last = { code: "", at: 0 };
++    const canvas = document.createElement("canvas");
++    const ctx = canvas.getContext("2d", { willReadFrequently: true });
++
++    async function start() {
++      if (!navigator.mediaDevices?.getUserMedia) {
++        setError("Este navegador não permite usar a câmera aqui. Abra o site com HTTPS ou digite o código manualmente.");
++        return;
++      }
++      try {
++        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
++      } catch {
++        setError("Não foi possível acessar a câmera. Libere a permissão no navegador ou digite o código manualmente.");
++        return;
++      }
++      const video = videoRef.current;
++      if (!video || stopped) return;
++      video.srcObject = stream;
++      await video.play().catch(() => undefined);
++      setReady(true);
++      const tick = () => {
++        if (stopped) return;
++        if (ctx && video.readyState === video.HAVE_ENOUGH_DATA && video.videoWidth > 0) {
++          canvas.width = video.videoWidth;
++          canvas.height = video.videoHeight;
++          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
++          const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
++          const found = jsQR(img.data, img.width, img.height, { inversionAttempts: "dontInvert" });
++          if (found?.data && (found.data !== last.code || Date.now() - last.at > 3500)) {
++            last.code = found.data;
++            last.at = Date.now();
++            onScanRef.current(found.data);
++          }
++        }
++        timer = setTimeout(tick, 200);
++      };
++      tick();
++    }
++    start();
++    return () => {
++      stopped = true;
++      if (timer) clearTimeout(timer);
++      stream?.getTracks().forEach((t) => t.stop());
++    };
++  }, []);
++
++  if (error) return <p className="rounded-xl border border-destructive/40 bg-destructive/5 p-4 text-sm text-destructive">{error}</p>;
++  return (
++    <div className="relative overflow-hidden rounded-2xl border bg-black">
++      <video ref={videoRef} playsInline muted className="aspect-square w-full object-cover sm:aspect-video" />
++      {!ready && <p className="absolute inset-0 grid place-items-center text-sm text-white/80">Abrindo a câmera...</p>}
++      <div className="pointer-events-none absolute inset-8 rounded-2xl border-2 border-white/70" />
++    </div>
++  );
++}
+diff --git a/src/components/site/SiteLayout.tsx b/src/components/site/SiteLayout.tsx
+index 3154c54..df5d2c0 100644
+--- a/src/components/site/SiteLayout.tsx
++++ b/src/components/site/SiteLayout.tsx
+@@ -12,6 +12,7 @@ export function SiteLayout({ children }: { children: ReactNode }) {
+     { to: "/", label: c.navHome },
+     { to: "/quem-somos", label: c.navAbout },
+     { to: "/cultos", label: c.navServices },
++    { to: "/eventos", label: "Eventos" },
+     { to: "/oracao", label: c.navPrayer },
+     { to: "/contribuicao", label: c.navContribution },
+     { to: "/contato", label: c.navContact },
+diff --git a/src/integrations/supabase/types.ts b/src/integrations/supabase/types.ts
+index 7aed96d..0fa3a96 100644
+--- a/src/integrations/supabase/types.ts
++++ b/src/integrations/supabase/types.ts
+@@ -158,6 +158,337 @@ export type Database = {
+           },
+         ]
+       }
++      event_lots: {
++        Row: {
++          capacity: number | null
++          closes_at: string | null
++          created_at: string
++          event_id: string
++          id: string
++          name: string
++          opens_at: string | null
++          position: number
++          price: number
++          public_access: boolean
++        }
++        Insert: {
++          capacity?: number | null
++          closes_at?: string | null
++          created_at?: string
++          event_id: string
++          id?: string
++          name: string
++          opens_at?: string | null
++          position?: number
++          price?: number
++          public_access?: boolean
++        }
++        Update: {
++          capacity?: number | null
++          closes_at?: string | null
++          created_at?: string
++          event_id?: string
++          id?: string
++          name?: string
++          opens_at?: string | null
++          position?: number
++          price?: number
++          public_access?: boolean
++        }
++        Relationships: [
++          {
++            foreignKeyName: "event_lots_event_id_fkey"
++            columns: ["event_id"]
++            isOneToOne: false
++            referencedRelation: "events"
++            referencedColumns: ["id"]
++          },
++        ]
++      }
++      event_payment_info: {
++        Row: {
++          card_contact_note: string | null
++          event_id: string
++          payment_link: string | null
++          pix_key: string | null
++          pix_qr_path: string | null
++        }
++        Insert: {
++          card_contact_note?: string | null
++          event_id: string
++          payment_link?: string | null
++          pix_key?: string | null
++          pix_qr_path?: string | null
++        }
++        Update: {
++          card_contact_note?: string | null
++          event_id?: string
++          payment_link?: string | null
++          pix_key?: string | null
++          pix_qr_path?: string | null
++        }
++        Relationships: [
++          {
++            foreignKeyName: "event_payment_info_event_id_fkey"
++            columns: ["event_id"]
++            isOneToOne: false
++            referencedRelation: "events"
++            referencedColumns: ["id"]
++          },
++        ]
++      }
++      event_payments: {
++        Row: {
++          amount: number
++          claimed_at: string | null
++          confirmed_at: string | null
++          confirmed_by: string | null
++          id: string
++          installment_no: number
++          proof_path: string | null
++          registration_id: string
++          status: string
++        }
++        Insert: {
++          amount: number
++          claimed_at?: string | null
++          confirmed_at?: string | null
++          confirmed_by?: string | null
++          id?: string
++          installment_no: number
++          proof_path?: string | null
++          registration_id: string
++          status?: string
++        }
++        Update: {
++          amount?: number
++          claimed_at?: string | null
++          confirmed_at?: string | null
++          confirmed_by?: string | null
++          id?: string
++          installment_no?: number
++          proof_path?: string | null
++          registration_id?: string
++          status?: string
++        }
++        Relationships: [
++          {
++            foreignKeyName: "event_payments_registration_id_fkey"
++            columns: ["registration_id"]
++            isOneToOne: false
++            referencedRelation: "event_registrations"
++            referencedColumns: ["id"]
++          },
++        ]
++      }
++      event_registrations: {
++        Row: {
++          attendee_cpf: string | null
++          attendee_email: string | null
++          attendee_name: string
++          attendee_phone: string | null
++          cancelled_at: string | null
++          created_at: string
++          event_id: string
++          id: string
++          installments: number
++          lot_id: string
++          member_id: string | null
++          quantity: number
++          released_at: string | null
++          released_by: string | null
++          released_manually: boolean
++          status: string
++          total: number
++          unit_price: number
++          user_id: string
++        }
++        Insert: {
++          attendee_cpf?: string | null
++          attendee_email?: string | null
++          attendee_name: string
++          attendee_phone?: string | null
++          cancelled_at?: string | null
++          created_at?: string
++          event_id: string
++          id?: string
++          installments?: number
++          lot_id: string
++          member_id?: string | null
++          quantity: number
++          released_at?: string | null
++          released_by?: string | null
++          released_manually?: boolean
++          status?: string
++          total: number
++          unit_price: number
++          user_id: string
++        }
++        Update: {
++          attendee_cpf?: string | null
++          attendee_email?: string | null
++          attendee_name?: string
++          attendee_phone?: string | null
++          cancelled_at?: string | null
++          created_at?: string
++          event_id?: string
++          id?: string
++          installments?: number
++          lot_id?: string
++          member_id?: string | null
++          quantity?: number
++          released_at?: string | null
++          released_by?: string | null
++          released_manually?: boolean
++          status?: string
++          total?: number
++          unit_price?: number
++          user_id?: string
++        }
++        Relationships: [
++          {
++            foreignKeyName: "event_registrations_event_id_fkey"
++            columns: ["event_id"]
++            isOneToOne: false
++            referencedRelation: "events"
++            referencedColumns: ["id"]
++          },
++          {
++            foreignKeyName: "event_registrations_lot_id_fkey"
++            columns: ["lot_id"]
++            isOneToOne: false
++            referencedRelation: "event_lots"
++            referencedColumns: ["id"]
++          },
++          {
++            foreignKeyName: "event_registrations_member_id_fkey"
++            columns: ["member_id"]
++            isOneToOne: false
++            referencedRelation: "members"
++            referencedColumns: ["id"]
++          },
++        ]
++      }
++      event_tickets: {
++        Row: {
++          checked_in_at: string | null
++          checked_in_by: string | null
++          code: string
++          created_at: string
++          event_id: string
++          holder_name: string
++          id: string
++          registration_id: string
++          seq: number
++          status: string
++        }
++        Insert: {
++          checked_in_at?: string | null
++          checked_in_by?: string | null
++          code: string
++          created_at?: string
++          event_id: string
++          holder_name: string
++          id?: string
++          registration_id: string
++          seq: number
++          status?: string
++        }
++        Update: {
++          checked_in_at?: string | null
++          checked_in_by?: string | null
++          code?: string
++          created_at?: string
++          event_id?: string
++          holder_name?: string
++          id?: string
++          registration_id?: string
++          seq?: number
++          status?: string
++        }
++        Relationships: [
++          {
++            foreignKeyName: "event_tickets_event_id_fkey"
++            columns: ["event_id"]
++            isOneToOne: false
++            referencedRelation: "events"
++            referencedColumns: ["id"]
++          },
++          {
++            foreignKeyName: "event_tickets_registration_id_fkey"
++            columns: ["registration_id"]
++            isOneToOne: false
++            referencedRelation: "event_registrations"
++            referencedColumns: ["id"]
++          },
++        ]
++      }
++      events: {
++        Row: {
++          accepts_card: boolean
++          allow_installments: boolean
++          audience: string
++          created_at: string
++          created_by: string | null
++          description: string | null
++          ends_at: string | null
++          id: string
++          limit_per_person: boolean
++          location: string | null
++          max_installments: number
++          max_per_person: number | null
++          payment_enabled: boolean
++          published: boolean
++          registration_closes_at: string | null
++          registration_opens_at: string | null
++          slug: string
++          starts_at: string
++          title: string
++        }
++        Insert: {
++          accepts_card?: boolean
++          allow_installments?: boolean
++          audience?: string
++          created_at?: string
++          created_by?: string | null
++          description?: string | null
++          ends_at?: string | null
++          id?: string
++          limit_per_person?: boolean
++          location?: string | null
++          max_installments?: number
++          max_per_person?: number | null
++          payment_enabled?: boolean
++          published?: boolean
++          registration_closes_at?: string | null
++          registration_opens_at?: string | null
++          slug: string
++          starts_at: string
++          title: string
++        }
++        Update: {
++          accepts_card?: boolean
++          allow_installments?: boolean
++          audience?: string
++          created_at?: string
++          created_by?: string | null
++          description?: string | null
++          ends_at?: string | null
++          id?: string
++          limit_per_person?: boolean
++          location?: string | null
++          max_installments?: number
++          max_per_person?: number | null
++          payment_enabled?: boolean
++          published?: boolean
++          registration_closes_at?: string | null
++          registration_opens_at?: string | null
++          slug?: string
++          starts_at?: string
++          title?: string
++        }
++        Relationships: []
++      }
+       financial_goals: {
+         Row: {
+           category: string | null
+@@ -642,6 +973,51 @@ export type Database = {
+         Args: { _dept: string; _perm: string; _user_id: string }
+         Returns: boolean
+       }
++      cancel_event_registration: { Args: { _reg: string }; Returns: undefined }
++      checkin_ticket: { Args: { _code: string }; Returns: Json }
++      claim_event_payment: {
++        Args: { _payment: string; _proof_path?: string }
++        Returns: undefined
++      }
++      ensure_visitor_profile: {
++        Args: { _cpf: string; _name: string; _phone: string }
++        Returns: string
++      }
++      event_admin_stats: { Args: { _event: string }; Returns: Json }
++      is_valid_cpf: { Args: { _cpf: string }; Returns: boolean }
++      public_event: { Args: { _slug: string }; Returns: Json }
++      public_events: {
++        Args: never
++        Returns: {
++          audience: string
++          description: string | null
++          ends_at: string | null
++          id: string
++          location: string | null
++          min_price: number | null
++          payment_enabled: boolean
++          registration_closes_at: string | null
++          registration_open: boolean
++          registration_opens_at: string | null
++          slug: string
++          spots_left: number | null
++          starts_at: string
++          title: string
++        }[]
++      }
++      register_for_event: {
++        Args: { _cpf: string; _event: string; _installments?: number; _lot: string; _quantity: number }
++        Returns: string
++      }
++      release_event_registration: { Args: { _reg: string }; Returns: undefined }
++      set_event_payment_status: {
++        Args: { _payment: string; _status: string }
++        Returns: undefined
++      }
++      set_ticket_presence: {
++        Args: { _present: boolean; _ticket: string }
++        Returns: undefined
++      }
+       claim_member: {
+         Args: { _cpf: string; _member: string }
+         Returns: string
+diff --git a/src/lib/church.ts b/src/lib/church.ts
+index dc5070e..489e0df 100644
+--- a/src/lib/church.ts
++++ b/src/lib/church.ts
+@@ -42,6 +42,14 @@ export const PERMISSION_GROUPS: { label: string; perms: { key: string; label: st
+       { key: "manage_departments", label: "Criar departamentos, definir líderes e vincular membros" },
+     ],
+   },
++  {
++    label: "Eventos",
++    perms: [
++      { key: "manage_events", label: "Criar e editar eventos, ver inscrições e gráficos" },
++      { key: "verify_event_payments", label: "Conferir pagamentos, parcelas e liberar ingressos" },
++      { key: "checkin_events", label: "Ler QR code e marcar presença nos eventos" },
++    ],
++  },
+   {
+     label: "Configurações",
+     perms: [{ key: "manage_permissions", label: "Ver usuários e permissões" }],
+diff --git a/src/lib/events.ts b/src/lib/events.ts
+new file mode 100644
+index 0000000..b602876
+--- /dev/null
++++ b/src/lib/events.ts
+@@ -0,0 +1,130 @@
++import type { Json } from "@/integrations/supabase/types";
++
++export const moneyBR = (n: number | string | null | undefined) =>
++  Number(n ?? 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
++
++export const fmtDateTime = (iso: string | null | undefined) =>
++  iso ? new Date(iso).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" }) : "";
++export const fmtDate = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleDateString("pt-BR") : "");
++export const fmtLongDate = (iso: string) =>
++  new Date(iso).toLocaleDateString("pt-BR", { weekday: "long", day: "2-digit", month: "long", year: "numeric" });
++export const fmtTime = (iso: string) => new Date(iso).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
++
++/** Valor para <input type="datetime-local"> (horário local) a partir de um ISO. */
++export function toLocalInput(iso: string | null | undefined) {
++  if (!iso) return "";
++  const d = new Date(iso);
++  const pad = (n: number) => String(n).padStart(2, "0");
++  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
++}
++export const fromLocalInput = (v: string) => (v ? new Date(v).toISOString() : null);
++
++export const cpfDigits = (v: string | null | undefined) => (v ?? "").replace(/\D/g, "");
++export function formatCpf(v: string) {
++  const d = cpfDigits(v).slice(0, 11);
++  return d.replace(/(\d{3})(\d)/, "$1.$2").replace(/(\d{3})(\d)/, "$1.$2").replace(/(\d{3})(\d{1,2})$/, "$1-$2");
++}
++/** Valida os dígitos verificadores do CPF (não consulta a Receita Federal). */
++export function isValidCpf(v: string) {
++  const d = cpfDigits(v);
++  if (d.length !== 11 || /^(\d)\1{10}$/.test(d)) return false;
++  const calc = (len: number) => {
++    let s = 0;
++    for (let i = 0; i < len; i++) s += Number(d[i]) * (len + 1 - i);
++    const r = (s * 10) % 11;
++    return r === 10 ? 0 : r;
++  };
++  return calc(9) === Number(d[9]) && calc(10) === Number(d[10]);
++}
++
++export const slugify = (s: string) =>
++  s
++    .normalize("NFD")
++    .replace(/[\u0300-\u036f]/g, "")
++    .toLowerCase()
++    .replace(/[^a-z0-9]+/g, "-")
++    .replace(/^-+|-+$/g, "")
++    .slice(0, 60);
++
++const ERRORS: Record<string, string> = {
++  login_required: "Entre na sua conta para continuar.",
++  event_not_found: "Evento não encontrado.",
++  registration_closed: "As inscrições deste evento não estão abertas.",
++  lot_not_found: "Lote não encontrado.",
++  lot_closed: "Este lote não está disponível no momento.",
++  profile_required: "Complete seus dados para se inscrever.",
++  members_only: "Este lote é exclusivo para membros.",
++  invalid_quantity: "Quantidade de ingressos inválida.",
++  invalid_cpf: "CPF inválido. Confira os números.",
++  limit_exceeded: "Você já atingiu o limite de inscrições por pessoa neste evento.",
++  sold_out: "As vagas deste lote acabaram (ou não há vagas suficientes para essa quantidade).",
++  invalid_installments: "Número de parcelas não permitido.",
++  cpf_in_use: "Este CPF já está cadastrado em outra conta.",
++  cpf_belongs_to_member: "Este CPF já consta no cadastro de um membro. Escolha “Sou membro” e entre com a conta de membro.",
++  invalid_name: "Digite seu nome completo.",
++  invalid_phone: "Informe um telefone para contato.",
++  cannot_cancel: "Esta inscrição não pode mais ser cancelada por aqui. Fale com a igreja.",
++  payment_closed: "Este pagamento não pode mais ser alterado.",
++  invalid_proof: "Arquivo de comprovante inválido.",
++  registration_already_confirmed: "A inscrição já foi confirmada; não dá para desfazer este pagamento.",
++  registration_cancelled: "Esta inscrição foi cancelada.",
++  not_pending: "Esta inscrição não está aguardando pagamento.",
++  "Acesso negado": "Você não tem permissão para isso.",
++};
++export function eventError(e: unknown) {
++  const msg = e instanceof Error ? e.message : typeof e === "object" && e && "message" in e ? String((e as { message: unknown }).message) : "";
++  if (msg.includes("events_slug_key")) return "Já existe um evento com esse endereço (slug). Mude o nome ou o endereço.";
++  return ERRORS[msg] ?? (msg || "Algo deu errado. Tente novamente.");
++}
++
++export const REGISTRATION_STATUS: Record<string, string> = {
++  pending: "Aguardando pagamento",
++  confirmed: "Confirmada",
++  cancelled: "Cancelada",
++};
++export const PAYMENT_STATUS: Record<string, string> = {
++  pending: "Pendente",
++  claimed: "Aguardando verificação",
++  paid: "Pago",
++};
++export const TICKET_STATUS: Record<string, string> = {
++  valid: "Válido",
++  checked_in: "Presente",
++  cancelled: "Cancelado",
++};
++
++export type PublicLot = {
++  id: string;
++  name: string;
++  price: number;
++  capacity: number | null;
++  spots_left: number | null;
++  public_access: boolean;
++  opens_at: string | null;
++  closes_at: string | null;
++};
++export type PublicEvent = {
++  id: string;
++  slug: string;
++  title: string;
++  description: string | null;
++  location: string | null;
++  starts_at: string;
++  ends_at: string | null;
++  registration_opens_at: string | null;
++  registration_closes_at: string | null;
++  audience: "public" | "members";
++  payment_enabled: boolean;
++  accepts_card: boolean;
++  allow_installments: boolean;
++  max_installments: number;
++  limit_per_person: boolean;
++  max_per_person: number | null;
++};
++export type PublicEventDetail = { event: PublicEvent; lots: PublicLot[] };
++export const asEventDetail = (j: Json | null) => (j ? (j as unknown as PublicEventDetail) : null);
++
++export const lotIsOpen = (l: PublicLot, now = new Date()) =>
++  (!l.opens_at || new Date(l.opens_at) <= now) && (!l.closes_at || new Date(l.closes_at) >= now);
++export const registrationIsOpen = (e: Pick<PublicEvent, "registration_opens_at" | "registration_closes_at">, now = new Date()) =>
++  (!e.registration_opens_at || new Date(e.registration_opens_at) <= now) && (!e.registration_closes_at || new Date(e.registration_closes_at) >= now);
+diff --git a/src/routeTree.gen.ts b/src/routeTree.gen.ts
+index 7e03e06..4075bed 100644
+--- a/src/routeTree.gen.ts
++++ b/src/routeTree.gen.ts
+@@ -15,12 +15,15 @@ import { Route as AuthRouteImport } from './routes/auth'
+ import { Route as ContatoRouteImport } from './routes/contato'
+ import { Route as ContribuicaoRouteImport } from './routes/contribuicao'
+ import { Route as CultosRouteImport } from './routes/cultos'
++import { Route as EventosRouteImport } from './routes/eventos'
+ import { Route as OracaoRouteImport } from './routes/oracao'
+ import { Route as QuemSomosRouteImport } from './routes/quem-somos'
+ import { Route as AuthenticatedPainelRouteImport } from './routes/_authenticated/painel'
+ import { Route as ConviteCodeRouteImport } from './routes/convite.$code'
++import { Route as EventosSlugRouteImport } from './routes/eventos.$slug'
+ import { Route as AuthenticatedPainelIndexRouteImport } from './routes/_authenticated/painel.index'
+ import { Route as AuthenticatedPainelDepartamentosRouteImport } from './routes/_authenticated/painel.departamentos'
++import { Route as AuthenticatedPainelEventosRouteImport } from './routes/_authenticated/painel.eventos'
+ import { Route as AuthenticatedPainelFinanceiroRouteImport } from './routes/_authenticated/painel.financeiro'
+ import { Route as AuthenticatedPainelMembrosRouteImport } from './routes/_authenticated/painel.membros'
+ import { Route as AuthenticatedPainelMeuCadastroRouteImport } from './routes/_authenticated/painel.meu-cadastro'
+@@ -29,6 +32,7 @@ import { Route as AuthenticatedPainelPermissoesRouteImport } from './routes/_aut
+ import { Route as AuthenticatedPainelRelatorioRouteImport } from './routes/_authenticated/painel.relatorio'
+ import { Route as AuthenticatedPainelSiteRouteImport } from './routes/_authenticated/painel.site'
+ import { Route as AuthenticatedPainelDepartamentoIdRouteImport } from './routes/_authenticated/painel.departamento.$id'
++import { Route as AuthenticatedPainelEventoIdRouteImport } from './routes/_authenticated/painel.evento.$id'
+ import { Route as AuthenticatedPainelMembroIdRouteImport } from './routes/_authenticated/painel.membro.$id'
+ 
+ const IndexRoute = IndexRouteImport.update({
+@@ -60,6 +64,11 @@ const CultosRoute = CultosRouteImport.update({
+   path: '/cultos',
+   getParentRoute: () => rootRouteImport,
+ } as any)
++const EventosRoute = EventosRouteImport.update({
++  id: '/eventos',
++  path: '/eventos',
++  getParentRoute: () => rootRouteImport,
++} as any)
+ const OracaoRoute = OracaoRouteImport.update({
+   id: '/oracao',
+   path: '/oracao',
+@@ -80,6 +89,11 @@ const ConviteCodeRoute = ConviteCodeRouteImport.update({
+   path: '/convite/$code',
+   getParentRoute: () => rootRouteImport,
+ } as any)
++const EventosSlugRoute = EventosSlugRouteImport.update({
++  id: '/$slug',
++  path: '/$slug',
++  getParentRoute: () => EventosRoute,
++} as any)
+ const AuthenticatedPainelIndexRoute =
+   AuthenticatedPainelIndexRouteImport.update({
+     id: '/',
+@@ -92,6 +106,12 @@ const AuthenticatedPainelDepartamentosRoute =
+     path: '/departamentos',
+     getParentRoute: () => AuthenticatedPainelRoute,
+   } as any)
++const AuthenticatedPainelEventosRoute =
++  AuthenticatedPainelEventosRouteImport.update({
++    id: '/eventos',
++    path: '/eventos',
++    getParentRoute: () => AuthenticatedPainelRoute,
++  } as any)
+ const AuthenticatedPainelFinanceiroRoute =
+   AuthenticatedPainelFinanceiroRouteImport.update({
+     id: '/financeiro',
+@@ -139,6 +159,12 @@ const AuthenticatedPainelDepartamentoIdRoute =
+     path: '/departamento/$id',
+     getParentRoute: () => AuthenticatedPainelRoute,
+   } as any)
++const AuthenticatedPainelEventoIdRoute =
++  AuthenticatedPainelEventoIdRouteImport.update({
++    id: '/evento/$id',
++    path: '/evento/$id',
++    getParentRoute: () => AuthenticatedPainelRoute,
++  } as any)
+ const AuthenticatedPainelMembroIdRoute =
+   AuthenticatedPainelMembroIdRouteImport.update({
+     id: '/membro/$id',
+@@ -152,11 +178,14 @@ export interface FileRoutesByFullPath {
+   '/contato': typeof ContatoRoute
+   '/contribuicao': typeof ContribuicaoRoute
+   '/cultos': typeof CultosRoute
++  '/eventos': typeof EventosRouteWithChildren
+   '/oracao': typeof OracaoRoute
+   '/quem-somos': typeof QuemSomosRoute
+   '/painel': typeof AuthenticatedPainelRouteWithChildren
+   '/convite/$code': typeof ConviteCodeRoute
++  '/eventos/$slug': typeof EventosSlugRoute
+   '/painel/departamentos': typeof AuthenticatedPainelDepartamentosRoute
++  '/painel/eventos': typeof AuthenticatedPainelEventosRoute
+   '/painel/financeiro': typeof AuthenticatedPainelFinanceiroRoute
+   '/painel/membros': typeof AuthenticatedPainelMembrosRoute
+   '/painel/meu-cadastro': typeof AuthenticatedPainelMeuCadastroRoute
+@@ -166,6 +195,7 @@ export interface FileRoutesByFullPath {
+   '/painel/site': typeof AuthenticatedPainelSiteRoute
+   '/painel/': typeof AuthenticatedPainelIndexRoute
+   '/painel/departamento/$id': typeof AuthenticatedPainelDepartamentoIdRoute
++  '/painel/evento/$id': typeof AuthenticatedPainelEventoIdRoute
+   '/painel/membro/$id': typeof AuthenticatedPainelMembroIdRoute
+ }
+ export interface FileRoutesByTo {
+@@ -174,10 +204,13 @@ export interface FileRoutesByTo {
+   '/contato': typeof ContatoRoute
+   '/contribuicao': typeof ContribuicaoRoute
+   '/cultos': typeof CultosRoute
++  '/eventos': typeof EventosRouteWithChildren
+   '/oracao': typeof OracaoRoute
+   '/quem-somos': typeof QuemSomosRoute
+   '/convite/$code': typeof ConviteCodeRoute
++  '/eventos/$slug': typeof EventosSlugRoute
+   '/painel/departamentos': typeof AuthenticatedPainelDepartamentosRoute
++  '/painel/eventos': typeof AuthenticatedPainelEventosRoute
+   '/painel/financeiro': typeof AuthenticatedPainelFinanceiroRoute
+   '/painel/membros': typeof AuthenticatedPainelMembrosRoute
+   '/painel/meu-cadastro': typeof AuthenticatedPainelMeuCadastroRoute
+@@ -187,6 +220,7 @@ export interface FileRoutesByTo {
+   '/painel/site': typeof AuthenticatedPainelSiteRoute
+   '/painel': typeof AuthenticatedPainelIndexRoute
+   '/painel/departamento/$id': typeof AuthenticatedPainelDepartamentoIdRoute
++  '/painel/evento/$id': typeof AuthenticatedPainelEventoIdRoute
+   '/painel/membro/$id': typeof AuthenticatedPainelMembroIdRoute
+ }
+ export interface FileRoutesById {
+@@ -197,11 +231,14 @@ export interface FileRoutesById {
+   '/contato': typeof ContatoRoute
+   '/contribuicao': typeof ContribuicaoRoute
+   '/cultos': typeof CultosRoute
++  '/eventos': typeof EventosRouteWithChildren
+   '/oracao': typeof OracaoRoute
+   '/quem-somos': typeof QuemSomosRoute
+   '/_authenticated/painel': typeof AuthenticatedPainelRouteWithChildren
+   '/convite/$code': typeof ConviteCodeRoute
++  '/eventos/$slug': typeof EventosSlugRoute
+   '/_authenticated/painel/departamentos': typeof AuthenticatedPainelDepartamentosRoute
++  '/_authenticated/painel/eventos': typeof AuthenticatedPainelEventosRoute
+   '/_authenticated/painel/financeiro': typeof AuthenticatedPainelFinanceiroRoute
+   '/_authenticated/painel/membros': typeof AuthenticatedPainelMembrosRoute
+   '/_authenticated/painel/meu-cadastro': typeof AuthenticatedPainelMeuCadastroRoute
+@@ -211,6 +248,7 @@ export interface FileRoutesById {
+   '/_authenticated/painel/site': typeof AuthenticatedPainelSiteRoute
+   '/_authenticated/painel/': typeof AuthenticatedPainelIndexRoute
+   '/_authenticated/painel/departamento/$id': typeof AuthenticatedPainelDepartamentoIdRoute
++  '/_authenticated/painel/evento/$id': typeof AuthenticatedPainelEventoIdRoute
+   '/_authenticated/painel/membro/$id': typeof AuthenticatedPainelMembroIdRoute
+ }
+ export interface FileRouteTypes {
+@@ -221,11 +259,14 @@ export interface FileRouteTypes {
+     | '/contato'
+     | '/contribuicao'
+     | '/cultos'
++    | '/eventos'
+     | '/oracao'
+     | '/quem-somos'
+     | '/painel'
+     | '/convite/$code'
++    | '/eventos/$slug'
+     | '/painel/departamentos'
++    | '/painel/eventos'
+     | '/painel/financeiro'
+     | '/painel/membros'
+     | '/painel/meu-cadastro'
+@@ -235,6 +276,7 @@ export interface FileRouteTypes {
+     | '/painel/site'
+     | '/painel/'
+     | '/painel/departamento/$id'
++    | '/painel/evento/$id'
+     | '/painel/membro/$id'
+   fileRoutesByTo: FileRoutesByTo
+   to:
+@@ -243,10 +285,13 @@ export interface FileRouteTypes {
+     | '/contato'
+     | '/contribuicao'
+     | '/cultos'
++    | '/eventos'
+     | '/oracao'
+     | '/quem-somos'
+     | '/convite/$code'
++    | '/eventos/$slug'
+     | '/painel/departamentos'
++    | '/painel/eventos'
+     | '/painel/financeiro'
+     | '/painel/membros'
+     | '/painel/meu-cadastro'
+@@ -256,6 +301,7 @@ export interface FileRouteTypes {
+     | '/painel/site'
+     | '/painel'
+     | '/painel/departamento/$id'
++    | '/painel/evento/$id'
+     | '/painel/membro/$id'
+   id:
+     | '__root__'
+@@ -265,11 +311,14 @@ export interface FileRouteTypes {
+     | '/contato'
+     | '/contribuicao'
+     | '/cultos'
++    | '/eventos'
+     | '/oracao'
+     | '/quem-somos'
+     | '/_authenticated/painel'
+     | '/convite/$code'
++    | '/eventos/$slug'
+     | '/_authenticated/painel/departamentos'
++    | '/_authenticated/painel/eventos'
+     | '/_authenticated/painel/financeiro'
+     | '/_authenticated/painel/membros'
+     | '/_authenticated/painel/meu-cadastro'
+@@ -279,6 +328,7 @@ export interface FileRouteTypes {
+     | '/_authenticated/painel/site'
+     | '/_authenticated/painel/'
+     | '/_authenticated/painel/departamento/$id'
++    | '/_authenticated/painel/evento/$id'
+     | '/_authenticated/painel/membro/$id'
+   fileRoutesById: FileRoutesById
+ }
+@@ -289,6 +339,7 @@ export interface RootRouteChildren {
+   ContatoRoute: typeof ContatoRoute
+   ContribuicaoRoute: typeof ContribuicaoRoute
+   CultosRoute: typeof CultosRoute
++  EventosRoute: typeof EventosRouteWithChildren
+   OracaoRoute: typeof OracaoRoute
+   QuemSomosRoute: typeof QuemSomosRoute
+   ConviteCodeRoute: typeof ConviteCodeRoute
+@@ -338,6 +389,13 @@ declare module '@tanstack/react-router' {
+       preLoaderRoute: typeof CultosRouteImport
+       parentRoute: typeof rootRouteImport
+     }
++    '/eventos': {
++      id: '/eventos'
++      path: '/eventos'
++      fullPath: '/eventos'
++      preLoaderRoute: typeof EventosRouteImport
++      parentRoute: typeof rootRouteImport
++    }
+     '/oracao': {
+       id: '/oracao'
+       path: '/oracao'
+@@ -366,6 +424,13 @@ declare module '@tanstack/react-router' {
+       preLoaderRoute: typeof ConviteCodeRouteImport
+       parentRoute: typeof rootRouteImport
+     }
++    '/eventos/$slug': {
++      id: '/eventos/$slug'
++      path: '/$slug'
++      fullPath: '/eventos/$slug'
++      preLoaderRoute: typeof EventosSlugRouteImport
++      parentRoute: typeof EventosRoute
++    }
+     '/_authenticated/painel/': {
+       id: '/_authenticated/painel/'
+       path: '/'
+@@ -380,6 +445,13 @@ declare module '@tanstack/react-router' {
+       preLoaderRoute: typeof AuthenticatedPainelDepartamentosRouteImport
+       parentRoute: typeof AuthenticatedPainelRoute
+     }
++    '/_authenticated/painel/eventos': {
++      id: '/_authenticated/painel/eventos'
++      path: '/eventos'
++      fullPath: '/painel/eventos'
++      preLoaderRoute: typeof AuthenticatedPainelEventosRouteImport
++      parentRoute: typeof AuthenticatedPainelRoute
++    }
+     '/_authenticated/painel/financeiro': {
+       id: '/_authenticated/painel/financeiro'
+       path: '/financeiro'
+@@ -436,6 +508,13 @@ declare module '@tanstack/react-router' {
+       preLoaderRoute: typeof AuthenticatedPainelDepartamentoIdRouteImport
+       parentRoute: typeof AuthenticatedPainelRoute
+     }
++    '/_authenticated/painel/evento/$id': {
++      id: '/_authenticated/painel/evento/$id'
++      path: '/evento/$id'
++      fullPath: '/painel/evento/$id'
++      preLoaderRoute: typeof AuthenticatedPainelEventoIdRouteImport
++      parentRoute: typeof AuthenticatedPainelRoute
++    }
+     '/_authenticated/painel/membro/$id': {
+       id: '/_authenticated/painel/membro/$id'
+       path: '/membro/$id'
+@@ -448,6 +527,7 @@ declare module '@tanstack/react-router' {
+ 
+ interface AuthenticatedPainelRouteChildren {
+   AuthenticatedPainelDepartamentosRoute: typeof AuthenticatedPainelDepartamentosRoute
++  AuthenticatedPainelEventosRoute: typeof AuthenticatedPainelEventosRoute
+   AuthenticatedPainelFinanceiroRoute: typeof AuthenticatedPainelFinanceiroRoute
+   AuthenticatedPainelMembrosRoute: typeof AuthenticatedPainelMembrosRoute
+   AuthenticatedPainelMeuCadastroRoute: typeof AuthenticatedPainelMeuCadastroRoute
+@@ -457,11 +537,13 @@ interface AuthenticatedPainelRouteChildren {
+   AuthenticatedPainelSiteRoute: typeof AuthenticatedPainelSiteRoute
+   AuthenticatedPainelIndexRoute: typeof AuthenticatedPainelIndexRoute
+   AuthenticatedPainelDepartamentoIdRoute: typeof AuthenticatedPainelDepartamentoIdRoute
++  AuthenticatedPainelEventoIdRoute: typeof AuthenticatedPainelEventoIdRoute
+   AuthenticatedPainelMembroIdRoute: typeof AuthenticatedPainelMembroIdRoute
+ }
+ 
+ const AuthenticatedPainelRouteChildren: AuthenticatedPainelRouteChildren = {
+   AuthenticatedPainelDepartamentosRoute: AuthenticatedPainelDepartamentosRoute,
++  AuthenticatedPainelEventosRoute: AuthenticatedPainelEventosRoute,
+   AuthenticatedPainelFinanceiroRoute: AuthenticatedPainelFinanceiroRoute,
+   AuthenticatedPainelMembrosRoute: AuthenticatedPainelMembrosRoute,
+   AuthenticatedPainelMeuCadastroRoute: AuthenticatedPainelMeuCadastroRoute,
+@@ -472,6 +554,7 @@ const AuthenticatedPainelRouteChildren: AuthenticatedPainelRouteChildren = {
+   AuthenticatedPainelIndexRoute: AuthenticatedPainelIndexRoute,
+   AuthenticatedPainelDepartamentoIdRoute:
+     AuthenticatedPainelDepartamentoIdRoute,
++  AuthenticatedPainelEventoIdRoute: AuthenticatedPainelEventoIdRoute,
+   AuthenticatedPainelMembroIdRoute: AuthenticatedPainelMembroIdRoute,
+ }
+ 
+@@ -489,6 +572,17 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
+ const AuthenticatedRouteRouteWithChildren =
+   AuthenticatedRouteRoute._addFileChildren(AuthenticatedRouteRouteChildren)
+ 
++interface EventosRouteChildren {
++  EventosSlugRoute: typeof EventosSlugRoute
++}
++
++const EventosRouteChildren: EventosRouteChildren = {
++  EventosSlugRoute: EventosSlugRoute,
++}
++
++const EventosRouteWithChildren =
++  EventosRoute._addFileChildren(EventosRouteChildren)
++
+ const rootRouteChildren: RootRouteChildren = {
+   IndexRoute: IndexRoute,
+   AuthenticatedRouteRoute: AuthenticatedRouteRouteWithChildren,
+@@ -496,6 +590,7 @@ const rootRouteChildren: RootRouteChildren = {
+   ContatoRoute: ContatoRoute,
+   ContribuicaoRoute: ContribuicaoRoute,
+   CultosRoute: CultosRoute,
++  EventosRoute: EventosRouteWithChildren,
+   OracaoRoute: OracaoRoute,
+   QuemSomosRoute: QuemSomosRoute,
+   ConviteCodeRoute: ConviteCodeRoute,
+diff --git a/src/routes/_authenticated/painel.evento.$id.tsx b/src/routes/_authenticated/painel.evento.$id.tsx
+new file mode 100644
+index 0000000..3f2263f
+--- /dev/null
++++ b/src/routes/_authenticated/painel.evento.$id.tsx
+@@ -0,0 +1,504 @@
++import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
++import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
++import { useState } from "react";
++import { toast } from "sonner";
++import { ArrowLeft, Camera, CameraOff, Download, ExternalLink } from "lucide-react";
++import { Bar, BarChart, CartesianGrid, Cell, Legend, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
++import { supabase } from "@/integrations/supabase/client";
++import { useAccess } from "@/hooks/use-access";
++import { Badge } from "@/components/ui/badge";
++import { Button } from "@/components/ui/button";
++import { Input } from "@/components/ui/input";
++import { Label } from "@/components/ui/label";
++import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
++import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
++import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
++import { EventForm, draftFrom } from "@/components/events/EventForm";
++import { QrScanner } from "@/components/events/QrScanner";
++import { downloadXls } from "@/lib/export";
++import { eventError, fmtDateTime, moneyBR, PAYMENT_STATUS, REGISTRATION_STATUS, TICKET_STATUS } from "@/lib/events";
++import { siteMeta } from "@/lib/site-query";
++import type { Tables } from "@/integrations/supabase/types";
++
++export const Route = createFileRoute("/_authenticated/painel/evento/$id")({
++  head: () => siteMeta("Evento — Comunidade Aava", "Gestão do evento."),
++  component: EventAdmin,
++});
++
++type Stats = {
++  registrations: number; tickets_total: number; checked_in: number;
++  expected_total: number; paid_total: number; claimed_total: number;
++  lots: { name: string; capacity: number | null; sold: number }[];
++};
++
++function EventAdmin() {
++  const { id } = Route.useParams();
++  const qc = useQueryClient();
++  const navigate = useNavigate();
++  const { can, isLoading } = useAccess();
++  const canManage = can("manage_events");
++  const canVerify = canManage || can("verify_event_payments");
++  const canCheckin = canManage || can("checkin_events");
++  const allowed = canManage || canVerify || canCheckin;
++
++  const event = useQuery({
++    queryKey: ["admin-event", id],
++    enabled: allowed,
++    queryFn: async () => {
++      const [e, lots, info] = await Promise.all([
++        supabase.from("events").select("*").eq("id", id).maybeSingle(),
++        supabase.from("event_lots").select("*").eq("event_id", id).order("position"),
++        supabase.from("event_payment_info").select("*").eq("event_id", id).maybeSingle(),
++      ]);
++      return e.data ? { event: e.data, lots: lots.data ?? [], info: info.data } : null;
++    },
++  });
++  const stats = useQuery({
++    queryKey: ["admin-event-stats", id],
++    enabled: allowed,
++    queryFn: async () => {
++      const { data, error } = await supabase.rpc("event_admin_stats", { _event: id });
++      if (error) throw error;
++      return data as unknown as Stats;
++    },
++  });
++  const refreshAll = () => {
++    qc.invalidateQueries({ queryKey: ["admin-event-stats", id] });
++    qc.invalidateQueries({ queryKey: ["admin-regs", id] });
++    qc.invalidateQueries({ queryKey: ["admin-tickets", id] });
++    qc.invalidateQueries({ queryKey: ["public-events"] });
++  };
++
++  const del = useMutation({
++    mutationFn: async () => {
++      const { error } = await supabase.from("events").delete().eq("id", id);
++      if (error) throw error;
++    },
++    onSuccess: () => {
++      toast.success("Evento excluído");
++      qc.invalidateQueries({ queryKey: ["admin-events"] });
++      qc.invalidateQueries({ queryKey: ["public-events"] });
++      navigate({ to: "/painel/eventos" });
++    },
++    onError: (e) => toast.error(eventError(e)),
++  });
++
++  if (isLoading || event.isLoading) return null;
++  if (!allowed) return <p className="text-muted-foreground">Você não tem acesso a esta área.</p>;
++  const data = event.data;
++  if (!data) {
++    return (
++      <div className="space-y-4">
++        <Link to="/painel/eventos" className="inline-flex items-center gap-2 text-sm text-muted-foreground"><ArrowLeft className="h-4 w-4" /> Voltar</Link>
++        <p className="text-muted-foreground">Evento não encontrado.</p>
++      </div>
++    );
++  }
++  const e = data.event;
++
++  return (
++    <div>
++      <Link to="/painel/eventos" className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"><ArrowLeft className="h-4 w-4" /> Voltar para eventos</Link>
++      <div className="mt-4 flex flex-wrap items-start justify-between gap-3">
++        <div>
++          <h1 className="text-3xl text-foreground">{e.title}</h1>
++          <p className="mt-1 text-sm text-muted-foreground">{fmtDateTime(e.starts_at)}{e.location ? ` · ${e.location}` : ""}</p>
++          <div className="mt-2 flex flex-wrap gap-2">
++            <Badge variant={e.published ? "default" : "secondary"}>{e.published ? "Publicado" : "Rascunho"}</Badge>
++            {e.audience === "members" && <Badge variant="outline">Só membros</Badge>}
++          </div>
++        </div>
++        {e.published && (
++          <Button asChild variant="outline" size="sm"><Link to="/eventos/$slug" params={{ slug: e.slug }}><ExternalLink className="h-4 w-4" /> Ver página pública</Link></Button>
++        )}
++      </div>
++
++      <Tabs defaultValue="resumo" className="mt-6">
++        <TabsList className="flex-wrap">
++          <TabsTrigger value="resumo">Resumo</TabsTrigger>
++          {canVerify && <TabsTrigger value="inscricoes">Inscrições</TabsTrigger>}
++          {canCheckin && <TabsTrigger value="checkin">Check-in</TabsTrigger>}
++          {canManage && <TabsTrigger value="editar">Editar</TabsTrigger>}
++        </TabsList>
++
++        <TabsContent value="resumo"><Summary stats={stats.data} loading={stats.isLoading} /></TabsContent>
++        {canVerify && <TabsContent value="inscricoes"><Registrations eventId={id} title={e.title} onChange={refreshAll} /></TabsContent>}
++        {canCheckin && <TabsContent value="checkin"><CheckIn eventId={id} onChange={refreshAll} /></TabsContent>}
++        {canManage && (
++          <TabsContent value="editar">
++            <div className="mt-4 max-w-2xl">
++              <EventForm key={e.id + (event.dataUpdatedAt ?? 0)} initial={draftFrom(e, data.lots, data.info)} onSaved={() => event.refetch()} />
++              <div className="mt-10 rounded-xl border border-destructive/30 p-4">
++                <p className="text-sm font-medium text-foreground">Excluir evento</p>
++                <p className="mt-1 text-xs text-muted-foreground">
++                  {(stats.data?.registrations ?? 0) > 0
++                    ? "Este evento já tem inscrições. Para tirá-lo do site, desmarque “Publicar evento” em vez de excluir."
++                    : "Remove o evento e seus lotes. Só é possível enquanto não houver inscrições."}
++                </p>
++                <Button className="mt-3" variant="outline" disabled={(stats.data?.registrations ?? 0) > 0 || del.isPending} onClick={() => confirm("Excluir este evento?") && del.mutate()}>Excluir evento</Button>
++              </div>
++            </div>
++          </TabsContent>
++        )}
++      </Tabs>
++    </div>
++  );
++}
++
++/* ------------------------------ Resumo + gráficos ------------------------------ */
++function Summary({ stats, loading }: { stats: Stats | undefined; loading: boolean }) {
++  if (loading || !stats) return <p className="mt-4 text-muted-foreground">Carregando...</p>;
++  const pct = (a: number, b: number) => (b > 0 ? Math.round((a / b) * 100) : 0);
++  const attendance = pct(stats.checked_in, stats.tickets_total);
++  const paidPct = pct(stats.paid_total, stats.expected_total);
++  const pending = Math.max(0, stats.expected_total - stats.paid_total - stats.claimed_total);
++  const attendanceData = [
++    { name: "Presentes", value: stats.checked_in },
++    { name: "Ainda não compareceram", value: Math.max(0, stats.tickets_total - stats.checked_in) },
++  ];
++  const payData = [{ name: "Pagamentos", Pago: stats.paid_total, "Aguardando verificação": stats.claimed_total, Pendente: pending }];
++
++  return (
++    <div className="mt-4 space-y-6">
++      <div className="grid gap-4 sm:grid-cols-3">
++        {[["Inscrições", stats.registrations], ["Ingressos emitidos", stats.tickets_total], ["Presentes", stats.checked_in]].map(([l, v]) => (
++          <div key={String(l)} className="rounded-2xl border bg-card p-5"><p className="text-xs text-muted-foreground">{l}</p><p className="mt-1 text-3xl font-semibold text-foreground">{v}</p></div>
++        ))}
++      </div>
++
++      <div className="grid gap-6 lg:grid-cols-2">
++        <div className="rounded-2xl border bg-card p-5">
++          <p className="font-semibold text-foreground">Quem compareceu</p>
++          <p className="text-sm text-muted-foreground">{stats.checked_in} de {stats.tickets_total} ingressos ({attendance}%)</p>
++          <div className="mt-2 h-56">
++            {stats.tickets_total === 0 ? (
++              <p className="grid h-full place-items-center text-sm text-muted-foreground">Ainda não há ingressos emitidos.</p>
++            ) : (
++              <ResponsiveContainer>
++                <PieChart>
++                  <Pie data={attendanceData} dataKey="value" nameKey="name" innerRadius={55} outerRadius={85} paddingAngle={2}>
++                    <Cell fill="var(--primary)" />
++                    <Cell fill="var(--muted-foreground)" fillOpacity={0.35} />
++                  </Pie>
++                  <Tooltip />
++                  <Legend />
++                </PieChart>
++              </ResponsiveContainer>
++            )}
++          </div>
++        </div>
++
++        <div className="rounded-2xl border bg-card p-5">
++          <p className="font-semibold text-foreground">Pagamentos</p>
++          {stats.expected_total === 0 ? (
++            <p className="mt-2 text-sm text-muted-foreground">Nenhuma inscrição com pagamento ainda.</p>
++          ) : (
++            <>
++              <p className="text-sm text-muted-foreground">Pago {moneyBR(stats.paid_total)} de {moneyBR(stats.expected_total)} ({paidPct}%)</p>
++              <div className="mt-2 h-44">
++                <ResponsiveContainer>
++                  <BarChart data={payData} layout="vertical" margin={{ left: 0, right: 16 }}>
++                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" horizontal={false} />
++                    <XAxis type="number" domain={[0, stats.expected_total]} tickFormatter={(v: number) => moneyBR(v)} fontSize={11} stroke="var(--muted-foreground)" />
++                    <YAxis type="category" dataKey="name" hide />
++                    <Tooltip formatter={(v: number) => moneyBR(v)} />
++                    <Legend />
++                    <Bar dataKey="Pago" stackId="a" fill="var(--primary)" />
++                    <Bar dataKey="Aguardando verificação" stackId="a" fill="#f59e0b" />
++                    <Bar dataKey="Pendente" stackId="a" fill="var(--muted-foreground)" fillOpacity={0.35} />
++                  </BarChart>
++                </ResponsiveContainer>
++              </div>
++            </>
++          )}
++        </div>
++      </div>
++
++      {stats.lots.length > 0 && (
++        <div className="rounded-2xl border bg-card p-5">
++          <p className="font-semibold text-foreground">Vagas por lote</p>
++          <div className="mt-2 h-60">
++            <ResponsiveContainer>
++              <BarChart data={stats.lots.map((l) => ({ name: l.name, Vendidas: l.sold, Restantes: l.capacity === null ? 0 : Math.max(0, l.capacity - l.sold) }))}>
++                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
++                <XAxis dataKey="name" fontSize={12} stroke="var(--muted-foreground)" />
++                <YAxis allowDecimals={false} fontSize={12} stroke="var(--muted-foreground)" />
++                <Tooltip />
++                <Legend />
++                <Bar dataKey="Vendidas" stackId="v" fill="var(--primary)" />
++                <Bar dataKey="Restantes" stackId="v" fill="var(--muted-foreground)" fillOpacity={0.35} />
++              </BarChart>
++            </ResponsiveContainer>
++          </div>
++        </div>
++      )}
++    </div>
++  );
++}
++
++/* ------------------------------ Inscrições ------------------------------ */
++function Registrations({ eventId, title, onChange }: { eventId: string; title: string; onChange: () => void }) {
++  const [search, setSearch] = useState("");
++  const [filter, setFilter] = useState("todas");
++  const [openId, setOpenId] = useState<string | null>(null);
++  const regs = useQuery({
++    queryKey: ["admin-regs", eventId],
++    queryFn: async () => {
++      const { data, error } = await supabase
++        .from("event_registrations")
++        .select("*, event_lots(name), event_payments(*), event_tickets(*)")
++        .eq("event_id", eventId)
++        .order("created_at", { ascending: false });
++      if (error) throw error;
++      return data ?? [];
++    },
++  });
++  const list = (regs.data ?? []).filter((r) => {
++    const hasClaimed = (r.event_payments ?? []).some((p) => p.status === "claimed");
++    if (filter === "aguardando" && !(r.status === "pending" && hasClaimed)) return false;
++    if (filter === "pendentes" && r.status !== "pending") return false;
++    if (filter === "confirmadas" && r.status !== "confirmed") return false;
++    if (filter === "canceladas" && r.status !== "cancelled") return false;
++    return !search || r.attendee_name.toLowerCase().includes(search.toLowerCase()) || (r.attendee_cpf ?? "").includes(search.replace(/\D/g, "") || "§");
++  });
++  const open = (regs.data ?? []).find((r) => r.id === openId) ?? null;
++
++  function exportXls() {
++    const head = ["Nome", "CPF", "Telefone", "E-mail", "Lote", "Quantidade", "Total (R$)", "Parcelas pagas", "Situação", "Inscrito em"];
++    const rows = list.map((r) => [
++      r.attendee_name, r.attendee_cpf ?? "", r.attendee_phone ?? "", r.attendee_email ?? "", r.event_lots?.name ?? "", r.quantity, Number(r.total),
++      `${(r.event_payments ?? []).filter((p) => p.status === "paid").length}/${(r.event_payments ?? []).length}`,
++      REGISTRATION_STATUS[r.status] ?? r.status, fmtDateTime(r.created_at),
++    ]);
++    downloadXls(`inscricoes-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`, [head, ...rows], "Inscrições");
++  }
++
++  return (
++    <div className="mt-4">
++      <div className="flex flex-wrap items-end gap-3">
++        <div className="space-y-1.5"><Label>Buscar</Label><Input placeholder="Nome ou CPF" value={search} onChange={(e) => setSearch(e.target.value)} className="w-56" /></div>
++        <div className="space-y-1.5">
++          <Label>Situação</Label>
++          <Select value={filter} onValueChange={setFilter}>
++            <SelectTrigger className="w-52"><SelectValue /></SelectTrigger>
++            <SelectContent>
++              <SelectItem value="todas">Todas</SelectItem>
++              <SelectItem value="aguardando">Aguardando verificação</SelectItem>
++              <SelectItem value="pendentes">Aguardando pagamento</SelectItem>
++              <SelectItem value="confirmadas">Confirmadas</SelectItem>
++              <SelectItem value="canceladas">Canceladas</SelectItem>
++            </SelectContent>
++          </Select>
++        </div>
++        <Button variant="outline" onClick={exportXls} className="ml-auto"><Download className="h-4 w-4" /> XLS</Button>
++      </div>
++
++      <div className="mt-4 overflow-x-auto rounded-2xl border bg-card">
++        <table className="w-full text-sm">
++          <thead className="border-b text-left text-muted-foreground">
++            <tr><th className="p-4 font-medium">Nome</th><th className="p-4 font-medium">Lote</th><th className="p-4 font-medium">Total</th><th className="p-4 font-medium">Pagamento</th><th className="p-4 font-medium">Situação</th><th className="p-4" /></tr>
++          </thead>
++          <tbody>
++            {regs.isLoading && <tr><td className="p-4 text-muted-foreground" colSpan={6}>Carregando...</td></tr>}
++            {!regs.isLoading && list.length === 0 && <tr><td className="p-6 text-center text-muted-foreground" colSpan={6}>Nenhuma inscrição encontrada.</td></tr>}
++            {list.map((r) => {
++              const pays = r.event_payments ?? [];
++              const paid = pays.filter((p) => p.status === "paid").length;
++              const claimed = pays.filter((p) => p.status === "claimed").length;
++              return (
++                <tr key={r.id} className="border-b last:border-0">
++                  <td className="p-4"><p className="font-medium text-foreground">{r.attendee_name}</p><p className="text-xs text-muted-foreground">{r.attendee_phone}</p></td>
++                  <td className="p-4 text-muted-foreground">{r.event_lots?.name} × {r.quantity}</td>
++                  <td className="p-4 text-foreground">{r.total > 0 ? moneyBR(r.total) : "Gratuito"}</td>
++                  <td className="p-4 text-muted-foreground">
++                    {pays.length === 0 ? "—" : `${paid}/${pays.length} pagas`}
++                    {claimed > 0 && r.status === "pending" && <Badge className="ml-2" variant="outline">{claimed} p/ verificar</Badge>}
++                  </td>
++                  <td className="p-4"><Badge variant={r.status === "confirmed" ? "default" : "secondary"}>{REGISTRATION_STATUS[r.status] ?? r.status}</Badge></td>
++                  <td className="p-4 text-right"><Button size="sm" variant="outline" onClick={() => setOpenId(r.id)}>Gerenciar</Button></td>
++                </tr>
++              );
++            })}
++          </tbody>
++        </table>
++      </div>
++
++      <Dialog open={!!open} onOpenChange={(o) => !o && setOpenId(null)}>
++        <DialogContent className="max-h-[90vh] max-w-xl overflow-y-auto">
++          {open && <RegistrationDetail reg={open} onChange={() => { regs.refetch(); onChange(); }} />}
++        </DialogContent>
++      </Dialog>
++    </div>
++  );
++}
++
++type RegRow = Tables<"event_registrations"> & {
++  event_lots: { name: string } | null;
++  event_payments: Tables<"event_payments">[] | null;
++  event_tickets: Tables<"event_tickets">[] | null;
++};
++
++function RegistrationDetail({ reg, onChange }: { reg: RegRow; onChange: () => void }) {
++  const pays = [...(reg.event_payments ?? [])].sort((a, b) => a.installment_no - b.installment_no);
++  const tickets = [...(reg.event_tickets ?? [])].sort((a, b) => a.seq - b.seq);
++  const run = useMutation({
++    mutationFn: async (fn: () => PromiseLike<{ error: { message: string } | null }>) => {
++      const { error } = await fn();
++      if (error) throw new Error(error.message);
++    },
++    onSuccess: () => { toast.success("Atualizado"); onChange(); },
++    onError: (e) => toast.error(eventError(e)),
++  });
++  async function openProof(path: string) {
++    const { data } = await supabase.storage.from("event-proofs").createSignedUrl(path, 300);
++    if (data?.signedUrl) window.open(data.signedUrl, "_blank", "noopener");
++  }
++  return (
++    <>
++      <DialogHeader><DialogTitle>{reg.attendee_name}</DialogTitle></DialogHeader>
++      <div className="space-y-5 text-sm">
++        <div className="grid gap-1 text-muted-foreground">
++          <p>{reg.event_lots?.name} × {reg.quantity} · {reg.total > 0 ? moneyBR(reg.total) : "Gratuito"}</p>
++          <p>CPF: {reg.attendee_cpf || "—"} · Tel.: {reg.attendee_phone || "—"}</p>
++          <p>{reg.attendee_email}</p>
++          <p>Inscrito em {fmtDateTime(reg.created_at)}{reg.released_manually ? " · ingresso liberado manualmente" : ""}</p>
++          <p><Badge variant={reg.status === "confirmed" ? "default" : "secondary"}>{REGISTRATION_STATUS[reg.status] ?? reg.status}</Badge></p>
++        </div>
++
++        {pays.length > 0 && (
++          <div className="divide-y rounded-xl border">
++            {pays.map((p) => (
++              <div key={p.id} className="flex flex-wrap items-center justify-between gap-3 p-3">
++                <div>
++                  <p className="font-medium text-foreground">{pays.length > 1 ? `Parcela ${p.installment_no}/${pays.length}` : "Pagamento"} — {moneyBR(p.amount)}</p>
++                  <Badge variant={p.status === "paid" ? "default" : "outline"} className="mt-1">{PAYMENT_STATUS[p.status] ?? p.status}</Badge>
++                  {p.claimed_at && p.status !== "paid" && <span className="ml-2 text-xs text-muted-foreground">avisou em {fmtDateTime(p.claimed_at)}</span>}
++                  {p.proof_path && <button type="button" className="ml-3 text-xs text-primary underline" onClick={() => openProof(p.proof_path!)}>Ver comprovante</button>}
++                </div>
++                {reg.status !== "cancelled" && (
++                  <div className="flex gap-2">
++                    {p.status !== "paid" && <Button size="sm" disabled={run.isPending} onClick={() => run.mutate(() => supabase.rpc("set_event_payment_status", { _payment: p.id, _status: "paid" }))}>Confirmar pagamento</Button>}
++                    {p.status !== "pending" && reg.status === "pending" && <Button size="sm" variant="outline" disabled={run.isPending} onClick={() => run.mutate(() => supabase.rpc("set_event_payment_status", { _payment: p.id, _status: "pending" }))}>Voltar p/ pendente</Button>}
++                  </div>
++                )}
++              </div>
++            ))}
++          </div>
++        )}
++
++        {tickets.length > 0 && (
++          <div>
++            <p className="font-medium text-foreground">Ingressos</p>
++            <ul className="mt-2 space-y-1 text-muted-foreground">
++              {tickets.map((t) => <li key={t.id}>{t.holder_name} — {TICKET_STATUS[t.status] ?? t.status}</li>)}
++            </ul>
++          </div>
++        )}
++
++        <div className="flex flex-wrap gap-2 border-t pt-4">
++          {reg.status === "pending" && (
++            <Button variant="secondary" disabled={run.isPending} onClick={() => confirm("Liberar o ingresso mesmo sem o pagamento completo?") && run.mutate(() => supabase.rpc("release_event_registration", { _reg: reg.id }))}>
++              Liberar ingresso sem pagamento
++            </Button>
++          )}
++          {reg.status !== "cancelled" && (
++            <Button variant="outline" disabled={run.isPending} onClick={() => confirm("Cancelar esta inscrição? Os ingressos serão invalidados.") && run.mutate(() => supabase.rpc("cancel_event_registration", { _reg: reg.id }))}>
++              Cancelar inscrição
++            </Button>
++          )}
++        </div>
++      </div>
++    </>
++  );
++}
++
++/* ------------------------------ Check-in ------------------------------ */
++type ScanResult = { result: "ok" | "already" | "invalid" | "cancelled"; holder_name?: string; lot?: string; event_title?: string; checked_in_at?: string };
++
++function CheckIn({ eventId, onChange }: { eventId: string; onChange: () => void }) {
++  const qc = useQueryClient();
++  const [scanning, setScanning] = useState(false);
++  const [manual, setManual] = useState("");
++  const [last, setLast] = useState<ScanResult | null>(null);
++  const [search, setSearch] = useState("");
++
++  const tickets = useQuery({
++    queryKey: ["admin-tickets", eventId],
++    queryFn: async () => {
++      const { data, error } = await supabase.from("event_tickets").select("*").eq("event_id", eventId).neq("status", "cancelled").order("holder_name");
++      if (error) throw error;
++      return data ?? [];
++    },
++  });
++
++  async function check(code: string) {
++    const { data, error } = await supabase.rpc("checkin_ticket", { _code: code.trim() });
++    if (error) {
++      toast.error(eventError(error));
++      return;
++    }
++    const res = data as unknown as ScanResult;
++    setLast(res);
++    if (res.result === "ok") { qc.invalidateQueries({ queryKey: ["admin-tickets", eventId] }); onChange(); }
++  }
++  const toggle = useMutation({
++    mutationFn: async ({ id, present }: { id: string; present: boolean }) => {
++      const { error } = await supabase.rpc("set_ticket_presence", { _ticket: id, _present: present });
++      if (error) throw error;
++    },
++    onSuccess: () => { qc.invalidateQueries({ queryKey: ["admin-tickets", eventId] }); onChange(); },
++    onError: (e) => toast.error(eventError(e)),
++  });
++
++  const all = tickets.data ?? [];
++  const present = all.filter((t) => t.status === "checked_in").length;
++  const shown = all.filter((t) => !search || t.holder_name.toLowerCase().includes(search.toLowerCase()));
++  const tone = last?.result === "ok" ? "border-green-600/40 bg-green-600/10" : last?.result === "already" ? "border-amber-500/50 bg-amber-500/10" : "border-destructive/40 bg-destructive/10";
++  const msg = { ok: "Presença registrada", already: "Este ingresso já foi usado", invalid: "Ingresso não encontrado", cancelled: "Ingresso cancelado ou ainda não liberado" };
++
++  return (
++    <div className="mt-4 grid gap-6 lg:grid-cols-[1fr_1.2fr]">
++      <div className="space-y-4">
++        <Button variant={scanning ? "outline" : "default"} onClick={() => setScanning((s) => !s)}>
++          {scanning ? <><CameraOff className="h-4 w-4" /> Parar câmera</> : <><Camera className="h-4 w-4" /> Ler QR code</>}
++        </Button>
++        {scanning && <QrScanner onScan={check} />}
++        <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (manual.trim()) { check(manual); setManual(""); } }}>
++          <Input placeholder="Ou digite/cole o código do ingresso" value={manual} onChange={(e) => setManual(e.target.value)} />
++          <Button type="submit" variant="secondary">Validar</Button>
++        </form>
++        {last && (
++          <div className={`rounded-2xl border p-5 ${tone}`}>
++            <p className="text-lg font-semibold text-foreground">{msg[last.result]}</p>
++            {last.holder_name && <p className="mt-1 text-foreground">{last.holder_name}</p>}
++            {last.lot && <p className="text-sm text-muted-foreground">{last.lot}</p>}
++            {last.result === "already" && last.checked_in_at && <p className="text-sm text-muted-foreground">Entrou em {fmtDateTime(last.checked_in_at)}</p>}
++          </div>
++        )}
++      </div>
++
++      <div>
++        <div className="flex flex-wrap items-center justify-between gap-3">
++          <p className="font-semibold text-foreground">Presentes: {present} de {all.length}</p>
++          <Input placeholder="Buscar por nome" value={search} onChange={(e) => setSearch(e.target.value)} className="w-52" />
++        </div>
++        <div className="mt-3 max-h-[28rem] divide-y overflow-y-auto rounded-2xl border bg-card">
++          {tickets.isLoading && <p className="p-4 text-sm text-muted-foreground">Carregando...</p>}
++          {!tickets.isLoading && shown.length === 0 && <p className="p-6 text-center text-sm text-muted-foreground">Nenhum ingresso emitido.</p>}
++          {shown.map((t) => (
++            <div key={t.id} className="flex items-center justify-between gap-3 p-3 text-sm">
++              <div>
++                <p className="font-medium text-foreground">{t.holder_name}</p>
++                <Badge variant={t.status === "checked_in" ? "default" : "outline"}>{TICKET_STATUS[t.status] ?? t.status}</Badge>
++                {t.checked_in_at && <span className="ml-2 text-xs text-muted-foreground">{fmtDateTime(t.checked_in_at)}</span>}
++              </div>
++              <Button size="sm" variant={t.status === "checked_in" ? "outline" : "secondary"} disabled={toggle.isPending} onClick={() => toggle.mutate({ id: t.id, present: t.status !== "checked_in" })}>
++                {t.status === "checked_in" ? "Desfazer" : "Marcar presente"}
++              </Button>
++            </div>
++          ))}
++        </div>
++      </div>
++    </div>
++  );
++}
+diff --git a/src/routes/_authenticated/painel.eventos.tsx b/src/routes/_authenticated/painel.eventos.tsx
+new file mode 100644
+index 0000000..e427a89
+--- /dev/null
++++ b/src/routes/_authenticated/painel.eventos.tsx
+@@ -0,0 +1,75 @@
++import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
++import { useQuery } from "@tanstack/react-query";
++import { useState } from "react";
++import { CalendarDays, Plus } from "lucide-react";
++import { supabase } from "@/integrations/supabase/client";
++import { useAccess } from "@/hooks/use-access";
++import { Badge } from "@/components/ui/badge";
++import { Button } from "@/components/ui/button";
++import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
++import { EventForm, blankEvent } from "@/components/events/EventForm";
++import { fmtDateTime } from "@/lib/events";
++import { siteMeta } from "@/lib/site-query";
++
++export const Route = createFileRoute("/_authenticated/painel/eventos")({
++  head: () => siteMeta("Eventos — Comunidade Aava", "Gerencie eventos, inscrições, pagamentos e presença."),
++  component: EventsAdmin,
++});
++
++function EventsAdmin() {
++  const { can, isLoading } = useAccess();
++  const navigate = useNavigate();
++  const [creating, setCreating] = useState(false);
++  const allowed = can("manage_events") || can("verify_event_payments") || can("checkin_events");
++  const events = useQuery({
++    queryKey: ["admin-events"],
++    enabled: allowed,
++    queryFn: async () => {
++      const { data, error } = await supabase.from("events").select("*").order("starts_at", { ascending: false });
++      if (error) throw error;
++      return data ?? [];
++    },
++  });
++
++  if (isLoading) return null;
++  if (!allowed) return <p className="text-muted-foreground">Você não tem acesso a esta área.</p>;
++
++  return (
++    <div>
++      <div className="flex flex-wrap items-start justify-between gap-4">
++        <div>
++          <h1 className="text-3xl text-foreground">Eventos</h1>
++          <p className="mt-2 max-w-2xl text-sm text-muted-foreground">Crie eventos, acompanhe inscrições e pagamentos e registre a presença pelo QR code.</p>
++        </div>
++        {can("manage_events") && <Button onClick={() => setCreating(true)}><Plus className="h-4 w-4" /> Adicionar evento</Button>}
++      </div>
++
++      {events.isLoading && <p className="mt-6 text-muted-foreground">Carregando...</p>}
++      {!events.isLoading && (events.data ?? []).length === 0 && (
++        <div className="mt-6 rounded-2xl border border-dashed p-8 text-center text-sm text-muted-foreground">
++          <CalendarDays className="mx-auto mb-3 h-6 w-6" /> Nenhum evento ainda.
++        </div>
++      )}
++      <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
++        {(events.data ?? []).map((e) => (
++          <Link key={e.id} to="/painel/evento/$id" params={{ id: e.id }} className="rounded-2xl border bg-card p-5 transition-colors hover:border-primary">
++            <div className="flex flex-wrap gap-2">
++              <Badge variant={e.published ? "default" : "secondary"}>{e.published ? "Publicado" : "Rascunho"}</Badge>
++              {e.audience === "members" && <Badge variant="outline">Só membros</Badge>}
++              {e.payment_enabled && <Badge variant="outline">Com pagamento</Badge>}
++            </div>
++            <p className="mt-3 font-display text-lg text-foreground">{e.title}</p>
++            <p className="mt-1 text-sm text-muted-foreground">{fmtDateTime(e.starts_at)}</p>
++          </Link>
++        ))}
++      </div>
++
++      <Dialog open={creating} onOpenChange={setCreating}>
++        <DialogContent className="max-h-[92vh] max-w-2xl overflow-y-auto">
++          <DialogHeader><DialogTitle>Novo evento</DialogTitle></DialogHeader>
++          <EventForm initial={blankEvent()} onSaved={(id) => { setCreating(false); navigate({ to: "/painel/evento/$id", params: { id } }); }} />
++        </DialogContent>
++      </Dialog>
++    </div>
++  );
++}
+diff --git a/src/routes/_authenticated/painel.meu-cadastro.tsx b/src/routes/_authenticated/painel.meu-cadastro.tsx
+index 74b3000..bba0fb4 100644
+--- a/src/routes/_authenticated/painel.meu-cadastro.tsx
++++ b/src/routes/_authenticated/painel.meu-cadastro.tsx
+@@ -7,6 +7,7 @@ import { supabase } from "@/integrations/supabase/client";
+ import { Button } from "@/components/ui/button";
+ import { MyContributions } from "@/components/members/MyContributions";
+ import { ClaimSuggestion } from "@/components/members/ClaimSuggestion";
++import { MyTickets } from "@/components/events/MyTickets";
+ import { MemberForm, emptyMember, type MemberDraft } from "@/components/members/MemberForm";
+ import { MEMBER_STATUS } from "@/lib/church";
+ import { siteMeta } from '@/lib/site-query';
+@@ -101,6 +102,7 @@ function MyProfile() {
+         />
+         <Button type="submit" size="lg" disabled={save.isPending}>{row ? "Salvar alterações" : "Enviar cadastro"}</Button>
+       </form>
++      <MyTickets uid={me.data.uid} />
+       {row?.approval_status === "aprovado" && <MyContributions memberId={row.id} />}
+     </div>
+   );
+diff --git a/src/routes/_authenticated/painel.tsx b/src/routes/_authenticated/painel.tsx
+index 4d8bf84..920ebc7 100644
+--- a/src/routes/_authenticated/painel.tsx
++++ b/src/routes/_authenticated/painel.tsx
+@@ -12,6 +12,7 @@ import {
+   Heart,
+   Settings,
+   Network,
++  CalendarDays,
+ } from "lucide-react";
+ import { Button } from "@/components/ui/button";
+ import { supabase } from "@/integrations/supabase/client";
+@@ -42,6 +43,7 @@ function PanelLayout() {
+     },
+     { to: "/painel/membros", label: "Membros", icon: Users, show: can("view_members") },
+     { to: "/painel/departamentos", label: "Departamentos", icon: Network, show: canViewDepartments },
++    { to: "/painel/eventos", label: "Eventos", icon: CalendarDays, show: can("manage_events") || can("verify_event_payments") || can("checkin_events") },
+     { to: "/painel/financeiro", label: "Financeiro", icon: Wallet, show: can("view_finance") },
+     {
+       to: "/painel/permissoes",
+diff --git a/src/routes/auth.tsx b/src/routes/auth.tsx
+index 71d9166..e563a7d 100644
+--- a/src/routes/auth.tsx
++++ b/src/routes/auth.tsx
+@@ -7,7 +7,10 @@ import { Input } from "@/components/ui/input";
+ import { Label } from "@/components/ui/label";
+ 
+ export const Route = createFileRoute("/auth")({
+-  validateSearch: (s: Record<string, unknown>): { next?: string } => ({ next: s['next'] === '/oracao' ? '/oracao' : undefined }),
++  validateSearch: (s: Record<string, unknown>): { next?: string | undefined; mode?: "up" | undefined } => ({
++    next: s['next'] === '/oracao' ? '/oracao' : typeof s['next'] === 'string' && /^\/eventos\/[a-z0-9-]+$/.test(s['next']) ? s['next'] : undefined,
++    mode: s['mode'] === 'up' ? 'up' : undefined,
++  }),
+   head: () => ({
+     meta: [
+       { title: "Entrar — Comunidade Aava" },
+@@ -22,8 +25,8 @@ export const Route = createFileRoute("/auth")({
+ });
+ 
+ function AuthPage() {
+-  const { next } = Route.useSearch();
+-  const [mode, setMode] = useState<"in" | "up">("in");
++  const { next, mode: initialMode } = Route.useSearch();
++  const [mode, setMode] = useState<"in" | "up">(initialMode ?? "in");
+   const [name, setName] = useState("");
+   const [email, setEmail] = useState("");
+   const [password, setPassword] = useState("");
+@@ -37,14 +40,19 @@ function AuthPage() {
+       if (mode === "in") {
+         const { error } = await supabase.auth.signInWithPassword({ email, password });
+         if (error) throw error;
+-        navigate({ to: next === '/oracao' ? '/oracao' : '/painel' });
++        navigate({ to: next ?? '/painel' });
+       } else {
+-        const { error } = await supabase.auth.signUp({
++        const { data: signed, error } = await supabase.auth.signUp({
+           email,
+           password,
+-          options: { emailRedirectTo: window.location.origin + "/painel", data: { full_name: name } },
++          options: { emailRedirectTo: window.location.origin + (next ?? "/painel"), data: { full_name: name } },
+         });
+         if (error) throw error;
++        if (signed.session && next) {
++          toast.success("Conta criada!");
++          navigate({ to: next });
++          return;
++        }
+         toast.success("Conta criada! Confira seu e-mail para confirmar o cadastro.");
+         setMode("in");
+       }
+diff --git a/src/routes/eventos.$slug.tsx b/src/routes/eventos.$slug.tsx
+new file mode 100644
+index 0000000..c6562d1
+--- /dev/null
++++ b/src/routes/eventos.$slug.tsx
+@@ -0,0 +1,99 @@
++import { createFileRoute, Link } from "@tanstack/react-router";
++import { useQuery } from "@tanstack/react-query";
++import { ArrowLeft, CalendarDays, MapPin, ShieldCheck } from "lucide-react";
++import { supabase } from "@/integrations/supabase/client";
++import { SiteLayout } from "@/components/site/SiteLayout";
++import { PageError } from "@/components/site/PageError";
++import { Markdown } from "@/components/site/Markdown";
++import { EventRegistration } from "@/components/events/EventRegistration";
++import { Badge } from "@/components/ui/badge";
++import { asEventDetail, fmtDate, fmtLongDate, fmtTime, moneyBR } from "@/lib/events";
++import { siteMeta } from "@/lib/site-query";
++
++export const Route = createFileRoute("/eventos/$slug")({
++  head: () => siteMeta("Evento — Comunidade Aava", "Detalhes e inscrição do evento."),
++  errorComponent: PageError,
++  notFoundComponent: PageError,
++  component: EventPage,
++});
++
++function EventPage() {
++  const { slug } = Route.useParams();
++  const { data, isLoading } = useQuery({
++    queryKey: ["public-event", slug],
++    queryFn: async () => {
++      const { data, error } = await supabase.rpc("public_event", { _slug: slug });
++      if (error) throw error;
++      return asEventDetail(data);
++    },
++  });
++
++  return (
++    <SiteLayout>
++      <section className="mx-auto max-w-5xl px-5 py-10 lg:px-10">
++        <Link to="/eventos" className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground">
++          <ArrowLeft className="h-4 w-4" /> Todos os eventos
++        </Link>
++        {isLoading ? (
++          <p className="mt-8 text-muted-foreground">Carregando...</p>
++        ) : !data ? (
++          <p className="mt-8 text-muted-foreground">Evento não encontrado ou indisponível.</p>
++        ) : (
++          <div className="mt-6 grid gap-10 lg:grid-cols-[1.2fr_1fr]">
++            <div>
++              <div className="flex flex-wrap gap-2">
++                <Badge variant={data.event.audience === "members" ? "outline" : "secondary"}>
++                  {data.event.audience === "members" ? "Evento para membros" : "Aberto ao público"}
++                </Badge>
++              </div>
++              <h1 className="mt-4 text-4xl text-foreground">{data.event.title}</h1>
++              <p className="mt-5 flex items-start gap-2 text-foreground">
++                <CalendarDays className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
++                <span>
++                  <span className="capitalize">{fmtLongDate(data.event.starts_at)}</span> às {fmtTime(data.event.starts_at)}
++                  {data.event.ends_at && <span className="text-muted-foreground"> · até {fmtTime(data.event.ends_at)}</span>}
++                </span>
++              </p>
++              {data.event.location && (
++                <p className="mt-2 flex items-start gap-2 text-foreground">
++                  <MapPin className="mt-0.5 h-5 w-5 shrink-0 text-primary" /> {data.event.location}
++                </p>
++              )}
++              {(data.event.registration_opens_at || data.event.registration_closes_at) && (
++                <p className="mt-2 flex items-start gap-2 text-sm text-muted-foreground">
++                  <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" />
++                  Inscrições{data.event.registration_opens_at ? ` de ${fmtDate(data.event.registration_opens_at)}` : ""}
++                  {data.event.registration_closes_at ? ` até ${fmtDate(data.event.registration_closes_at)}` : ""}
++                </p>
++              )}
++              {data.event.description && <Markdown className="mt-8 text-base leading-relaxed text-muted-foreground">{data.event.description}</Markdown>}
++
++              {data.lots.length > 0 && (
++                <div className="mt-8">
++                  <h2 className="text-xl text-foreground">{data.lots.length > 1 ? "Lotes" : "Ingresso"}</h2>
++                  <div className="mt-3 divide-y rounded-xl border bg-card">
++                    {data.lots.map((l) => (
++                      <div key={l.id} className="flex items-center justify-between gap-3 p-4 text-sm">
++                        <div>
++                          <p className="font-medium text-foreground">{l.name}</p>
++                          <p className="text-xs text-muted-foreground">
++                            {l.spots_left === null ? "Vagas ilimitadas" : l.spots_left === 0 ? "Esgotado" : `${l.spots_left} vagas restantes`}
++                            {data.event.audience === "members" && ` · ${l.public_access ? "aberto ao público" : "só membros"}`}
++                          </p>
++                        </div>
++                        <p className="font-semibold text-foreground">{data.event.payment_enabled && l.price > 0 ? moneyBR(l.price) : "Gratuito"}</p>
++                      </div>
++                    ))}
++                  </div>
++                </div>
++              )}
++            </div>
++            <div className="lg:sticky lg:top-24 lg:self-start">
++              <EventRegistration detail={data} />
++            </div>
++          </div>
++        )}
++      </section>
++    </SiteLayout>
++  );
++}
+diff --git a/src/routes/eventos.tsx b/src/routes/eventos.tsx
+new file mode 100644
+index 0000000..dc22314
+--- /dev/null
++++ b/src/routes/eventos.tsx
+@@ -0,0 +1,34 @@
++import { createFileRoute } from "@tanstack/react-router";
++import { SiteLayout, PageHeader } from "@/components/site/SiteLayout";
++import { PageError } from "@/components/site/PageError";
++import { EventCard, usePublicEvents } from "@/components/events/EventsList";
++import { siteMeta } from "@/lib/site-query";
++
++export const Route = createFileRoute("/eventos")({
++  head: () => siteMeta("Eventos — Comunidade Aava", "Veja os próximos eventos da Comunidade Aava e faça sua inscrição."),
++  errorComponent: PageError,
++  notFoundComponent: PageError,
++  component: EventsPage,
++});
++
++function EventsPage() {
++  const { data = [], isLoading } = usePublicEvents();
++  return (
++    <SiteLayout>
++      <PageHeader eyebrow="AGENDA" title="Eventos" text="Escolha um evento para ver os detalhes e fazer sua inscrição." />
++      <section className="mx-auto max-w-7xl px-5 py-16 lg:px-10">
++        {isLoading ? (
++          <p className="text-muted-foreground">Carregando...</p>
++        ) : data.length === 0 ? (
++          <p className="text-muted-foreground">Nenhum evento disponível no momento. Volte em breve!</p>
++        ) : (
++          <div className="grid gap-5 md:grid-cols-2 lg:grid-cols-3">
++            {data.map((e) => (
++              <EventCard key={e.id} e={e} />
++            ))}
++          </div>
++        )}
++      </section>
++    </SiteLayout>
++  );
++}
+diff --git a/src/routes/index.tsx b/src/routes/index.tsx
+index bf81a29..eac1eb1 100644
+--- a/src/routes/index.tsx
++++ b/src/routes/index.tsx
+@@ -10,6 +10,7 @@ import { siteQuery, siteMeta, useSiteContent } from "@/lib/site-query";
+ import { safeLink } from "@/lib/site-content";
+ import { instagramEmbed } from "@/lib/access-rules";
+ import { ContributionContent } from "@/components/site/ContributionContent";
++import { EventsSection } from "@/components/events/EventsList";
+ export const Route = createFileRoute("/")({
+   loader: ({ context }) => context.queryClient.ensureQueryData(siteQuery),
+   head: ({ loaderData: c }) =>
+@@ -109,6 +110,7 @@ function Home() {
+           </div>
+         </div>
+       </section>
++      <EventsSection />
+       {c.photos.length > 0 && (
+         <section className="mx-auto max-w-7xl px-5 py-16 lg:px-10">
+           <h2 className="mb-8 text-3xl">{c.galleryTitle}</h2>
+diff --git a/src/test/events.test.ts b/src/test/events.test.ts
+new file mode 100644
+index 0000000..10d46f3
+--- /dev/null
++++ b/src/test/events.test.ts
+@@ -0,0 +1,65 @@
++import QRCode from "qrcode";
++import jsQR from "jsqr";
++import { describe, expect, it } from "vitest";
++import { cpfDigits, eventError, formatCpf, isValidCpf, lotIsOpen, registrationIsOpen, slugify, toLocalInput } from "@/lib/events";
++
++describe("CPF", () => {
++  it("aceita CPFs com dígitos verificadores corretos e recusa os inválidos", () => {
++    expect(isValidCpf("529.982.247-25")).toBe(true);
++    expect(isValidCpf("52998224725")).toBe(true);
++    expect(isValidCpf("111.444.777-35")).toBe(true);
++    expect(isValidCpf("529.982.247-24")).toBe(false);
++    expect(isValidCpf("111.111.111-11")).toBe(false);
++    expect(isValidCpf("123")).toBe(false);
++  });
++  it("formata e extrai dígitos", () => {
++    expect(formatCpf("52998224725")).toBe("529.982.247-25");
++    expect(formatCpf("529982")).toBe("529.982");
++    expect(cpfDigits("529.982.247-25")).toBe("52998224725");
++  });
++});
++
++describe("utilidades de evento", () => {
++  it("gera slug sem acento e sem símbolos", () => {
++    expect(slugify("Retiro de Jovens 2026 — Água Viva!")).toBe("retiro-de-jovens-2026-agua-viva");
++  });
++  it("respeita a janela de inscrição e o período do lote", () => {
++    const now = new Date("2026-10-10T12:00:00Z");
++    expect(registrationIsOpen({ registration_opens_at: "2026-10-01T00:00:00Z", registration_closes_at: "2026-10-20T00:00:00Z" }, now)).toBe(true);
++    expect(registrationIsOpen({ registration_opens_at: "2026-10-11T00:00:00Z", registration_closes_at: null }, now)).toBe(false);
++    expect(registrationIsOpen({ registration_opens_at: null, registration_closes_at: "2026-10-09T00:00:00Z" }, now)).toBe(false);
++    const lot = { id: "l", name: "Lote 1", price: 10, capacity: 5, spots_left: 5, public_access: true, opens_at: null, closes_at: "2026-10-09T00:00:00Z" };
++    expect(lotIsOpen(lot, now)).toBe(false);
++  });
++  it("converte data local para o campo datetime-local", () => {
++    const iso = new Date(2026, 9, 10, 18, 30).toISOString();
++    expect(toLocalInput(iso)).toBe("2026-10-10T18:30");
++    expect(toLocalInput(null)).toBe("");
++  });
++  it("traduz erros do banco para mensagens em português", () => {
++    expect(eventError(new Error("sold_out"))).toMatch(/vagas/);
++    expect(eventError(new Error("limit_exceeded"))).toMatch(/limite/);
++    expect(eventError({ message: "duplicate key value violates unique constraint \"events_slug_key\"" })).toMatch(/endereço/);
++  });
++});
++
++describe("QR code do ingresso", () => {
++  it("o código do ingresso gerado pode ser lido de volta pelo leitor da câmera", () => {
++    const code = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
++    const qr = QRCode.create(code, { errorCorrectionLevel: "M" });
++    const n = qr.modules.size;
++    const scale = 8;
++    const margin = 4;
++    const side = (n + margin * 2) * scale;
++    const data = new Uint8ClampedArray(side * side * 4).fill(255);
++    for (let y = 0; y < n; y++)
++      for (let x = 0; x < n; x++)
++        if (qr.modules.get(x, y))
++          for (let dy = 0; dy < scale; dy++)
++            for (let dx = 0; dx < scale; dx++) {
++              const px = ((y + margin) * scale + dy) * side + (x + margin) * scale + dx;
++              data[px * 4] = data[px * 4 + 1] = data[px * 4 + 2] = 0;
++            }
++    expect(jsQR(data, side, side)?.data).toBe(code);
++  });
++});
+-- 
+2.43.0
+

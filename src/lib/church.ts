@@ -43,6 +43,14 @@ export const PERMISSION_GROUPS: { label: string; perms: { key: string; label: st
     ],
   },
   {
+    label: "Eventos",
+    perms: [
+      { key: "manage_events", label: "Criar e editar eventos, ver inscrições e gráficos" },
+      { key: "verify_event_payments", label: "Conferir pagamentos, parcelas e liberar ingressos" },
+      { key: "checkin_events", label: "Ler QR code e marcar presença nos eventos" },
+    ],
+  },
+  {
     label: "Configurações",
     perms: [{ key: "manage_permissions", label: "Ver usuários e permissões" }],
   },
