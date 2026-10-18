@@ -1,0 +1,924 @@
+From 704fe3f446336510cfcf264b4cd8a36514ec5c9d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 18 Oct 2026 10:54:20 +0000
+Subject: [PATCH] =?UTF-8?q?Imagens=20no=20armazenamento,=20c=C3=B3digo=20c?=
+ =?UTF-8?q?urto=20do=20ingresso=20e=20sinal/som=20no=20leitor?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Fotos do site e QR do Pix do site vão para o bucket público site-assets (nada de base64 no banco)
+- Arquivos que saem do site são apagados do armazenamento ao salvar
+- Fotos de membros, comprovantes e QR de evento são compactados antes do envio
+- Ingresso: código curto para digitar; depois da presença o QR some e aparece 'Presença confirmada'
+- Leitor: sinal de verificado no centro da câmera, som e vibração; aceita código curto
+- Migration 0013 e testes
+---
+ ...0013_ticket_short_code_and_site_assets.sql | 81 ++++++++++++++++++
+ drizzle/migrations/meta/_journal.json         |  7 ++
+ roadmap.md                                    |  2 +
+ src/components/events/EventForm.tsx           |  7 +-
+ src/components/events/MyTickets.tsx           | 54 +++++++++---
+ src/components/events/QrScanner.tsx           | 23 +++++-
+ src/components/members/MemberForm.tsx         |  7 +-
+ src/integrations/supabase/types.ts            |  3 +
+ src/lib/images.ts                             | 68 +++++++++++++++
+ src/lib/site-editor.functions.ts              | 16 ++--
+ src/lib/site-images.ts                        | 21 +++++
+ src/lib/sounds.ts                             | 46 +++++++++++
+ .../_authenticated/painel.evento.$id.tsx      | 60 ++++++++++----
+ .../_authenticated/painel.financeiro.tsx      |  6 +-
+ src/routes/_authenticated/painel.site.tsx     | 49 ++++-------
+ src/test/storage-and-tickets.test.tsx         | 82 +++++++++++++++++++
+ 16 files changed, 457 insertions(+), 75 deletions(-)
+ create mode 100644 drizzle/migrations/0013_ticket_short_code_and_site_assets.sql
+ create mode 100644 src/lib/images.ts
+ create mode 100644 src/lib/site-images.ts
+ create mode 100644 src/lib/sounds.ts
+ create mode 100644 src/test/storage-and-tickets.test.tsx
+
+diff --git a/drizzle/migrations/0013_ticket_short_code_and_site_assets.sql b/drizzle/migrations/0013_ticket_short_code_and_site_assets.sql
+new file mode 100644
+index 0000000..1ef50a0
+--- /dev/null
++++ b/drizzle/migrations/0013_ticket_short_code_and_site_assets.sql
+@@ -0,0 +1,81 @@
++-- 1) Código curto do ingresso (para digitar quando a câmera não lê) e 2) bucket público das imagens do site.
++-- Pode rodar mais de uma vez.
++
++create or replace function public.gen_ticket_short_code()
++returns text language plpgsql volatile set search_path = public as $$
++declare
++  alphabet constant text := 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; -- sem I, L, O, 0 e 1 (evita confusão)
++  candidate text; i int; bytes bytea;
++begin
++  loop
++    bytes := decode(replace(gen_random_uuid()::text, '-', ''), 'hex');
++    candidate := '';
++    for i in 0..7 loop
++      candidate := candidate || substr(alphabet, 1 + (get_byte(bytes, i) % length(alphabet)), 1);
++    end loop;
++    exit when not exists (select 1 from public.event_tickets t where t.short_code = candidate);
++  end loop;
++  return candidate;
++end $$;
++
++alter table public.event_tickets add column if not exists short_code text;
++do $$
++declare r record;
++begin
++  for r in select id from public.event_tickets where short_code is null loop
++    update public.event_tickets set short_code = public.gen_ticket_short_code() where id = r.id;
++  end loop;
++end $$;
++alter table public.event_tickets alter column short_code set default public.gen_ticket_short_code();
++alter table public.event_tickets alter column short_code set not null;
++create unique index if not exists event_tickets_short_code_key on public.event_tickets (short_code);
++revoke all on function public.gen_ticket_short_code() from public, anon, authenticated;
++
++-- Check-in aceita o código do QR (longo) ou o código curto digitado (com ou sem traço, qualquer caixa)
++create or replace function public.checkin_ticket(_code text)
++returns jsonb language plpgsql security definer set search_path = public as $$
++declare
++  t public.event_tickets%rowtype; ev_title text; r public.event_registrations%rowtype; lot_name text;
++  raw text := btrim(coalesce(_code, ''));
++  norm text := upper(regexp_replace(coalesce(_code, ''), '[^A-Za-z0-9]', '', 'g'));
++begin
++  if not (public.has_permission(auth.uid(), 'checkin_events') or public.has_permission(auth.uid(), 'manage_events')) then
++    raise exception 'Acesso negado';
++  end if;
++  select * into t from public.event_tickets where code = raw or (length(norm) = 8 and short_code = norm) limit 1;
++  if not found then return jsonb_build_object('result', 'invalid'); end if;
++  select title into ev_title from public.events where id = t.event_id;
++  select * into r from public.event_registrations where id = t.registration_id;
++  select name into lot_name from public.event_lots where id = r.lot_id;
++  if t.status = 'cancelled' or r.status <> 'confirmed' then
++    return jsonb_build_object('result', 'cancelled', 'holder_name', t.holder_name, 'event_title', ev_title, 'short_code', t.short_code);
++  end if;
++  if t.status = 'checked_in' then
++    return jsonb_build_object('result', 'already', 'holder_name', t.holder_name, 'event_title', ev_title, 'lot', lot_name,
++                              'checked_in_at', t.checked_in_at, 'short_code', t.short_code);
++  end if;
++  update public.event_tickets set status = 'checked_in', checked_in_at = now(), checked_in_by = auth.uid() where id = t.id;
++  return jsonb_build_object('result', 'ok', 'holder_name', t.holder_name, 'event_title', ev_title, 'lot', lot_name,
++                            'ticket_id', t.id, 'short_code', t.short_code);
++end $$;
++
++-- Imagens do site (fotos da página inicial e QR do Pix): ficam no armazenamento, não mais dentro do banco.
++-- Bucket público (o site é público); só CEO e Pastor Presidente gravam.
++insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
++values ('site-assets', 'site-assets', true, 5242880, array['image/jpeg', 'image/png', 'image/webp'])
++on conflict (id) do update set public = true, file_size_limit = 5242880, allowed_mime_types = array['image/jpeg', 'image/png', 'image/webp'];
++
++drop policy if exists "site assets insert" on storage.objects;
++create policy "site assets insert" on storage.objects for insert to authenticated
++  with check (bucket_id = 'site-assets' and public.is_church_leadership(auth.uid()));
++drop policy if exists "site assets update" on storage.objects;
++create policy "site assets update" on storage.objects for update to authenticated
++  using (bucket_id = 'site-assets' and public.is_church_leadership(auth.uid()))
++  with check (bucket_id = 'site-assets' and public.is_church_leadership(auth.uid()));
++drop policy if exists "site assets delete" on storage.objects;
++create policy "site assets delete" on storage.objects for delete to authenticated
++  using (bucket_id = 'site-assets' and public.is_church_leadership(auth.uid()));
++-- Quem grava também precisa poder ler (o envio devolve a linha criada); o público lê pela URL pública do bucket.
++drop policy if exists "site assets select" on storage.objects;
++create policy "site assets select" on storage.objects for select to authenticated
++  using (bucket_id = 'site-assets' and public.is_church_leadership(auth.uid()));
+diff --git a/drizzle/migrations/meta/_journal.json b/drizzle/migrations/meta/_journal.json
+index 6bd9e1d..a0e8a99 100644
+--- a/drizzle/migrations/meta/_journal.json
++++ b/drizzle/migrations/meta/_journal.json
+@@ -92,6 +92,13 @@
+       "when": 1792064400000,
+       "tag": "0012_dashboard_volunteer_stats",
+       "breakpoints": true
++    },
++    {
++      "idx": 13,
++      "version": "7",
++      "when": 1792150800000,
++      "tag": "0013_ticket_short_code_and_site_assets",
++      "breakpoints": true
+     }
+   ]
+ }
+diff --git a/roadmap.md b/roadmap.md
+index fd039f6..03b20a3 100644
+--- a/roadmap.md
++++ b/roadmap.md
+@@ -16,3 +16,5 @@
+ - [x] Vínculo da conta ao cadastro existente: "Este é você?" por nome + confirmação de CPF
+ - [x] Sistema de eventos: landing, inscrição (membro/visitante), pagamento e parcelas, ingresso com QR, check-in e gráficos
+ - [x] Dashboard: voluntários, departamentos, dizimistas com tendência, eventos, metas financeiras e pedido de oração mais recente
++- [x] Imagens fora do banco: fotos do site e QR do Pix no armazenamento; uploads compactados
++- [x] Ingresso com código curto, "Presença confirmada" no lugar do QR, sinal e som na leitura
+diff --git a/src/components/events/EventForm.tsx b/src/components/events/EventForm.tsx
+index 16b0b4d..ff55774 100644
+--- a/src/components/events/EventForm.tsx
++++ b/src/components/events/EventForm.tsx
+@@ -12,6 +12,7 @@ import { Textarea } from "@/components/ui/textarea";
+ import { Checkbox } from "@/components/ui/checkbox";
+ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+ import { eventError, fromLocalInput, slugify, toLocalInput } from "@/lib/events";
++import { compressImage, fileExt } from "@/lib/images";
+ import type { Tables } from "@/integrations/supabase/types";
+ 
+ export type LotDraft = { id?: string; name: string; price: string; capacity: string; public_access: boolean; opens_at: string; closes_at: string };
+@@ -150,9 +151,9 @@ async function saveEvent(d: EventDraft, userId: string | null | undefined, qrFil
+   // Dados de pagamento (privados: só quem se inscreveu e a equipe enxergam)
+   let qrPath = d.pix_qr_path || null;
+   if (qrFile) {
+-    const ext = (qrFile.name.split(".").pop() ?? "png").toLowerCase().replace(/[^a-z0-9]/g, "") || "png";
+-    const path = `${eventId}/qr-${Date.now()}.${ext}`;
+-    const { error } = await supabase.storage.from("event-assets").upload(path, qrFile);
++    const blob = await compressImage(qrFile, { maxSide: 900, type: "image/png" }); // QR precisa ficar nítido
++    const path = `${eventId}/qr-${Date.now()}.${fileExt(blob, qrFile.name)}`;
++    const { error } = await supabase.storage.from("event-assets").upload(path, blob, { contentType: blob.type || qrFile.type });
+     if (error) throw new Error("Não foi possível enviar a imagem do QR code.");
+     if (qrPath) await supabase.storage.from("event-assets").remove([qrPath]);
+     qrPath = path;
+diff --git a/src/components/events/MyTickets.tsx b/src/components/events/MyTickets.tsx
+index 95f06f8..596d7a8 100644
+--- a/src/components/events/MyTickets.tsx
++++ b/src/components/events/MyTickets.tsx
+@@ -3,12 +3,14 @@ import { Link } from "@tanstack/react-router";
+ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+ import QRCode from "qrcode";
+ import { toast } from "sonner";
+-import { CalendarDays, Copy, Download, ExternalLink, Upload } from "lucide-react";
++import { CalendarDays, CheckCircle2, Copy, Download, ExternalLink, Upload } from "lucide-react";
+ import { supabase } from "@/integrations/supabase/client";
+ import { safeLink } from "@/lib/site-content";
++import { compressImage, fileExt, formatShortCode } from "@/lib/images";
+ import { Badge } from "@/components/ui/badge";
+ import { Button } from "@/components/ui/button";
+ import { eventError, fmtDateTime, moneyBR, PAYMENT_STATUS, REGISTRATION_STATUS, TICKET_STATUS } from "@/lib/events";
++import type { Tables } from "@/integrations/supabase/types";
+ 
+ function TicketQr({ code, name }: { code: string; name: string }) {
+   const [url, setUrl] = useState("");
+@@ -26,6 +28,39 @@ function TicketQr({ code, name }: { code: string; name: string }) {
+   );
+ }
+ 
++/** Um ingresso: QR + código para digitar. Depois da presença confirmada, o QR some e fica só o aviso. */
++export function TicketCard({ ticket, total }: { ticket: Tables<"event_tickets">; total: number }) {
++  const checkedIn = ticket.status === "checked_in";
++  return (
++    <div className="flex flex-col items-center gap-3 rounded-xl border bg-background p-4 text-center">
++      {checkedIn ? (
++        <div className="flex h-44 w-full flex-col items-center justify-center gap-2 rounded-lg bg-primary-soft">
++          <CheckCircle2 className="h-14 w-14 text-primary" aria-hidden />
++          <p className="text-lg font-semibold text-foreground">Presença confirmada</p>
++          {ticket.checked_in_at && <p className="text-xs text-muted-foreground">{fmtDateTime(ticket.checked_in_at)}</p>}
++        </div>
++      ) : ticket.status === "cancelled" ? (
++        <div className="flex h-44 w-full items-center justify-center rounded-lg bg-muted text-sm text-muted-foreground">Ingresso cancelado</div>
++      ) : (
++        <>
++          <TicketQr code={ticket.code} name={ticket.holder_name} />
++          <div>
++            <p className="font-mono text-xl font-semibold tracking-widest text-foreground" aria-label="Código do ingresso">
++              {formatShortCode(ticket.short_code)}
++            </p>
++            <p className="text-xs text-muted-foreground">Se a câmera não ler, informe este código na entrada.</p>
++          </div>
++        </>
++      )}
++      <div>
++        <p className="font-medium text-foreground">{ticket.holder_name}</p>
++        <p className="text-xs text-muted-foreground">Ingresso {ticket.seq} de {total}</p>
++        {!checkedIn && <Badge className="mt-2" variant="outline">{TICKET_STATUS[ticket.status] ?? ticket.status}</Badge>}
++      </div>
++    </div>
++  );
++}
++
+ function PaymentInstructions({ eventId }: { eventId: string }) {
+   const info = useQuery({
+     queryKey: ["event-payment-info", eventId],
+@@ -71,6 +106,8 @@ export function MyTickets({ uid }: { uid: string }) {
+ 
+   const regs = useQuery({
+     queryKey: ["my-registrations", uid],
++    // Enquanto houver ingresso válido, confere a cada 10 s se a presença já foi confirmada
++    refetchInterval: (q) => ((q.state.data ?? []).some((r) => r.status === "confirmed" && (r.event_tickets ?? []).some((t) => t.status === "valid")) ? 10000 : false),
+     queryFn: async () => {
+       const { data, error } = await supabase
+         .from("event_registrations")
+@@ -116,9 +153,9 @@ export function MyTickets({ uid }: { uid: string }) {
+       toast.error("O arquivo deve ter até 8 MB.");
+       return;
+     }
+-    const ext = (file.name.split(".").pop() ?? "jpg").toLowerCase().replace(/[^a-z0-9]/g, "");
+-    const path = `${uid}/${paymentId}-${Date.now()}.${ext || "jpg"}`;
+-    const { error } = await supabase.storage.from("event-proofs").upload(path, file);
++    const blob = await compressImage(file, { maxSide: 1800, quality: 0.8 });
++    const path = `${uid}/${paymentId}-${Date.now()}.${fileExt(blob, file.name)}`;
++    const { error } = await supabase.storage.from("event-proofs").upload(path, blob, { contentType: blob.type || file.type });
+     if (error) {
+       toast.error("Não foi possível enviar o comprovante.");
+       return;
+@@ -200,14 +237,7 @@ export function MyTickets({ uid }: { uid: string }) {
+               {r.status === "confirmed" && (
+                 <div className="mt-5 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+                   {tickets.map((t) => (
+-                    <div key={t.id} className="flex flex-col items-center gap-3 rounded-xl border bg-background p-4 text-center">
+-                      <TicketQr code={t.code} name={t.holder_name} />
+-                      <div>
+-                        <p className="font-medium text-foreground">{t.holder_name}</p>
+-                        <p className="text-xs text-muted-foreground">Ingresso {t.seq} de {r.quantity}</p>
+-                        <Badge className="mt-2" variant={t.status === "checked_in" ? "default" : "outline"}>{TICKET_STATUS[t.status] ?? t.status}</Badge>
+-                      </div>
+-                    </div>
++                    <TicketCard key={t.id} ticket={t} total={r.quantity} />
+                   ))}
+                 </div>
+               )}
+diff --git a/src/components/events/QrScanner.tsx b/src/components/events/QrScanner.tsx
+index faa9820..583d13f 100644
+--- a/src/components/events/QrScanner.tsx
++++ b/src/components/events/QrScanner.tsx
+@@ -1,8 +1,28 @@
+ import { useEffect, useRef, useState } from "react";
+ import jsQR from "jsqr";
++import { AlertTriangle, CheckCircle2, XCircle } from "lucide-react";
++
++export type ScanFeedbackKind = "ok" | "warn" | "error";
++
++/** Sinal grande no centro da câmera: verde = leu, amarelo = aviso (já usado), vermelho = não aceito. */
++export function ScanFeedback({ kind }: { kind: ScanFeedbackKind }) {
++  const cfg = {
++    ok: { Icon: CheckCircle2, bg: "bg-green-600", label: "QR code lido" },
++    warn: { Icon: AlertTriangle, bg: "bg-amber-500", label: "Atenção" },
++    error: { Icon: XCircle, bg: "bg-red-600", label: "Ingresso não aceito" },
++  }[kind];
++  return (
++    <div className="pointer-events-none absolute inset-0 grid place-items-center" role="status" aria-live="polite">
++      <div className={`rounded-full ${cfg.bg} p-5 text-white shadow-2xl animate-in fade-in zoom-in-50 duration-200`}>
++        <cfg.Icon className="h-16 w-16" aria-hidden />
++        <span className="sr-only">{cfg.label}</span>
++      </div>
++    </div>
++  );
++}
+ 
+ /** Lê QR codes pela câmera (precisa de HTTPS ou localhost). Chama onScan uma vez por leitura. */
+-export function QrScanner({ onScan }: { onScan: (code: string) => void }) {
++export function QrScanner({ onScan, feedback }: { onScan: (code: string) => void; feedback?: ScanFeedbackKind | null }) {
+   const videoRef = useRef<HTMLVideoElement>(null);
+   const [error, setError] = useState("");
+   const [ready, setReady] = useState(false);
+@@ -65,6 +85,7 @@ export function QrScanner({ onScan }: { onScan: (code: string) => void }) {
+       <video ref={videoRef} playsInline muted className="aspect-square w-full object-cover sm:aspect-video" />
+       {!ready && <p className="absolute inset-0 grid place-items-center text-sm text-white/80">Abrindo a câmera...</p>}
+       <div className="pointer-events-none absolute inset-8 rounded-2xl border-2 border-white/70" />
++      {feedback && <ScanFeedback kind={feedback} />}
+     </div>
+   );
+ }
+diff --git a/src/components/members/MemberForm.tsx b/src/components/members/MemberForm.tsx
+index 214a948..4bca8cc 100644
+--- a/src/components/members/MemberForm.tsx
++++ b/src/components/members/MemberForm.tsx
+@@ -1,6 +1,7 @@
+ import { useEffect, useState } from "react";
+ import type { ReactNode } from "react";
+ import { Camera, ChevronDown, User } from "lucide-react";
++import { compressImage, fileExt } from "@/lib/images";
+ import { toast } from "sonner";
+ import { supabase } from "@/integrations/supabase/client";
+ import type { TablesInsert } from "@/integrations/supabase/types";
+@@ -137,9 +138,9 @@ export function MemberForm({
+ 
+   async function upload(file: File) {
+     setUploading(true);
+-    const ext = file.name.split(".").pop() ?? "jpg";
+-    const path = `${photoFolder}/${crypto.randomUUID()}.${ext}`;
+-    const { error } = await supabase.storage.from("member-photos").upload(path, file);
++    const blob = await compressImage(file, { maxSide: 900, quality: 0.8 });
++    const path = `${photoFolder}/${crypto.randomUUID()}.${fileExt(blob, file.name)}`;
++    const { error } = await supabase.storage.from("member-photos").upload(path, blob, { contentType: blob.type || file.type });
+     setUploading(false);
+     if (error) { toast.error(error.message); return; }
+     set({ photo_path: path });
+diff --git a/src/integrations/supabase/types.ts b/src/integrations/supabase/types.ts
+index 702d7f3..f81592f 100644
+--- a/src/integrations/supabase/types.ts
++++ b/src/integrations/supabase/types.ts
+@@ -380,6 +380,7 @@ export type Database = {
+           id: string
+           registration_id: string
+           seq: number
++          short_code: string
+           status: string
+         }
+         Insert: {
+@@ -392,6 +393,7 @@ export type Database = {
+           id?: string
+           registration_id: string
+           seq: number
++          short_code?: string
+           status?: string
+         }
+         Update: {
+@@ -404,6 +406,7 @@ export type Database = {
+           id?: string
+           registration_id?: string
+           seq?: number
++          short_code?: string
+           status?: string
+         }
+         Relationships: [
+diff --git a/src/lib/images.ts b/src/lib/images.ts
+new file mode 100644
+index 0000000..b861765
+--- /dev/null
++++ b/src/lib/images.ts
+@@ -0,0 +1,68 @@
++/** Utilitários de imagem sem dependência do Supabase (testáveis). */
++
++export type CompressOptions = { maxSide: number; quality?: number; type?: "image/jpeg" | "image/png" };
++
++/**
++ * Reduz a imagem antes do envio (menos espaço no armazenamento). PDFs e arquivos que não são imagem seguem como estão.
++ * Se o navegador não conseguir ler a imagem, devolve o arquivo original.
++ */
++export async function compressImage(file: File, { maxSide, quality = 0.82, type = "image/jpeg" }: CompressOptions): Promise<Blob> {
++  if (!file.type.startsWith("image/")) return file;
++  try {
++    const bitmap = await createImageBitmap(file);
++    const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
++    const w = Math.max(1, Math.round(bitmap.width * scale));
++    const h = Math.max(1, Math.round(bitmap.height * scale));
++    const canvas = document.createElement("canvas");
++    canvas.width = w;
++    canvas.height = h;
++    const ctx = canvas.getContext("2d");
++    if (!ctx) {
++      bitmap.close();
++      return file;
++    }
++    if (type === "image/jpeg") {
++      ctx.fillStyle = "#ffffff"; // JPEG não tem transparência
++      ctx.fillRect(0, 0, w, h);
++    }
++    ctx.drawImage(bitmap, 0, 0, w, h);
++    bitmap.close();
++    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, type, quality));
++    if (!blob) return file;
++    return blob.size < file.size || scale < 1 ? blob : file;
++  } catch {
++    return file;
++  }
++}
++
++/** Extensão de arquivo coerente com o conteúdo enviado. */
++export function fileExt(blob: Blob, originalName = ""): string {
++  if (blob.type === "image/png") return "png";
++  if (blob.type === "image/jpeg") return "jpg";
++  if (blob.type === "image/webp") return "webp";
++  if (blob.type === "application/pdf") return "pdf";
++  const fromName = originalName.split(".").pop()?.toLowerCase().replace(/[^a-z0-9]/g, "");
++  return fromName && fromName.length <= 5 ? fromName : "bin";
++}
++
++export const SITE_BUCKET = "site-assets";
++const SITE_PUBLIC_MARKER = `/storage/v1/object/public/${SITE_BUCKET}/`;
++
++/** Caminho dentro do bucket a partir da URL pública (ou null se a URL não for do bucket do site). */
++export function siteAssetPath(url: string | null | undefined): string | null {
++  if (!url) return null;
++  const i = url.indexOf(SITE_PUBLIC_MARKER);
++  return i === -1 ? null : decodeURIComponent(url.slice(i + SITE_PUBLIC_MARKER.length).split("?")[0] ?? "");
++}
++
++/** Todos os arquivos do bucket usados por um conteúdo do site (fotos e QR do Pix). */
++export function siteAssetPaths(content: { photos: { url: string }[]; pixKeys: { qrCode?: string | undefined }[] }): string[] {
++  const all = [...content.photos.map((p) => p.url), ...content.pixKeys.map((k) => k.qrCode)];
++  return all.map(siteAssetPath).filter((p): p is string => !!p);
++}
++
++/** "K7M29QXA" -> "K7M2-9QXA" (código curto do ingresso, para digitar quando a câmera não lê). */
++export function formatShortCode(code: string | null | undefined): string {
++  const c = (code ?? "").toUpperCase();
++  return c.length === 8 ? `${c.slice(0, 4)}-${c.slice(4)}` : c;
++}
+diff --git a/src/lib/site-editor.functions.ts b/src/lib/site-editor.functions.ts
+index 0103edc..c78f427 100644
+--- a/src/lib/site-editor.functions.ts
++++ b/src/lib/site-editor.functions.ts
+@@ -10,6 +10,11 @@ const textFields = Object.fromEntries(
+ const link = z
+   .string()
+   .refine((v) => !v || /^https:\/\//.test(v), "Use um link completo começando com https://");
++// Imagens ficam no armazenamento (bucket público "site-assets"); nada de imagem dentro do banco.
++const storageImage = z
++  .string()
++  .max(600)
++  .regex(/^https:\/\/[^/\s]+\/storage\/v1\/object\/public\/site-assets\/[A-Za-z0-9/_.-]+$/, "Imagem inválida. Envie novamente.");
+ const schema = z.object({
+   ...textFields,
+   instagramUrl: link,
+@@ -20,10 +25,7 @@ const schema = z.object({
+   photos: z
+     .array(
+       z.object({
+-        url: z
+-          .string()
+-          .max(700000)
+-          .regex(/^data:image\/jpeg;base64,/),
++        url: storageImage,
+         caption: z.string().max(300),
+       }),
+     )
+@@ -39,11 +41,7 @@ const schema = z.object({
+         label: z.string().max(100),
+         key: z.string().min(1).max(200),
+         recipient: z.string().max(200),
+-        qrCode: z
+-          .string()
+-          .max(700000)
+-          .regex(/^data:image\/jpeg;base64,/)
+-          .optional(),
++        qrCode: storageImage.optional(),
+       }),
+     )
+     .max(20),
+diff --git a/src/lib/site-images.ts b/src/lib/site-images.ts
+new file mode 100644
+index 0000000..1480614
+--- /dev/null
++++ b/src/lib/site-images.ts
+@@ -0,0 +1,21 @@
++import { supabase } from "@/integrations/supabase/client";
++import { SITE_BUCKET, compressImage, fileExt } from "@/lib/images";
++
++/** Compacta a imagem e envia para o armazenamento (bucket público do site). Devolve a URL pública. */
++export async function uploadSiteImage(file: File, kind: "photos" | "pix"): Promise<{ url: string; path: string }> {
++  if (!file.type.startsWith("image/") || file.size > 15 * 1024 * 1024) throw new Error("Escolha uma imagem de até 15 MB.");
++  // QR code precisa ficar nítido: PNG menor; fotos viram JPEG leve.
++  const blob =
++    kind === "pix"
++      ? await compressImage(file, { maxSide: 900, type: "image/png" })
++      : await compressImage(file, { maxSide: 1600, quality: 0.82 });
++  const path = `${kind}/${crypto.randomUUID()}.${fileExt(blob, file.name)}`;
++  const { error } = await supabase.storage.from(SITE_BUCKET).upload(path, blob, { contentType: blob.type || file.type, cacheControl: "31536000" });
++  if (error) throw new Error("Não foi possível enviar a imagem. Use JPG, PNG ou WebP de até 5 MB.");
++  return { url: supabase.storage.from(SITE_BUCKET).getPublicUrl(path).data.publicUrl, path };
++}
++
++/** Apaga arquivos que deixaram de ser usados (falhas são ignoradas: o site continua funcionando). */
++export async function removeSiteImages(paths: string[]) {
++  if (paths.length) await supabase.storage.from(SITE_BUCKET).remove(paths);
++}
+diff --git a/src/lib/sounds.ts b/src/lib/sounds.ts
+new file mode 100644
+index 0000000..7b83caa
+--- /dev/null
++++ b/src/lib/sounds.ts
+@@ -0,0 +1,46 @@
++/** Sons curtos gerados no próprio navegador (sem arquivos de áudio). */
++let ctx: AudioContext | null = null;
++
++function audio(): AudioContext | null {
++  if (typeof window === "undefined") return null;
++  const Ctor = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
++  if (!Ctor) return null;
++  ctx ??= new Ctor();
++  if (ctx.state === "suspended") void ctx.resume();
++  return ctx;
++}
++
++function tone(freq: number, start: number, duration: number, type: OscillatorType, volume: number) {
++  const c = audio();
++  if (!c) return;
++  const osc = c.createOscillator();
++  const gain = c.createGain();
++  osc.type = type;
++  osc.frequency.value = freq;
++  const t0 = c.currentTime + start;
++  gain.gain.setValueAtTime(0.0001, t0);
++  gain.gain.exponentialRampToValueAtTime(volume, t0 + 0.01);
++  gain.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
++  osc.connect(gain).connect(c.destination);
++  osc.start(t0);
++  osc.stop(t0 + duration + 0.02);
++}
++
++/** Chame num clique (iniciar a câmera) para o navegador liberar o som depois. */
++export function unlockAudio() {
++  audio();
++}
++
++/** "Leu o QR code": dois toques curtos subindo. */
++export function playRead() {
++  tone(880, 0, 0.12, "sine", 0.25);
++  tone(1320, 0.1, 0.18, "sine", 0.25);
++  if (typeof navigator !== "undefined") navigator.vibrate?.(60);
++}
++
++/** Aviso (já usado, inválido ou cancelado): dois toques graves. */
++export function playWarning() {
++  tone(260, 0, 0.18, "square", 0.12);
++  tone(200, 0.2, 0.28, "square", 0.12);
++  if (typeof navigator !== "undefined") navigator.vibrate?.([120, 60, 120]);
++}
+diff --git a/src/routes/_authenticated/painel.evento.$id.tsx b/src/routes/_authenticated/painel.evento.$id.tsx
+index 3f2263f..7d5ea92 100644
+--- a/src/routes/_authenticated/painel.evento.$id.tsx
++++ b/src/routes/_authenticated/painel.evento.$id.tsx
+@@ -1,8 +1,8 @@
+ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+-import { useState } from "react";
++import { useEffect, useState } from "react";
+ import { toast } from "sonner";
+-import { ArrowLeft, Camera, CameraOff, Download, ExternalLink } from "lucide-react";
++import { ArrowLeft, Camera, CameraOff, Download, ExternalLink, Volume2, VolumeX } from "lucide-react";
+ import { Bar, BarChart, CartesianGrid, Cell, Legend, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+ import { supabase } from "@/integrations/supabase/client";
+ import { useAccess } from "@/hooks/use-access";
+@@ -14,7 +14,9 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
+ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+ import { EventForm, draftFrom } from "@/components/events/EventForm";
+-import { QrScanner } from "@/components/events/QrScanner";
++import { QrScanner, type ScanFeedbackKind } from "@/components/events/QrScanner";
++import { formatShortCode } from "@/lib/images";
++import { playRead, playWarning, unlockAudio } from "@/lib/sounds";
+ import { downloadXls } from "@/lib/export";
+ import { eventError, fmtDateTime, moneyBR, PAYMENT_STATUS, REGISTRATION_STATUS, TICKET_STATUS } from "@/lib/events";
+ import { siteMeta } from "@/lib/site-query";
+@@ -413,7 +415,7 @@ function RegistrationDetail({ reg, onChange }: { reg: RegRow; onChange: () => vo
+ }
+ 
+ /* ------------------------------ Check-in ------------------------------ */
+-type ScanResult = { result: "ok" | "already" | "invalid" | "cancelled"; holder_name?: string; lot?: string; event_title?: string; checked_in_at?: string };
++type ScanResult = { result: "ok" | "already" | "invalid" | "cancelled"; holder_name?: string; lot?: string; event_title?: string; checked_in_at?: string; short_code?: string };
+ 
+ function CheckIn({ eventId, onChange }: { eventId: string; onChange: () => void }) {
+   const qc = useQueryClient();
+@@ -421,6 +423,15 @@ function CheckIn({ eventId, onChange }: { eventId: string; onChange: () => void
+   const [manual, setManual] = useState("");
+   const [last, setLast] = useState<ScanResult | null>(null);
+   const [search, setSearch] = useState("");
++  const [sound, setSound] = useState(true);
++  const [feedback, setFeedback] = useState<{ kind: ScanFeedbackKind; id: number } | null>(null);
++
++  // O sinal no centro da câmera some sozinho
++  useEffect(() => {
++    if (!feedback) return;
++    const t = setTimeout(() => setFeedback(null), 1500);
++    return () => clearTimeout(t);
++  }, [feedback]);
+ 
+   const tickets = useQuery({
+     queryKey: ["admin-tickets", eventId],
+@@ -431,15 +442,29 @@ function CheckIn({ eventId, onChange }: { eventId: string; onChange: () => void
+     },
+   });
+ 
+-  async function check(code: string) {
++  async function check(code: string, source: "camera" | "manual") {
++    // Câmera: o "certinho" e o som aparecem assim que o QR é lido, antes da resposta do servidor.
++    if (source === "camera") {
++      setFeedback({ kind: "ok", id: Date.now() });
++      if (sound) playRead();
++    }
+     const { data, error } = await supabase.rpc("checkin_ticket", { _code: code.trim() });
+     if (error) {
+       toast.error(eventError(error));
++      setFeedback({ kind: "error", id: Date.now() });
++      if (sound) playWarning();
+       return;
+     }
+     const res = data as unknown as ScanResult;
+     setLast(res);
+-    if (res.result === "ok") { qc.invalidateQueries({ queryKey: ["admin-tickets", eventId] }); onChange(); }
++    if (res.result === "ok") {
++      if (source === "manual" && sound) playRead();
++      qc.invalidateQueries({ queryKey: ["admin-tickets", eventId] });
++      onChange();
++    } else {
++      setFeedback({ kind: res.result === "already" ? "warn" : "error", id: Date.now() });
++      if (sound) playWarning();
++    }
+   }
+   const toggle = useMutation({
+     mutationFn: async ({ id, present }: { id: string; present: boolean }) => {
+@@ -452,25 +477,31 @@ function CheckIn({ eventId, onChange }: { eventId: string; onChange: () => void
+ 
+   const all = tickets.data ?? [];
+   const present = all.filter((t) => t.status === "checked_in").length;
+-  const shown = all.filter((t) => !search || t.holder_name.toLowerCase().includes(search.toLowerCase()));
++  const shown = all.filter((t) => !search || t.holder_name.toLowerCase().includes(search.toLowerCase()) || t.short_code.toLowerCase().includes(search.toLowerCase().replace(/[^a-z0-9]/g, "")));
+   const tone = last?.result === "ok" ? "border-green-600/40 bg-green-600/10" : last?.result === "already" ? "border-amber-500/50 bg-amber-500/10" : "border-destructive/40 bg-destructive/10";
+   const msg = { ok: "Presença registrada", already: "Este ingresso já foi usado", invalid: "Ingresso não encontrado", cancelled: "Ingresso cancelado ou ainda não liberado" };
+ 
+   return (
+     <div className="mt-4 grid gap-6 lg:grid-cols-[1fr_1.2fr]">
+       <div className="space-y-4">
+-        <Button variant={scanning ? "outline" : "default"} onClick={() => setScanning((s) => !s)}>
+-          {scanning ? <><CameraOff className="h-4 w-4" /> Parar câmera</> : <><Camera className="h-4 w-4" /> Ler QR code</>}
+-        </Button>
+-        {scanning && <QrScanner onScan={check} />}
+-        <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (manual.trim()) { check(manual); setManual(""); } }}>
+-          <Input placeholder="Ou digite/cole o código do ingresso" value={manual} onChange={(e) => setManual(e.target.value)} />
++        <div className="flex flex-wrap items-center gap-2">
++          <Button variant={scanning ? "outline" : "default"} onClick={() => { unlockAudio(); setScanning((s) => !s); }}>
++            {scanning ? <><CameraOff className="h-4 w-4" /> Parar câmera</> : <><Camera className="h-4 w-4" /> Ler QR code</>}
++          </Button>
++          <Button type="button" variant="ghost" size="sm" onClick={() => { unlockAudio(); setSound((v) => !v); }} aria-pressed={sound}>
++            {sound ? <><Volume2 className="h-4 w-4" /> Som ligado</> : <><VolumeX className="h-4 w-4" /> Som desligado</>}
++          </Button>
++        </div>
++        {scanning && <QrScanner onScan={(code) => check(code, "camera")} feedback={feedback?.kind ?? null} />}
++        <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (manual.trim()) { check(manual, "manual"); setManual(""); } }}>
++          <Input placeholder="Código do ingresso (ex.: K7M2-9QXA)" value={manual} onChange={(e) => setManual(e.target.value)} autoComplete="off" autoCapitalize="characters" />
+           <Button type="submit" variant="secondary">Validar</Button>
+         </form>
+         {last && (
+           <div className={`rounded-2xl border p-5 ${tone}`}>
+             <p className="text-lg font-semibold text-foreground">{msg[last.result]}</p>
+             {last.holder_name && <p className="mt-1 text-foreground">{last.holder_name}</p>}
++            {last.short_code && <p className="font-mono text-sm tracking-widest text-muted-foreground">{formatShortCode(last.short_code)}</p>}
+             {last.lot && <p className="text-sm text-muted-foreground">{last.lot}</p>}
+             {last.result === "already" && last.checked_in_at && <p className="text-sm text-muted-foreground">Entrou em {fmtDateTime(last.checked_in_at)}</p>}
+           </div>
+@@ -480,7 +511,7 @@ function CheckIn({ eventId, onChange }: { eventId: string; onChange: () => void
+       <div>
+         <div className="flex flex-wrap items-center justify-between gap-3">
+           <p className="font-semibold text-foreground">Presentes: {present} de {all.length}</p>
+-          <Input placeholder="Buscar por nome" value={search} onChange={(e) => setSearch(e.target.value)} className="w-52" />
++          <Input placeholder="Buscar por nome ou código" value={search} onChange={(e) => setSearch(e.target.value)} className="w-52" />
+         </div>
+         <div className="mt-3 max-h-[28rem] divide-y overflow-y-auto rounded-2xl border bg-card">
+           {tickets.isLoading && <p className="p-4 text-sm text-muted-foreground">Carregando...</p>}
+@@ -489,6 +520,7 @@ function CheckIn({ eventId, onChange }: { eventId: string; onChange: () => void
+             <div key={t.id} className="flex items-center justify-between gap-3 p-3 text-sm">
+               <div>
+                 <p className="font-medium text-foreground">{t.holder_name}</p>
++                <p className="font-mono text-xs tracking-widest text-muted-foreground">{formatShortCode(t.short_code)}</p>
+                 <Badge variant={t.status === "checked_in" ? "default" : "outline"}>{TICKET_STATUS[t.status] ?? t.status}</Badge>
+                 {t.checked_in_at && <span className="ml-2 text-xs text-muted-foreground">{fmtDateTime(t.checked_in_at)}</span>}
+               </div>
+diff --git a/src/routes/_authenticated/painel.financeiro.tsx b/src/routes/_authenticated/painel.financeiro.tsx
+index d9b38e7..0967b1b 100644
+--- a/src/routes/_authenticated/painel.financeiro.tsx
++++ b/src/routes/_authenticated/painel.financeiro.tsx
+@@ -11,6 +11,7 @@ import { EXPENSE_CATEGORIES, INCOME_CATEGORIES, MONTHS, PAYMENT_METHODS, brl, da
+ import { byCategory, expenses, goalProgress, inPeriod, incomes, sum, txRows, type Goal, type Tx, type TxWithMember } from "@/lib/finance";
+ import { downloadXls } from "@/lib/export";
+ import { MemberCombobox } from "@/components/members/MemberCombobox";
++import { compressImage, fileExt } from "@/lib/images";
+ import { Button } from "@/components/ui/button";
+ import { Input } from "@/components/ui/input";
+ import { Label } from "@/components/ui/label";
+@@ -354,8 +355,9 @@ function TxDialog({ draft, setDraft, onSave, saving }: { draft: TxDraft | null;
+ 
+   async function upload(f: File) {
+     setUploading(true);
+-    const path = `${new Date().getFullYear()}/${crypto.randomUUID()}.${f.name.split(".").pop() ?? "pdf"}`;
+-    const { error } = await supabase.storage.from("receipts").upload(path, f);
++    const blob = await compressImage(f, { maxSide: 1800, quality: 0.8 }); // PDFs seguem como estão
++    const path = `${new Date().getFullYear()}/${crypto.randomUUID()}.${fileExt(blob, f.name)}`;
++    const { error } = await supabase.storage.from("receipts").upload(path, blob, { contentType: blob.type || f.type });
+     setUploading(false);
+     if (error) { toast.error(error.message); return; }
+     set({ receipt_path: path });
+diff --git a/src/routes/_authenticated/painel.site.tsx b/src/routes/_authenticated/painel.site.tsx
+index daed068..0e7cd48 100644
+--- a/src/routes/_authenticated/painel.site.tsx
++++ b/src/routes/_authenticated/painel.site.tsx
+@@ -1,6 +1,6 @@
+ import { createFileRoute } from "@tanstack/react-router";
+ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+-import { useState } from "react";
++import { useRef, useState } from "react";
+ import { toast } from "sonner";
+ import { Save, Plus, Trash2, ImagePlus } from "lucide-react";
+ import { useAccess } from "@/hooks/use-access";
+@@ -13,6 +13,8 @@ import { contentFields, markdownFields, type ContentKey, type SiteContent } from
+ import { Markdown } from "@/components/site/Markdown";
+ import { siteQuery, siteMeta } from "@/lib/site-query";
+ import { saveSiteContent } from "@/lib/site-editor.functions";
++import { siteAssetPaths } from "@/lib/images";
++import { removeSiteImages, uploadSiteImage } from "@/lib/site-images";
+ 
+ export const Route = createFileRoute("/_authenticated/painel/site")({
+   head: () =>
+@@ -23,40 +25,24 @@ export const Route = createFileRoute("/_authenticated/painel/site")({
+   component: SiteEditor,
+ });
+ 
+-async function optimizePhoto(file: File): Promise<string> {
+-  if (!file.type.startsWith("image/") || file.size > 15 * 1024 * 1024)
+-    throw new Error("Escolha uma imagem de até 15 MB.");
+-  const bitmap = await createImageBitmap(file);
+-  const canvas = document.createElement("canvas");
+-  const scale = Math.min(1, 1400 / Math.max(bitmap.width, bitmap.height));
+-  canvas.width = Math.round(bitmap.width * scale);
+-  canvas.height = Math.round(bitmap.height * scale);
+-  const context = canvas.getContext("2d");
+-  if (!context) {
+-    bitmap.close();
+-    throw new Error("Não foi possível preparar a foto.");
+-  }
+-  context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+-  bitmap.close();
+-  let quality = 0.82;
+-  let result = canvas.toDataURL("image/jpeg", quality);
+-  while (result.length > 650000 && quality > 0.25) {
+-    quality -= 0.1;
+-    result = canvas.toDataURL("image/jpeg", quality);
+-  }
+-  if (result.length > 650000) throw new Error("Esta foto é muito grande. Escolha outra imagem.");
+-  return result;
+-}
+ function SiteEditor() {
+   const { isFullAccess, isLoading } = useAccess();
+   const content = useQuery({ ...siteQuery, enabled: isFullAccess });
+   const qc = useQueryClient();
+   const [draft, setDraft] = useState<SiteContent | null>(null);
+   const [uploading, setUploading] = useState(false);
++  // Arquivos enviados nesta sessão (para apagar os que acabarem não sendo usados)
++  const sessionUploads = useRef<Set<string>>(new Set());
+   const c = draft ?? content.data;
+   const save = useMutation({
+     mutationFn: () => saveSiteContent({ data: c }),
+     onSuccess: (saved) => {
++      // Libera espaço: apaga do armazenamento o que saiu do site (fotos/QR removidos ou trocados)
++      const previous = qc.getQueryData<SiteContent>(["site-content"]);
++      const keep = new Set(siteAssetPaths(saved));
++      const unused = new Set<string>([...(previous ? siteAssetPaths(previous) : []), ...sessionUploads.current].filter((p) => !keep.has(p)));
++      sessionUploads.current.clear();
++      void removeSiteImages([...unused]);
+       qc.setQueryData(["site-content"], saved);
+       setDraft(saved);
+       toast.success("Site atualizado");
+@@ -159,10 +145,9 @@ function SiteEditor() {
+                   }
+                   setUploading(true);
+                   try {
+-                    const photos = await Promise.all(
+-                      files.map(async (file) => ({ url: await optimizePhoto(file), caption: "" })),
+-                    );
+-                    setDraft({ ...c, photos: [...c.photos, ...photos] });
++                    const sent = await Promise.all(files.map((file) => uploadSiteImage(file, "photos")));
++                    sent.forEach((f) => sessionUploads.current.add(f.path));
++                    setDraft({ ...c, photos: [...c.photos, ...sent.map((f) => ({ url: f.url, caption: "" }))] });
+                   } catch (error) {
+                     toast.error(error instanceof Error ? error.message : "Erro ao preparar foto");
+                   } finally {
+@@ -172,7 +157,7 @@ function SiteEditor() {
+                 }}
+               />
+             </div>
+-            {uploading && <p className="mt-3 text-muted-foreground">Preparando fotos...</p>}
++            {uploading && <p className="mt-3 text-muted-foreground">Enviando fotos...</p>}
+             <div className="mt-6 grid gap-5 md:grid-cols-3">
+               {c.photos.map((photo, i) => (
+                 <div key={i} className="space-y-3">
+@@ -305,7 +290,9 @@ function SiteEditor() {
+                           if (!file) return;
+                           setUploading(true);
+                           try {
+-                            const qrCode = await optimizePhoto(file);
++                            const sent = await uploadSiteImage(file, "pix");
++                            sessionUploads.current.add(sent.path);
++                            const qrCode = sent.url;
+                             setDraft({
+                               ...c,
+                               pixKeys: c.pixKeys.map((r, j) => (j === i ? { ...r, qrCode } : r)),
+diff --git a/src/test/storage-and-tickets.test.tsx b/src/test/storage-and-tickets.test.tsx
+new file mode 100644
+index 0000000..a15ea81
+--- /dev/null
++++ b/src/test/storage-and-tickets.test.tsx
+@@ -0,0 +1,82 @@
++import { cleanup, render, screen, waitFor } from "@testing-library/react";
++import { afterEach, describe, expect, it, vi } from "vitest";
++import type { Tables } from "@/integrations/supabase/types";
++
++vi.mock("qrcode", () => ({ default: { toDataURL: async () => "data:image/png;base64,AAAA" } }));
++vi.mock("@/integrations/supabase/client", () => ({ supabase: {} }));
++vi.mock("@tanstack/react-router", () => ({ Link: ({ children }: { children: React.ReactNode }) => <a>{children}</a> }));
++
++import { TicketCard } from "@/components/events/MyTickets";
++import { ScanFeedback } from "@/components/events/QrScanner";
++import { fileExt, formatShortCode, siteAssetPath, siteAssetPaths } from "@/lib/images";
++import { playRead, playWarning, unlockAudio } from "@/lib/sounds";
++
++afterEach(cleanup);
++
++const ticket = (over: Partial<Tables<"event_tickets">> = {}): Tables<"event_tickets"> => ({
++  id: "t1", registration_id: "r1", event_id: "e1", seq: 1, code: "a".repeat(64), short_code: "K7M29QXA", holder_name: "Maria Souza",
++  status: "valid", checked_in_at: null, checked_in_by: null, created_at: "2026-10-18T10:00:00Z", ...over,
++});
++
++describe("ingresso do membro", () => {
++  it("mostra o QR e o código para digitar enquanto o ingresso é válido", async () => {
++    render(<TicketCard ticket={ticket()} total={2} />);
++    expect(screen.getByLabelText("Código do ingresso").textContent).toBe("K7M2-9QXA");
++    expect(screen.getByText(/Se a câmera não ler/)).toBeTruthy();
++    await waitFor(() => expect(screen.getByAltText(/QR code do ingresso de Maria Souza/)).toBeTruthy());
++    expect(screen.queryByText("Presença confirmada")).toBeNull();
++  });
++
++  it("depois da presença confirmada some o QR e o código e aparece só 'Presença confirmada'", async () => {
++    render(<TicketCard ticket={ticket({ status: "checked_in", checked_in_at: "2026-10-18T19:30:00Z" })} total={1} />);
++    expect(screen.getByText("Presença confirmada")).toBeTruthy();
++    expect(screen.queryByRole("img")).toBeNull();
++    expect(screen.queryByLabelText("Código do ingresso")).toBeNull();
++    expect(screen.queryByText(/Se a câmera não ler/)).toBeNull();
++  });
++
++  it("ingresso cancelado não mostra QR", () => {
++    render(<TicketCard ticket={ticket({ status: "cancelled" })} total={1} />);
++    expect(screen.getByText("Ingresso cancelado")).toBeTruthy();
++    expect(screen.queryByRole("img")).toBeNull();
++  });
++});
++
++describe("sinal da câmera", () => {
++  it("mostra o certinho de leitura, o aviso e o erro", () => {
++    const { rerender } = render(<ScanFeedback kind="ok" />);
++    expect(screen.getByText("QR code lido")).toBeTruthy();
++    rerender(<ScanFeedback kind="warn" />);
++    expect(screen.getByText("Atenção")).toBeTruthy();
++    rerender(<ScanFeedback kind="error" />);
++    expect(screen.getByText("Ingresso não aceito")).toBeTruthy();
++  });
++  it("os sons não quebram em navegador sem áudio", () => {
++    expect(() => { unlockAudio(); playRead(); playWarning(); }).not.toThrow();
++  });
++});
++
++describe("imagens no armazenamento", () => {
++  const base = "https://abc.supabase.co/storage/v1/object/public/site-assets";
++  it("extrai o caminho do arquivo a partir da URL pública", () => {
++    expect(siteAssetPath(`${base}/photos/x.jpg`)).toBe("photos/x.jpg");
++    expect(siteAssetPath(`${base}/pix/y.png?v=2`)).toBe("pix/y.png");
++    expect(siteAssetPath("https://outro.site/foto.jpg")).toBeNull();
++    expect(siteAssetPath(undefined)).toBeNull();
++  });
++  it("lista só os arquivos do bucket usados por fotos e QR do Pix", () => {
++    const paths = siteAssetPaths({
++      photos: [{ url: `${base}/photos/a.jpg` }, { url: "https://externo/b.jpg" }],
++      pixKeys: [{ qrCode: `${base}/pix/c.png` }, {}],
++    });
++    expect(paths).toEqual(["photos/a.jpg", "pix/c.png"]);
++  });
++  it("formata o código curto e escolhe a extensão pelo conteúdo", () => {
++    expect(formatShortCode("k7m29qxa")).toBe("K7M2-9QXA");
++    expect(formatShortCode(null)).toBe("");
++    expect(fileExt(new Blob([], { type: "image/png" }))).toBe("png");
++    expect(fileExt(new Blob([], { type: "image/jpeg" }))).toBe("jpg");
++    expect(fileExt(new Blob([], { type: "application/pdf" }))).toBe("pdf");
++    expect(fileExt(new Blob([], { type: "" }), "Recibo.PDF")).toBe("pdf");
++  });
++});
+-- 
+2.43.0
+
