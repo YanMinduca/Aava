@@ -1,0 +1,469 @@
+From a621e86ab1c7d9c33a4d045df2570f34c8fb32c5 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 18 Oct 2026 03:20:30 +0000
+Subject: [PATCH] =?UTF-8?q?Dashboard:=20volunt=C3=A1rios,=20departamentos,?=
+ =?UTF-8?q?=20dizimistas,=20eventos,=20metas=20e=20pedido=20de=20ora=C3=A7?=
+ =?UTF-8?q?=C3=A3o?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Voluntários (membros em pelo menos um departamento) e departamentos, respeitando o que a pessoa pode ver
+- Dizimistas do mês com seta de aumento/queda frente ao mês anterior
+- Eventos programados (quantidade e mais próximo)
+- Metas financeiras em andamento com progresso
+- Pedido de oração mais recente
+- Migration 0012 (dashboard_volunteer_stats) e testes
+---
+ .../0012_dashboard_volunteer_stats.sql        |  14 ++
+ drizzle/migrations/meta/_journal.json         |   7 +
+ roadmap.md                                    |   1 +
+ src/components/dashboard/DashboardCards.tsx   | 181 ++++++++++++++++++
+ src/integrations/supabase/types.ts            |   1 +
+ src/lib/dashboard.ts                          |  39 ++++
+ src/routes/_authenticated/painel.index.tsx    |  60 +++---
+ src/test/dashboard.test.ts                    |  52 +++++
+ 8 files changed, 323 insertions(+), 32 deletions(-)
+ create mode 100644 drizzle/migrations/0012_dashboard_volunteer_stats.sql
+ create mode 100644 src/components/dashboard/DashboardCards.tsx
+ create mode 100644 src/lib/dashboard.ts
+ create mode 100644 src/test/dashboard.test.ts
+
+diff --git a/drizzle/migrations/0012_dashboard_volunteer_stats.sql b/drizzle/migrations/0012_dashboard_volunteer_stats.sql
+new file mode 100644
+index 0000000..2c41594
+--- /dev/null
++++ b/drizzle/migrations/0012_dashboard_volunteer_stats.sql
+@@ -0,0 +1,14 @@
++-- Números do dashboard: quantos departamentos e quantas pessoas voluntárias (membros em pelo menos um departamento),
++-- contando só os departamentos que a pessoa logada pode ver. Pode rodar mais de uma vez.
++create or replace function public.dashboard_volunteer_stats()
++returns jsonb language sql stable security definer set search_path = public as $$
++  select jsonb_build_object(
++    'departments', count(distinct d.id),
++    'volunteers', count(distinct dm.member_id)
++  )
++  from public.departments d
++  left join public.department_members dm on dm.department_id = d.id
++  where public.can_view_department(auth.uid(), d.id);
++$$;
++revoke all on function public.dashboard_volunteer_stats() from public, anon;
++grant execute on function public.dashboard_volunteer_stats() to authenticated;
+diff --git a/drizzle/migrations/meta/_journal.json b/drizzle/migrations/meta/_journal.json
+index d9d0866..6bd9e1d 100644
+--- a/drizzle/migrations/meta/_journal.json
++++ b/drizzle/migrations/meta/_journal.json
+@@ -85,6 +85,13 @@
+       "when": 1791978000000,
+       "tag": "0011_events",
+       "breakpoints": true
++    },
++    {
++      "idx": 12,
++      "version": "7",
++      "when": 1792064400000,
++      "tag": "0012_dashboard_volunteer_stats",
++      "breakpoints": true
+     }
+   ]
+ }
+diff --git a/roadmap.md b/roadmap.md
+index 735223a..fd039f6 100644
+--- a/roadmap.md
++++ b/roadmap.md
+@@ -15,3 +15,4 @@
+ - [x] Financeiro: membro opcional em qualquer receita e gráfico de evolução mensal de dizimistas
+ - [x] Vínculo da conta ao cadastro existente: "Este é você?" por nome + confirmação de CPF
+ - [x] Sistema de eventos: landing, inscrição (membro/visitante), pagamento e parcelas, ingresso com QR, check-in e gráficos
++- [x] Dashboard: voluntários, departamentos, dizimistas com tendência, eventos, metas financeiras e pedido de oração mais recente
+diff --git a/src/components/dashboard/DashboardCards.tsx b/src/components/dashboard/DashboardCards.tsx
+new file mode 100644
+index 0000000..8410c47
+--- /dev/null
++++ b/src/components/dashboard/DashboardCards.tsx
+@@ -0,0 +1,181 @@
++import { Link } from "@tanstack/react-router";
++import { useQuery } from "@tanstack/react-query";
++import { CalendarDays, HandHeart, Minus, Network, Target, TrendingDown, TrendingUp, Users } from "lucide-react";
++import { supabase } from "@/integrations/supabase/client";
++import { useAccess } from "@/hooks/use-access";
++import { useDeptAccess } from "@/hooks/use-departments";
++import { Badge } from "@/components/ui/badge";
++import { brl } from "@/lib/church";
++import { activeGoals, tithersSummary, upcomingEvents } from "@/lib/dashboard";
++import { fmtLongDate, fmtTime } from "@/lib/events";
++import type { Json } from "@/integrations/supabase/types";
++
++const card = "rounded-2xl border bg-card p-6 transition-shadow hover:shadow-soft";
++const label = "flex items-center gap-2 text-sm text-muted-foreground";
++const big = "mt-2 font-display text-4xl text-foreground";
++const PRAYER_STATUS: Record<string, string> = { recebido: "Recebido", em_oracao: "Em oração", concluido: "Concluído" };
++
++/** Voluntários (membros em algum departamento) e departamentos. */
++export function VolunteerCards() {
++  const { manageAll } = useDeptAccess();
++  const stats = useQuery({
++    queryKey: ["dashboard-volunteers"],
++    queryFn: async () => {
++      const { data, error } = await supabase.rpc("dashboard_volunteer_stats");
++      if (error) throw error;
++      return data as Json as { departments: number; volunteers: number };
++    },
++  });
++  const s = stats.data;
++  if (!manageAll && !(s && s.departments > 0)) return null;
++  return (
++    <>
++      <Link to="/painel/departamentos" className={card}>
++        <p className={label}><Users className="h-4 w-4" /> Voluntários</p>
++        <p className={big}>{s?.volunteers ?? "—"}</p>
++        <p className="mt-1 text-xs text-muted-foreground">Pessoas em pelo menos um departamento</p>
++      </Link>
++      <Link to="/painel/departamentos" className={card}>
++        <p className={label}><Network className="h-4 w-4" /> Departamentos</p>
++        <p className={big}>{s?.departments ?? "—"}</p>
++      </Link>
++    </>
++  );
++}
++
++/** Dizimistas do mês e metas financeiras (usa as mesmas movimentações da tela Financeiro). */
++export function FinanceCards() {
++  const { can } = useAccess();
++  const tx = useQuery({
++    queryKey: ["dashboard-transactions"],
++    enabled: can("view_finance"),
++    queryFn: async () => (await supabase.from("financial_transactions").select("*")).data ?? [],
++  });
++  const goals = useQuery({
++    queryKey: ["dashboard-goals"],
++    enabled: can("view_finance"),
++    queryFn: async () => (await supabase.from("financial_goals").select("*").order("created_at")).data ?? [],
++  });
++  if (!can("view_finance")) return null;
++
++  const all = tx.data ?? [];
++  const t = tithersSummary(all);
++  const monthName = new Date().toLocaleDateString("pt-BR", { month: "long" });
++  const Trend = t.trend === "up" ? TrendingUp : t.trend === "down" ? TrendingDown : Minus;
++  const trendColor = t.trend === "up" ? "text-success" : t.trend === "down" ? "text-destructive" : "text-muted-foreground";
++  const trendText =
++    t.trend === "same" ? "Igual ao mês anterior" : `${t.delta > 0 ? "+" : ""}${t.delta} em relação ao mês anterior (${t.previous})`;
++  const top = activeGoals(goals.data ?? [], all);
++
++  return (
++    <>
++      <Link to="/painel/financeiro" className={card}>
++        <p className={label}><HandHeart className="h-4 w-4" /> Dizimistas</p>
++        <div className="mt-2 flex items-center gap-3">
++          <p className="font-display text-4xl text-foreground">{tx.data ? t.current : "—"}</p>
++          {tx.data && <Trend className={`h-7 w-7 ${trendColor}`} aria-label={t.trend === "up" ? "Aumento" : t.trend === "down" ? "Queda" : "Estável"} />}
++        </div>
++        <p className="mt-1 text-xs capitalize text-muted-foreground">Pessoas que dizimaram em {monthName}</p>
++        {tx.data && <p className={`mt-1 text-xs ${trendColor}`}>{trendText}</p>}
++        {tx.data && <p className="mt-1 text-xs text-muted-foreground">Mês em andamento · dízimos sem membro não entram</p>}
++      </Link>
++
++      <Link to="/painel/financeiro" className={`${card} md:col-span-2`}>
++        <p className={label}><Target className="h-4 w-4" /> Metas financeiras</p>
++        {goals.isLoading ? (
++          <p className="mt-3 text-sm text-muted-foreground">Carregando...</p>
++        ) : top.length === 0 ? (
++          <p className="mt-3 text-sm text-muted-foreground">Nenhuma meta em andamento.</p>
++        ) : (
++          <div className="mt-4 space-y-4">
++            {top.map(({ goal, raised, target, pct }) => (
++              <div key={goal.id}>
++                <div className="flex items-baseline justify-between gap-3 text-sm">
++                  <span className="truncate font-medium text-foreground">{goal.title}</span>
++                  <span className="shrink-0 text-muted-foreground">{Math.round(pct)}%</span>
++                </div>
++                <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-muted" role="progressbar" aria-valuenow={Math.round(pct)} aria-valuemin={0} aria-valuemax={100}>
++                  <div className="h-full rounded-full bg-primary" style={{ width: `${pct}%` }} />
++                </div>
++                <p className="mt-1 text-xs text-muted-foreground">{brl(raised)} de {brl(target)}</p>
++              </div>
++            ))}
++          </div>
++        )}
++      </Link>
++    </>
++  );
++}
++
++/** Quantidade de eventos programados e o mais próximo. */
++export function EventsCard() {
++  const { can } = useAccess();
++  const staff = can("manage_events") || can("verify_event_payments") || can("checkin_events");
++  const events = useQuery({
++    queryKey: ["dashboard-events"],
++    queryFn: async () => {
++      const now = new Date().toISOString();
++      const { data } = await supabase
++        .from("events")
++        .select("id, slug, title, starts_at, ends_at, published")
++        .or(`ends_at.gte.${now},starts_at.gte.${now}`)
++        .order("starts_at");
++      return data ?? [];
++    },
++  });
++  const list = upcomingEvents(events.data ?? []);
++  const next = list[0];
++  const body = (
++    <>
++      <p className={label}><CalendarDays className="h-4 w-4" /> Eventos</p>
++      <p className={big}>{events.isLoading ? "—" : list.length}</p>
++      <p className="mt-1 text-xs text-muted-foreground">{list.length === 1 ? "evento programado" : "eventos programados"}</p>
++      {next ? (
++        <div className="mt-4 border-t pt-3">
++          <p className="text-xs text-muted-foreground">Mais próximo</p>
++          <p className="mt-0.5 font-medium text-foreground">{next.title}</p>
++          <p className="text-xs capitalize text-muted-foreground">{fmtLongDate(next.starts_at)} · {fmtTime(next.starts_at)}</p>
++        </div>
++      ) : (
++        !events.isLoading && <p className="mt-4 border-t pt-3 text-sm text-muted-foreground">Nenhum evento programado.</p>
++      )}
++    </>
++  );
++  if (next && staff) return <Link to="/painel/evento/$id" params={{ id: next.id }} className={card}>{body}</Link>;
++  if (next) return <Link to="/eventos/$slug" params={{ slug: next.slug }} className={card}>{body}</Link>;
++  return <Link to={staff ? "/painel/eventos" : "/eventos"} className={card}>{body}</Link>;
++}
++
++/** Pedido de oração mais recente (quem vê todos os pedidos vê o último de todos; os demais, o seu). */
++export function PrayerCard() {
++  const { can } = useAccess();
++  const latest = useQuery({
++    queryKey: ["dashboard-prayer"],
++    enabled: can("view_prayer_requests"),
++    queryFn: async () => {
++      const { data } = await supabase.from("prayer_requests").select("id, subject, message, status, created_at").order("created_at", { ascending: false }).limit(1);
++      return data?.[0] ?? null;
++    },
++  });
++  if (!can("view_prayer_requests")) return null;
++  const p = latest.data;
++  return (
++    <Link to="/painel/oracao" className={`${card} md:col-span-3`}>
++      <p className={label}><HandHeart className="h-4 w-4" /> Pedido de oração mais recente</p>
++      {latest.isLoading ? (
++        <p className="mt-3 text-sm text-muted-foreground">Carregando...</p>
++      ) : !p ? (
++        <p className="mt-3 text-sm text-muted-foreground">Nenhum pedido de oração ainda.</p>
++      ) : (
++        <div className="mt-3">
++          <div className="flex flex-wrap items-center gap-3">
++            <p className="font-medium text-foreground">{p.subject}</p>
++            <Badge variant="secondary">{PRAYER_STATUS[p.status] ?? p.status}</Badge>
++            <span className="text-xs text-muted-foreground">{new Date(p.created_at).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" })}</span>
++          </div>
++          <p className="mt-2 line-clamp-2 text-sm text-muted-foreground">{p.message}</p>
++        </div>
++      )}
++    </Link>
++  );
++}
+diff --git a/src/integrations/supabase/types.ts b/src/integrations/supabase/types.ts
+index 0fa3a96..702d7f3 100644
+--- a/src/integrations/supabase/types.ts
++++ b/src/integrations/supabase/types.ts
+@@ -979,6 +979,7 @@ export type Database = {
+         Args: { _payment: string; _proof_path?: string }
+         Returns: undefined
+       }
++      dashboard_volunteer_stats: { Args: never; Returns: Json }
+       ensure_visitor_profile: {
+         Args: { _cpf: string; _name: string; _phone: string }
+         Returns: string
+diff --git a/src/lib/dashboard.ts b/src/lib/dashboard.ts
+new file mode 100644
+index 0000000..6be0227
+--- /dev/null
++++ b/src/lib/dashboard.ts
+@@ -0,0 +1,39 @@
++import { goalProgress, type Goal, type Tx } from "@/lib/finance";
++
++type TxLite = Pick<Tx, "kind" | "category" | "member_id" | "occurred_on">;
++
++const monthKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
++
++export type TithersSummary = { current: number; previous: number; delta: number; trend: "up" | "down" | "same" };
++
++/** Quantas pessoas diferentes dizimaram no mês atual e no anterior (dízimos sem membro não entram). */
++export function tithersSummary(all: TxLite[], now = new Date()): TithersSummary {
++  const cur = monthKey(now);
++  const prev = monthKey(new Date(now.getFullYear(), now.getMonth() - 1, 1));
++  const count = (key: string) =>
++    new Set(
++      all.filter((t) => t.kind === "entrada" && t.category === "Dízimos" && t.member_id && t.occurred_on.startsWith(key)).map((t) => t.member_id),
++    ).size;
++  const current = count(cur);
++  const previous = count(prev);
++  const delta = current - previous;
++  return { current, previous, delta, trend: delta > 0 ? "up" : delta < 0 ? "down" : "same" };
++}
++
++type EventLite = { starts_at: string; ends_at: string | null; published: boolean };
++
++/** Eventos publicados que ainda não terminaram, do mais próximo para o mais distante. */
++export function upcomingEvents<T extends EventLite>(events: T[], now = new Date()): T[] {
++  return events
++    .filter((e) => e.published && new Date(e.ends_at ?? e.starts_at) >= now)
++    .sort((a, b) => new Date(a.starts_at).getTime() - new Date(b.starts_at).getTime());
++}
++
++/** Metas em andamento com o progresso calculado; as de prazo mais próximo primeiro. */
++export function activeGoals(goals: Goal[], tx: Tx[], limit = 3) {
++  return goals
++    .filter((g) => g.status === "em_andamento")
++    .map((g) => ({ goal: g, ...goalProgress(g, tx) }))
++    .sort((a, b) => (a.goal.deadline ?? "9999-12-31").localeCompare(b.goal.deadline ?? "9999-12-31"))
++    .slice(0, limit);
++}
+diff --git a/src/routes/_authenticated/painel.index.tsx b/src/routes/_authenticated/painel.index.tsx
+index 2dd98c3..ab34f60 100644
+--- a/src/routes/_authenticated/painel.index.tsx
++++ b/src/routes/_authenticated/painel.index.tsx
+@@ -4,6 +4,7 @@ import { supabase } from "@/integrations/supabase/client";
+ import { useAccess } from "@/hooks/use-access";
+ import { brl } from "@/lib/church";
+ import { siteMeta } from "@/lib/site-query";
++import { EventsCard, FinanceCards, PrayerCard, VolunteerCards } from "@/components/dashboard/DashboardCards";
+ 
+ export const Route = createFileRoute("/_authenticated/painel/")({
+   head: () =>
+@@ -34,46 +35,41 @@ function Overview() {
+   });
+ 
+   if (isLoading) return null;
+-  const nothing = !can("view_members") && !can("view_finance");
++  const nothing = !can("view_members") && !can("view_finance") && !can("view_prayer_requests");
+ 
+   return (
+     <div>
+       <h1 className="text-3xl text-foreground">Visão geral</h1>
+-      {nothing ? (
++      {nothing && (
+         <p className="mt-4 text-muted-foreground">
+           Bem-vindo à comunidade! Acesse seu cadastro e conheça a nossa comunidade.
+         </p>
+-      ) : (
+-        <div className="mt-6 grid gap-4 md:grid-cols-3">
+-          {can("view_members") && (
+-            <Link
+-              to="/painel/membros"
+-              className="rounded-2xl border bg-card p-6 transition-shadow hover:shadow-soft"
+-            >
+-              <p className="text-sm text-muted-foreground">Membros cadastrados</p>
+-              <p className="mt-2 font-display text-4xl text-foreground">{members.data ?? "—"}</p>
+-            </Link>
+-          )}
+-          {can("view_finance") && (
+-            <>
+-              <Link
+-                to="/painel/financeiro"
+-                className="rounded-2xl border bg-card p-6 transition-shadow hover:shadow-soft"
+-              >
+-                <p className="text-sm text-muted-foreground">Saldo</p>
+-                <p className="mt-2 font-display text-4xl text-foreground">
+-                  {fin.data ? brl(fin.data.inc - fin.data.out) : "—"}
+-                </p>
+-              </Link>
+-              <div className="rounded-2xl border bg-card p-6">
+-                <p className="text-sm text-muted-foreground">Entradas / Saídas</p>
+-                <p className="mt-2 text-lg text-success">{fin.data ? brl(fin.data.inc) : "—"}</p>
+-                <p className="text-lg text-destructive">{fin.data ? brl(fin.data.out) : "—"}</p>
+-              </div>
+-            </>
+-          )}
+-        </div>
+       )}
++      <div className="mt-6 grid gap-4 md:grid-cols-3">
++        {can("view_members") && (
++          <Link to="/painel/membros" className="rounded-2xl border bg-card p-6 transition-shadow hover:shadow-soft">
++            <p className="text-sm text-muted-foreground">Membros cadastrados</p>
++            <p className="mt-2 font-display text-4xl text-foreground">{members.data ?? "—"}</p>
++          </Link>
++        )}
++        <VolunteerCards />
++        {can("view_finance") && (
++          <>
++            <Link to="/painel/financeiro" className="rounded-2xl border bg-card p-6 transition-shadow hover:shadow-soft">
++              <p className="text-sm text-muted-foreground">Saldo</p>
++              <p className="mt-2 font-display text-4xl text-foreground">{fin.data ? brl(fin.data.inc - fin.data.out) : "—"}</p>
++            </Link>
++            <div className="rounded-2xl border bg-card p-6">
++              <p className="text-sm text-muted-foreground">Entradas / Saídas</p>
++              <p className="mt-2 text-lg text-success">{fin.data ? brl(fin.data.inc) : "—"}</p>
++              <p className="text-lg text-destructive">{fin.data ? brl(fin.data.out) : "—"}</p>
++            </div>
++          </>
++        )}
++        <FinanceCards />
++        <EventsCard />
++        <PrayerCard />
++      </div>
+     </div>
+   );
+ }
+diff --git a/src/test/dashboard.test.ts b/src/test/dashboard.test.ts
+new file mode 100644
+index 0000000..0ceb797
+--- /dev/null
++++ b/src/test/dashboard.test.ts
+@@ -0,0 +1,52 @@
++import { describe, expect, it } from "vitest";
++import { activeGoals, tithersSummary, upcomingEvents } from "@/lib/dashboard";
++import type { Goal, Tx } from "@/lib/finance";
++
++const tx = (member_id: string | null, occurred_on: string, category = "Dízimos", kind = "entrada") => ({ kind, category, member_id, occurred_on }) as Tx;
++const NOW = new Date(2026, 9, 18); // 18/10/2026
++
++describe("resumo de dizimistas", () => {
++  it("conta pessoas diferentes por mês e compara com o mês anterior", () => {
++    const all = [
++      tx("a", "2026-10-02"), tx("a", "2026-10-15"), tx("b", "2026-10-05"), tx("c", "2026-10-09"), // outubro: a, b, c
++      tx("a", "2026-09-03"), tx("b", "2026-09-10"), // setembro: a, b
++      tx(null, "2026-10-10"), // dízimo sem membro não conta
++      tx("d", "2026-10-11", "Ofertas"), // oferta não conta
++      tx("e", "2026-10-12", "Dízimos", "saida"), // saída não conta
++    ];
++    expect(tithersSummary(all, NOW)).toEqual({ current: 3, previous: 2, delta: 1, trend: "up" });
++  });
++  it("indica queda e estabilidade", () => {
++    expect(tithersSummary([tx("a", "2026-09-01"), tx("b", "2026-09-02")], NOW)).toMatchObject({ current: 0, previous: 2, delta: -2, trend: "down" });
++    expect(tithersSummary([tx("a", "2026-10-01"), tx("a", "2026-09-01")], NOW)).toMatchObject({ delta: 0, trend: "same" });
++  });
++  it("em janeiro compara com dezembro do ano anterior", () => {
++    const jan = new Date(2027, 0, 20);
++    expect(tithersSummary([tx("a", "2027-01-05"), tx("b", "2026-12-05"), tx("c", "2026-12-06")], jan)).toMatchObject({ current: 1, previous: 2, trend: "down" });
++  });
++});
++
++describe("eventos do dashboard", () => {
++  it("ignora rascunhos e eventos já encerrados e ordena pelo mais próximo", () => {
++    const ev = [
++      { id: "longe", starts_at: "2026-12-01T10:00:00Z", ends_at: null, published: true },
++      { id: "rascunho", starts_at: "2026-10-20T10:00:00Z", ends_at: null, published: false },
++      { id: "perto", starts_at: "2026-10-25T10:00:00Z", ends_at: null, published: true },
++      { id: "passou", starts_at: "2026-10-01T10:00:00Z", ends_at: "2026-10-02T10:00:00Z", published: true },
++      { id: "em-andamento", starts_at: "2026-10-17T10:00:00Z", ends_at: "2026-10-19T10:00:00Z", published: true },
++    ];
++    expect(upcomingEvents(ev, NOW).map((e) => e.id)).toEqual(["em-andamento", "perto", "longe"]);
++  });
++});
++
++describe("metas em andamento", () => {
++  const goal = (id: string, status: string, deadline: string | null, target = 1000, manual: number | null = null) =>
++    ({ id, title: id, status, deadline, target_amount: target, manual_amount: manual, category: null, recurrence: "nao", start_date: null, responsible: null, created_at: "" }) as Goal;
++  it("mostra só as em andamento, com progresso, as de prazo mais próximo primeiro", () => {
++    const goals = [goal("sem-prazo", "em_andamento", null, 1000, 250), goal("concluida", "concluida", "2026-11-01"), goal("urgente", "em_andamento", "2026-11-01", 200, 100)];
++    const res = activeGoals(goals, [], 3);
++    expect(res.map((r) => r.goal.id)).toEqual(["urgente", "sem-prazo"]);
++    expect(res[0]).toMatchObject({ raised: 100, target: 200, pct: 50 });
++    expect(res[1]).toMatchObject({ raised: 250, pct: 25 });
++  });
++});
+-- 
+2.43.0
+

@@ -85,6 +85,13 @@
       "when": 1791978000000,
       "tag": "0011_events",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1792064400000,
+      "tag": "0012_dashboard_volunteer_stats",
+      "breakpoints": true
     }
   ]
 }
