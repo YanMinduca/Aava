@@ -17,6 +17,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { MemberForm, MemberAvatar, emptyMember, type MemberDraft } from "@/components/members/MemberForm";
 import { APPROVAL_LABELS, MEMBER_STATUS, ageFrom, dateBR } from "@/lib/church";
 import { downloadXls } from "@/lib/export";
+import { copyText } from "@/lib/clipboard";
 import { memberSaveError, saveMemberDepartmentLinks } from "@/lib/departments";
 import { useChurchRoles, useDepartments, useMemberDepartments } from "@/hooks/use-departments";
 
@@ -313,8 +314,7 @@ function Invites({ uid }: { uid: string | null }) {
     },
     onSuccess: (code) => {
       setNote("");
-      navigator.clipboard?.writeText(`${window.location.origin}/convite/${code}`);
-      toast.success("Convite criado e link copiado!");
+      void copyText(`${window.location.origin}/convite/${code}`).then((ok) => toast.success(ok ? "Convite criado e link copiado!" : "Convite criado! Use o botão Copiar link da lista."));
       qc.invalidateQueries({ queryKey: ["invites"] });
     },
     onError: (e) => toast.error(e.message),
@@ -346,7 +346,7 @@ function Invites({ uid }: { uid: string | null }) {
               </div>
               <div className="flex gap-1">
                 {valid && (
-                  <Button size="sm" variant="outline" onClick={() => { navigator.clipboard?.writeText(link(i.code)); toast.success("Link copiado"); }}>
+                  <Button size="sm" variant="outline" onClick={() => { void copyText(link(i.code)).then((ok) => (ok ? toast.success("Link copiado") : toast.error("Não foi possível copiar o link."))); }}>
                     <Copy className="h-4 w-4" /> Copiar link
                   </Button>
                 )}

@@ -1,5 +1,6 @@
 import { supabase } from "@/integrations/supabase/client";
 import { SITE_BUCKET, compressImage, fileExt } from "@/lib/images";
+import { uuid } from "@/lib/uuid";
 
 /** Compacta a imagem e envia para o armazenamento (bucket público do site). Devolve a URL pública. */
 export async function uploadSiteImage(file: File, kind: "photos" | "pix"): Promise<{ url: string; path: string }> {
@@ -9,7 +10,7 @@ export async function uploadSiteImage(file: File, kind: "photos" | "pix"): Promi
     kind === "pix"
       ? await compressImage(file, { maxSide: 900, type: "image/png" })
       : await compressImage(file, { maxSide: 1600, quality: 0.82 });
-  const path = `${kind}/${crypto.randomUUID()}.${fileExt(blob, file.name)}`;
+  const path = `${kind}/${uuid()}.${fileExt(blob, file.name)}`;
   const { error } = await supabase.storage.from(SITE_BUCKET).upload(path, blob, { contentType: blob.type || file.type, cacheControl: "31536000" });
   if (error) throw new Error("Não foi possível enviar a imagem. Use JPG, PNG ou WebP de até 5 MB.");
   return { url: supabase.storage.from(SITE_BUCKET).getPublicUrl(path).data.publicUrl, path };

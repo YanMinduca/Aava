@@ -1,0 +1,273 @@
+From 625cd7644aaffbb6e445002e24c28f50da13f244 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 18 Oct 2026 15:51:33 +0000
+Subject: [PATCH] =?UTF-8?q?Corrige=20'crypto.randomUUID=20is=20not=20a=20f?=
+ =?UTF-8?q?unction'=20em=20p=C3=A1ginas=20http://=20e=20a=20c=C3=B3pia=20d?=
+ =?UTF-8?q?a=20chave=20Pix?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- uuid() com fallback (getRandomValues) usado nos envios de foto do site, Pix, membros e recibos
+- copyText() com fallback para páginas sem navigator.clipboard (chave Pix, link de convite)
+- Testes
+---
+ src/components/events/MyTickets.tsx           |  3 +-
+ src/components/members/MemberForm.tsx         |  3 +-
+ src/components/site/ContributionContent.tsx   |  9 ++--
+ src/lib/clipboard.ts                          | 25 +++++++++++
+ src/lib/site-images.ts                        |  3 +-
+ src/lib/uuid.ts                               | 16 +++++++
+ .../_authenticated/painel.financeiro.tsx      |  3 +-
+ src/routes/_authenticated/painel.membros.tsx  |  6 +--
+ src/test/uuid.test.ts                         | 43 +++++++++++++++++++
+ 9 files changed, 98 insertions(+), 13 deletions(-)
+ create mode 100644 src/lib/clipboard.ts
+ create mode 100644 src/lib/uuid.ts
+ create mode 100644 src/test/uuid.test.ts
+
+diff --git a/src/components/events/MyTickets.tsx b/src/components/events/MyTickets.tsx
+index 596d7a8..21ccabe 100644
+--- a/src/components/events/MyTickets.tsx
++++ b/src/components/events/MyTickets.tsx
+@@ -6,6 +6,7 @@ import { toast } from "sonner";
+ import { CalendarDays, CheckCircle2, Copy, Download, ExternalLink, Upload } from "lucide-react";
+ import { supabase } from "@/integrations/supabase/client";
+ import { safeLink } from "@/lib/site-content";
++import { copyText } from "@/lib/clipboard";
+ import { compressImage, fileExt, formatShortCode } from "@/lib/images";
+ import { Badge } from "@/components/ui/badge";
+ import { Button } from "@/components/ui/button";
+@@ -88,7 +89,7 @@ function PaymentInstructions({ eventId }: { eventId: string }) {
+               <p className="text-xs text-muted-foreground">Chave Pix</p>
+               <p className="flex items-center gap-2 break-all font-mono text-foreground">
+                 {d.pix_key}
+-                <Button type="button" size="icon" variant="ghost" aria-label="Copiar chave Pix" onClick={() => navigator.clipboard.writeText(d.pix_key!).then(() => toast.success("Chave Pix copiada"))}><Copy className="h-4 w-4" /></Button>
++                <Button type="button" size="icon" variant="ghost" aria-label="Copiar chave Pix" onClick={async () => ((await copyText(d.pix_key!)) ? toast.success("Chave Pix copiada") : toast.error("Não foi possível copiar. Selecione a chave."))}><Copy className="h-4 w-4" /></Button>
+               </p>
+             </div>
+           )}
+diff --git a/src/components/members/MemberForm.tsx b/src/components/members/MemberForm.tsx
+index 4bca8cc..d525822 100644
+--- a/src/components/members/MemberForm.tsx
++++ b/src/components/members/MemberForm.tsx
+@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
+ import type { ReactNode } from "react";
+ import { Camera, ChevronDown, User } from "lucide-react";
+ import { compressImage, fileExt } from "@/lib/images";
++import { uuid } from "@/lib/uuid";
+ import { toast } from "sonner";
+ import { supabase } from "@/integrations/supabase/client";
+ import type { TablesInsert } from "@/integrations/supabase/types";
+@@ -139,7 +140,7 @@ export function MemberForm({
+   async function upload(file: File) {
+     setUploading(true);
+     const blob = await compressImage(file, { maxSide: 900, quality: 0.8 });
+-    const path = `${photoFolder}/${crypto.randomUUID()}.${fileExt(blob, file.name)}`;
++    const path = `${photoFolder}/${uuid()}.${fileExt(blob, file.name)}`;
+     const { error } = await supabase.storage.from("member-photos").upload(path, blob, { contentType: blob.type || file.type });
+     setUploading(false);
+     if (error) { toast.error(error.message); return; }
+diff --git a/src/components/site/ContributionContent.tsx b/src/components/site/ContributionContent.tsx
+index 8e0f9a6..48c1210 100644
+--- a/src/components/site/ContributionContent.tsx
++++ b/src/components/site/ContributionContent.tsx
+@@ -1,5 +1,6 @@
+ import { ArrowUpRight, Copy, Heart } from "lucide-react";
+ import { toast } from "sonner";
++import { copyText } from "@/lib/clipboard";
+ import { Button } from "@/components/ui/button";
+ import { safeLink, type SiteContent } from "@/lib/site-content";
+ 
+@@ -38,12 +39,8 @@ export function ContributionContent({ content: c }: { content: SiteContent }) {
+                       className="mt-5"
+                       variant="outline"
+                       onClick={async () => {
+-                        try {
+-                          await navigator.clipboard.writeText(pix.key);
+-                          toast.success("Chave Pix copiada");
+-                        } catch {
+-                          toast.error("Não foi possível copiar. Selecione a chave acima.");
+-                        }
++                        if (await copyText(pix.key)) toast.success("Chave Pix copiada");
++                        else toast.error("Não foi possível copiar. Selecione a chave acima.");
+                       }}
+                     >
+                       <Copy />
+diff --git a/src/lib/clipboard.ts b/src/lib/clipboard.ts
+new file mode 100644
+index 0000000..52152b1
+--- /dev/null
++++ b/src/lib/clipboard.ts
+@@ -0,0 +1,25 @@
++/** Copia texto. Funciona em HTTPS e também em http:// (onde `navigator.clipboard` não existe). */
++export async function copyText(text: string): Promise<boolean> {
++  try {
++    if (typeof window !== "undefined" && window.isSecureContext && navigator.clipboard?.writeText) {
++      await navigator.clipboard.writeText(text);
++      return true;
++    }
++  } catch {
++    // cai para o método antigo abaixo
++  }
++  try {
++    const ta = document.createElement("textarea");
++    ta.value = text;
++    ta.setAttribute("readonly", "");
++    ta.style.cssText = "position:fixed;top:0;left:0;opacity:0;pointer-events:none";
++    document.body.appendChild(ta);
++    ta.select();
++    ta.setSelectionRange(0, text.length);
++    const ok = document.execCommand("copy");
++    document.body.removeChild(ta);
++    return ok;
++  } catch {
++    return false;
++  }
++}
+diff --git a/src/lib/site-images.ts b/src/lib/site-images.ts
+index 1480614..fc3f6a8 100644
+--- a/src/lib/site-images.ts
++++ b/src/lib/site-images.ts
+@@ -1,5 +1,6 @@
+ import { supabase } from "@/integrations/supabase/client";
+ import { SITE_BUCKET, compressImage, fileExt } from "@/lib/images";
++import { uuid } from "@/lib/uuid";
+ 
+ /** Compacta a imagem e envia para o armazenamento (bucket público do site). Devolve a URL pública. */
+ export async function uploadSiteImage(file: File, kind: "photos" | "pix"): Promise<{ url: string; path: string }> {
+@@ -9,7 +10,7 @@ export async function uploadSiteImage(file: File, kind: "photos" | "pix"): Promi
+     kind === "pix"
+       ? await compressImage(file, { maxSide: 900, type: "image/png" })
+       : await compressImage(file, { maxSide: 1600, quality: 0.82 });
+-  const path = `${kind}/${crypto.randomUUID()}.${fileExt(blob, file.name)}`;
++  const path = `${kind}/${uuid()}.${fileExt(blob, file.name)}`;
+   const { error } = await supabase.storage.from(SITE_BUCKET).upload(path, blob, { contentType: blob.type || file.type, cacheControl: "31536000" });
+   if (error) throw new Error("Não foi possível enviar a imagem. Use JPG, PNG ou WebP de até 5 MB.");
+   return { url: supabase.storage.from(SITE_BUCKET).getPublicUrl(path).data.publicUrl, path };
+diff --git a/src/lib/uuid.ts b/src/lib/uuid.ts
+new file mode 100644
+index 0000000..a5217f7
+--- /dev/null
++++ b/src/lib/uuid.ts
+@@ -0,0 +1,16 @@
++/**
++ * Identificador aleatório (UUID v4) que funciona em qualquer contexto.
++ * `crypto.randomUUID` só existe em páginas seguras (HTTPS ou localhost); em http:// ele não existe e dava erro.
++ * `crypto.getRandomValues` funciona nos dois casos.
++ */
++export function uuid(): string {
++  const c = typeof globalThis !== "undefined" ? globalThis.crypto : undefined;
++  if (c && typeof c.randomUUID === "function") return c.randomUUID();
++  const b = new Uint8Array(16);
++  if (c && typeof c.getRandomValues === "function") c.getRandomValues(b);
++  else for (let i = 0; i < 16; i++) b[i] = Math.floor(Math.random() * 256);
++  b[6] = (b[6]! & 0x0f) | 0x40;
++  b[8] = (b[8]! & 0x3f) | 0x80;
++  const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
++  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
++}
+diff --git a/src/routes/_authenticated/painel.financeiro.tsx b/src/routes/_authenticated/painel.financeiro.tsx
+index 0967b1b..0cc7013 100644
+--- a/src/routes/_authenticated/painel.financeiro.tsx
++++ b/src/routes/_authenticated/painel.financeiro.tsx
+@@ -12,6 +12,7 @@ import { byCategory, expenses, goalProgress, inPeriod, incomes, sum, txRows, typ
+ import { downloadXls } from "@/lib/export";
+ import { MemberCombobox } from "@/components/members/MemberCombobox";
+ import { compressImage, fileExt } from "@/lib/images";
++import { uuid } from "@/lib/uuid";
+ import { Button } from "@/components/ui/button";
+ import { Input } from "@/components/ui/input";
+ import { Label } from "@/components/ui/label";
+@@ -356,7 +357,7 @@ function TxDialog({ draft, setDraft, onSave, saving }: { draft: TxDraft | null;
+   async function upload(f: File) {
+     setUploading(true);
+     const blob = await compressImage(f, { maxSide: 1800, quality: 0.8 }); // PDFs seguem como estão
+-    const path = `${new Date().getFullYear()}/${crypto.randomUUID()}.${fileExt(blob, f.name)}`;
++    const path = `${new Date().getFullYear()}/${uuid()}.${fileExt(blob, f.name)}`;
+     const { error } = await supabase.storage.from("receipts").upload(path, blob, { contentType: blob.type || f.type });
+     setUploading(false);
+     if (error) { toast.error(error.message); return; }
+diff --git a/src/routes/_authenticated/painel.membros.tsx b/src/routes/_authenticated/painel.membros.tsx
+index 3e6a7df..b30f8ea 100644
+--- a/src/routes/_authenticated/painel.membros.tsx
++++ b/src/routes/_authenticated/painel.membros.tsx
+@@ -17,6 +17,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
+ import { MemberForm, MemberAvatar, emptyMember, type MemberDraft } from "@/components/members/MemberForm";
+ import { APPROVAL_LABELS, MEMBER_STATUS, ageFrom, dateBR } from "@/lib/church";
+ import { downloadXls } from "@/lib/export";
++import { copyText } from "@/lib/clipboard";
+ import { memberSaveError, saveMemberDepartmentLinks } from "@/lib/departments";
+ import { useChurchRoles, useDepartments, useMemberDepartments } from "@/hooks/use-departments";
+ 
+@@ -313,8 +314,7 @@ function Invites({ uid }: { uid: string | null }) {
+     },
+     onSuccess: (code) => {
+       setNote("");
+-      navigator.clipboard?.writeText(`${window.location.origin}/convite/${code}`);
+-      toast.success("Convite criado e link copiado!");
++      void copyText(`${window.location.origin}/convite/${code}`).then((ok) => toast.success(ok ? "Convite criado e link copiado!" : "Convite criado! Use o botão Copiar link da lista."));
+       qc.invalidateQueries({ queryKey: ["invites"] });
+     },
+     onError: (e) => toast.error(e.message),
+@@ -346,7 +346,7 @@ function Invites({ uid }: { uid: string | null }) {
+               </div>
+               <div className="flex gap-1">
+                 {valid && (
+-                  <Button size="sm" variant="outline" onClick={() => { navigator.clipboard?.writeText(link(i.code)); toast.success("Link copiado"); }}>
++                  <Button size="sm" variant="outline" onClick={() => { void copyText(link(i.code)).then((ok) => (ok ? toast.success("Link copiado") : toast.error("Não foi possível copiar o link."))); }}>
+                     <Copy className="h-4 w-4" /> Copiar link
+                   </Button>
+                 )}
+diff --git a/src/test/uuid.test.ts b/src/test/uuid.test.ts
+new file mode 100644
+index 0000000..065fd1b
+--- /dev/null
++++ b/src/test/uuid.test.ts
+@@ -0,0 +1,43 @@
++import { afterEach, describe, expect, it, vi } from "vitest";
++import { uuid } from "@/lib/uuid";
++
++const V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
++afterEach(() => vi.unstubAllGlobals());
++
++describe("uuid", () => {
++  it("usa crypto.randomUUID quando o navegador oferece", () => {
++    vi.stubGlobal("crypto", { randomUUID: () => "11111111-2222-4333-8444-555555555555" });
++    expect(uuid()).toBe("11111111-2222-4333-8444-555555555555");
++  });
++
++  it("funciona em página http:// (sem randomUUID), gerando UUID v4 válido e diferente a cada chamada", () => {
++    vi.stubGlobal("crypto", { getRandomValues: (a: Uint8Array) => { for (let i = 0; i < a.length; i++) a[i] = Math.floor(Math.random() * 256); return a; } });
++    const ids = Array.from({ length: 200 }, () => uuid());
++    expect(ids.every((id) => V4.test(id))).toBe(true);
++    expect(new Set(ids).size).toBe(200);
++  });
++
++  it("ainda funciona se não houver nenhum crypto", () => {
++    vi.stubGlobal("crypto", undefined);
++    expect(uuid()).toMatch(V4);
++  });
++});
++
++import { copyText } from "@/lib/clipboard";
++
++describe("copyText", () => {
++  it("usa o método antigo (execCommand) em página sem clipboard, como http://", async () => {
++    vi.stubGlobal("navigator", {});
++    const exec = vi.fn(() => true);
++    (document as unknown as { execCommand: typeof exec }).execCommand = exec;
++    expect(await copyText("chave-pix")).toBe(true);
++    expect(exec).toHaveBeenCalledWith("copy");
++  });
++  it("usa navigator.clipboard quando a página é segura", async () => {
++    const writeText = vi.fn(async () => undefined);
++    vi.stubGlobal("navigator", { clipboard: { writeText } });
++    vi.stubGlobal("isSecureContext", true);
++    expect(await copyText("abc")).toBe(true);
++    expect(writeText).toHaveBeenCalledWith("abc");
++  });
++});
+-- 
+2.43.0
+

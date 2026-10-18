@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { CalendarDays, CheckCircle2, Copy, Download, ExternalLink, Upload } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { safeLink } from "@/lib/site-content";
+import { copyText } from "@/lib/clipboard";
 import { compressImage, fileExt, formatShortCode } from "@/lib/images";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -88,7 +89,7 @@ function PaymentInstructions({ eventId }: { eventId: string }) {
               <p className="text-xs text-muted-foreground">Chave Pix</p>
               <p className="flex items-center gap-2 break-all font-mono text-foreground">
                 {d.pix_key}
-                <Button type="button" size="icon" variant="ghost" aria-label="Copiar chave Pix" onClick={() => navigator.clipboard.writeText(d.pix_key!).then(() => toast.success("Chave Pix copiada"))}><Copy className="h-4 w-4" /></Button>
+                <Button type="button" size="icon" variant="ghost" aria-label="Copiar chave Pix" onClick={async () => ((await copyText(d.pix_key!)) ? toast.success("Chave Pix copiada") : toast.error("Não foi possível copiar. Selecione a chave."))}><Copy className="h-4 w-4" /></Button>
               </p>
             </div>
           )}
