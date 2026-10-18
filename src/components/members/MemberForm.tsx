@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { Camera, ChevronDown, User } from "lucide-react";
+import { compressImage, fileExt } from "@/lib/images";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 import type { TablesInsert } from "@/integrations/supabase/types";
@@ -137,9 +138,9 @@ export function MemberForm({
 
   async function upload(file: File) {
     setUploading(true);
-    const ext = file.name.split(".").pop() ?? "jpg";
-    const path = `${photoFolder}/${crypto.randomUUID()}.${ext}`;
-    const { error } = await supabase.storage.from("member-photos").upload(path, file);
+    const blob = await compressImage(file, { maxSide: 900, quality: 0.8 });
+    const path = `${photoFolder}/${crypto.randomUUID()}.${fileExt(blob, file.name)}`;
+    const { error } = await supabase.storage.from("member-photos").upload(path, blob, { contentType: blob.type || file.type });
     setUploading(false);
     if (error) { toast.error(error.message); return; }
     set({ photo_path: path });

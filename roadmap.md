@@ -16,3 +16,5 @@
 - [x] Vínculo da conta ao cadastro existente: "Este é você?" por nome + confirmação de CPF
 - [x] Sistema de eventos: landing, inscrição (membro/visitante), pagamento e parcelas, ingresso com QR, check-in e gráficos
 - [x] Dashboard: voluntários, departamentos, dizimistas com tendência, eventos, metas financeiras e pedido de oração mais recente
+- [x] Imagens fora do banco: fotos do site e QR do Pix no armazenamento; uploads compactados
+- [x] Ingresso com código curto, "Presença confirmada" no lugar do QR, sinal e som na leitura

@@ -10,6 +10,11 @@ const textFields = Object.fromEntries(
 const link = z
   .string()
   .refine((v) => !v || /^https:\/\//.test(v), "Use um link completo começando com https://");
+// Imagens ficam no armazenamento (bucket público "site-assets"); nada de imagem dentro do banco.
+const storageImage = z
+  .string()
+  .max(600)
+  .regex(/^https:\/\/[^/\s]+\/storage\/v1\/object\/public\/site-assets\/[A-Za-z0-9/_.-]+$/, "Imagem inválida. Envie novamente.");
 const schema = z.object({
   ...textFields,
   instagramUrl: link,
@@ -20,10 +25,7 @@ const schema = z.object({
   photos: z
     .array(
       z.object({
-        url: z
-          .string()
-          .max(700000)
-          .regex(/^data:image\/jpeg;base64,/),
+        url: storageImage,
         caption: z.string().max(300),
       }),
     )
@@ -39,11 +41,7 @@ const schema = z.object({
         label: z.string().max(100),
         key: z.string().min(1).max(200),
         recipient: z.string().max(200),
-        qrCode: z
-          .string()
-          .max(700000)
-          .regex(/^data:image\/jpeg;base64,/)
-          .optional(),
+        qrCode: storageImage.optional(),
       }),
     )
     .max(20),

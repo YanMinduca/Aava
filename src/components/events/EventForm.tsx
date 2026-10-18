@@ -12,6 +12,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { eventError, fromLocalInput, slugify, toLocalInput } from "@/lib/events";
+import { compressImage, fileExt } from "@/lib/images";
 import type { Tables } from "@/integrations/supabase/types";
 
 export type LotDraft = { id?: string; name: string; price: string; capacity: string; public_access: boolean; opens_at: string; closes_at: string };
@@ -150,9 +151,9 @@ async function saveEvent(d: EventDraft, userId: string | null | undefined, qrFil
   // Dados de pagamento (privados: só quem se inscreveu e a equipe enxergam)
   let qrPath = d.pix_qr_path || null;
   if (qrFile) {
-    const ext = (qrFile.name.split(".").pop() ?? "png").toLowerCase().replace(/[^a-z0-9]/g, "") || "png";
-    const path = `${eventId}/qr-${Date.now()}.${ext}`;
-    const { error } = await supabase.storage.from("event-assets").upload(path, qrFile);
+    const blob = await compressImage(qrFile, { maxSide: 900, type: "image/png" }); // QR precisa ficar nítido
+    const path = `${eventId}/qr-${Date.now()}.${fileExt(blob, qrFile.name)}`;
+    const { error } = await supabase.storage.from("event-assets").upload(path, blob, { contentType: blob.type || qrFile.type });
     if (error) throw new Error("Não foi possível enviar a imagem do QR code.");
     if (qrPath) await supabase.storage.from("event-assets").remove([qrPath]);
     qrPath = path;

@@ -1,8 +1,8 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { ArrowLeft, Camera, CameraOff, Download, ExternalLink } from "lucide-react";
+import { ArrowLeft, Camera, CameraOff, Download, ExternalLink, Volume2, VolumeX } from "lucide-react";
 import { Bar, BarChart, CartesianGrid, Cell, Legend, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { supabase } from "@/integrations/supabase/client";
 import { useAccess } from "@/hooks/use-access";
@@ -14,7 +14,9 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { EventForm, draftFrom } from "@/components/events/EventForm";
-import { QrScanner } from "@/components/events/QrScanner";
+import { QrScanner, type ScanFeedbackKind } from "@/components/events/QrScanner";
+import { formatShortCode } from "@/lib/images";
+import { playRead, playWarning, unlockAudio } from "@/lib/sounds";
 import { downloadXls } from "@/lib/export";
 import { eventError, fmtDateTime, moneyBR, PAYMENT_STATUS, REGISTRATION_STATUS, TICKET_STATUS } from "@/lib/events";
 import { siteMeta } from "@/lib/site-query";
@@ -413,7 +415,7 @@ function RegistrationDetail({ reg, onChange }: { reg: RegRow; onChange: () => vo
 }
 
 /* ------------------------------ Check-in ------------------------------ */
-type ScanResult = { result: "ok" | "already" | "invalid" | "cancelled"; holder_name?: string; lot?: string; event_title?: string; checked_in_at?: string };
+type ScanResult = { result: "ok" | "already" | "invalid" | "cancelled"; holder_name?: string; lot?: string; event_title?: string; checked_in_at?: string; short_code?: string };
 
 function CheckIn({ eventId, onChange }: { eventId: string; onChange: () => void }) {
   const qc = useQueryClient();
@@ -421,6 +423,15 @@ function CheckIn({ eventId, onChange }: { eventId: string; onChange: () => void 
   const [manual, setManual] = useState("");
   const [last, setLast] = useState<ScanResult | null>(null);
   const [search, setSearch] = useState("");
+  const [sound, setSound] = useState(true);
+  const [feedback, setFeedback] = useState<{ kind: ScanFeedbackKind; id: number } | null>(null);
+
+  // O sinal no centro da câmera some sozinho
+  useEffect(() => {
+    if (!feedback) return;
+    const t = setTimeout(() => setFeedback(null), 1500);
+    return () => clearTimeout(t);
+  }, [feedback]);
 
   const tickets = useQuery({
     queryKey: ["admin-tickets", eventId],
@@ -431,15 +442,29 @@ function CheckIn({ eventId, onChange }: { eventId: string; onChange: () => void 
     },
   });
 
-  async function check(code: string) {
+  async function check(code: string, source: "camera" | "manual") {
+    // Câmera: o "certinho" e o som aparecem assim que o QR é lido, antes da resposta do servidor.
+    if (source === "camera") {
+      setFeedback({ kind: "ok", id: Date.now() });
+      if (sound) playRead();
+    }
     const { data, error } = await supabase.rpc("checkin_ticket", { _code: code.trim() });
     if (error) {
       toast.error(eventError(error));
+      setFeedback({ kind: "error", id: Date.now() });
+      if (sound) playWarning();
       return;
     }
     const res = data as unknown as ScanResult;
     setLast(res);
-    if (res.result === "ok") { qc.invalidateQueries({ queryKey: ["admin-tickets", eventId] }); onChange(); }
+    if (res.result === "ok") {
+      if (source === "manual" && sound) playRead();
+      qc.invalidateQueries({ queryKey: ["admin-tickets", eventId] });
+      onChange();
+    } else {
+      setFeedback({ kind: res.result === "already" ? "warn" : "error", id: Date.now() });
+      if (sound) playWarning();
+    }
   }
   const toggle = useMutation({
     mutationFn: async ({ id, present }: { id: string; present: boolean }) => {
@@ -452,25 +477,31 @@ function CheckIn({ eventId, onChange }: { eventId: string; onChange: () => void 
 
   const all = tickets.data ?? [];
   const present = all.filter((t) => t.status === "checked_in").length;
-  const shown = all.filter((t) => !search || t.holder_name.toLowerCase().includes(search.toLowerCase()));
+  const shown = all.filter((t) => !search || t.holder_name.toLowerCase().includes(search.toLowerCase()) || t.short_code.toLowerCase().includes(search.toLowerCase().replace(/[^a-z0-9]/g, "")));
   const tone = last?.result === "ok" ? "border-green-600/40 bg-green-600/10" : last?.result === "already" ? "border-amber-500/50 bg-amber-500/10" : "border-destructive/40 bg-destructive/10";
   const msg = { ok: "Presença registrada", already: "Este ingresso já foi usado", invalid: "Ingresso não encontrado", cancelled: "Ingresso cancelado ou ainda não liberado" };
 
   return (
     <div className="mt-4 grid gap-6 lg:grid-cols-[1fr_1.2fr]">
       <div className="space-y-4">
-        <Button variant={scanning ? "outline" : "default"} onClick={() => setScanning((s) => !s)}>
-          {scanning ? <><CameraOff className="h-4 w-4" /> Parar câmera</> : <><Camera className="h-4 w-4" /> Ler QR code</>}
-        </Button>
-        {scanning && <QrScanner onScan={check} />}
-        <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (manual.trim()) { check(manual); setManual(""); } }}>
-          <Input placeholder="Ou digite/cole o código do ingresso" value={manual} onChange={(e) => setManual(e.target.value)} />
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant={scanning ? "outline" : "default"} onClick={() => { unlockAudio(); setScanning((s) => !s); }}>
+            {scanning ? <><CameraOff className="h-4 w-4" /> Parar câmera</> : <><Camera className="h-4 w-4" /> Ler QR code</>}
+          </Button>
+          <Button type="button" variant="ghost" size="sm" onClick={() => { unlockAudio(); setSound((v) => !v); }} aria-pressed={sound}>
+            {sound ? <><Volume2 className="h-4 w-4" /> Som ligado</> : <><VolumeX className="h-4 w-4" /> Som desligado</>}
+          </Button>
+        </div>
+        {scanning && <QrScanner onScan={(code) => check(code, "camera")} feedback={feedback?.kind ?? null} />}
+        <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (manual.trim()) { check(manual, "manual"); setManual(""); } }}>
+          <Input placeholder="Código do ingresso (ex.: K7M2-9QXA)" value={manual} onChange={(e) => setManual(e.target.value)} autoComplete="off" autoCapitalize="characters" />
           <Button type="submit" variant="secondary">Validar</Button>
         </form>
         {last && (
           <div className={`rounded-2xl border p-5 ${tone}`}>
             <p className="text-lg font-semibold text-foreground">{msg[last.result]}</p>
             {last.holder_name && <p className="mt-1 text-foreground">{last.holder_name}</p>}
+            {last.short_code && <p className="font-mono text-sm tracking-widest text-muted-foreground">{formatShortCode(last.short_code)}</p>}
             {last.lot && <p className="text-sm text-muted-foreground">{last.lot}</p>}
             {last.result === "already" && last.checked_in_at && <p className="text-sm text-muted-foreground">Entrou em {fmtDateTime(last.checked_in_at)}</p>}
           </div>
@@ -480,7 +511,7 @@ function CheckIn({ eventId, onChange }: { eventId: string; onChange: () => void 
       <div>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="font-semibold text-foreground">Presentes: {present} de {all.length}</p>
-          <Input placeholder="Buscar por nome" value={search} onChange={(e) => setSearch(e.target.value)} className="w-52" />
+          <Input placeholder="Buscar por nome ou código" value={search} onChange={(e) => setSearch(e.target.value)} className="w-52" />
         </div>
         <div className="mt-3 max-h-[28rem] divide-y overflow-y-auto rounded-2xl border bg-card">
           {tickets.isLoading && <p className="p-4 text-sm text-muted-foreground">Carregando...</p>}
@@ -489,6 +520,7 @@ function CheckIn({ eventId, onChange }: { eventId: string; onChange: () => void 
             <div key={t.id} className="flex items-center justify-between gap-3 p-3 text-sm">
               <div>
                 <p className="font-medium text-foreground">{t.holder_name}</p>
+                <p className="font-mono text-xs tracking-widest text-muted-foreground">{formatShortCode(t.short_code)}</p>
                 <Badge variant={t.status === "checked_in" ? "default" : "outline"}>{TICKET_STATUS[t.status] ?? t.status}</Badge>
                 {t.checked_in_at && <span className="ml-2 text-xs text-muted-foreground">{fmtDateTime(t.checked_in_at)}</span>}
               </div>

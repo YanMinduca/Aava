@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { toast } from "sonner";
 import { Save, Plus, Trash2, ImagePlus } from "lucide-react";
 import { useAccess } from "@/hooks/use-access";
@@ -13,6 +13,8 @@ import { contentFields, markdownFields, type ContentKey, type SiteContent } from
 import { Markdown } from "@/components/site/Markdown";
 import { siteQuery, siteMeta } from "@/lib/site-query";
 import { saveSiteContent } from "@/lib/site-editor.functions";
+import { siteAssetPaths } from "@/lib/images";
+import { removeSiteImages, uploadSiteImage } from "@/lib/site-images";
 
 export const Route = createFileRoute("/_authenticated/painel/site")({
   head: () =>
@@ -23,40 +25,24 @@ export const Route = createFileRoute("/_authenticated/painel/site")({
   component: SiteEditor,
 });
 
-async function optimizePhoto(file: File): Promise<string> {
-  if (!file.type.startsWith("image/") || file.size > 15 * 1024 * 1024)
-    throw new Error("Escolha uma imagem de até 15 MB.");
-  const bitmap = await createImageBitmap(file);
-  const canvas = document.createElement("canvas");
-  const scale = Math.min(1, 1400 / Math.max(bitmap.width, bitmap.height));
-  canvas.width = Math.round(bitmap.width * scale);
-  canvas.height = Math.round(bitmap.height * scale);
-  const context = canvas.getContext("2d");
-  if (!context) {
-    bitmap.close();
-    throw new Error("Não foi possível preparar a foto.");
-  }
-  context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-  bitmap.close();
-  let quality = 0.82;
-  let result = canvas.toDataURL("image/jpeg", quality);
-  while (result.length > 650000 && quality > 0.25) {
-    quality -= 0.1;
-    result = canvas.toDataURL("image/jpeg", quality);
-  }
-  if (result.length > 650000) throw new Error("Esta foto é muito grande. Escolha outra imagem.");
-  return result;
-}
 function SiteEditor() {
   const { isFullAccess, isLoading } = useAccess();
   const content = useQuery({ ...siteQuery, enabled: isFullAccess });
   const qc = useQueryClient();
   const [draft, setDraft] = useState<SiteContent | null>(null);
   const [uploading, setUploading] = useState(false);
+  // Arquivos enviados nesta sessão (para apagar os que acabarem não sendo usados)
+  const sessionUploads = useRef<Set<string>>(new Set());
   const c = draft ?? content.data;
   const save = useMutation({
     mutationFn: () => saveSiteContent({ data: c }),
     onSuccess: (saved) => {
+      // Libera espaço: apaga do armazenamento o que saiu do site (fotos/QR removidos ou trocados)
+      const previous = qc.getQueryData<SiteContent>(["site-content"]);
+      const keep = new Set(siteAssetPaths(saved));
+      const unused = new Set<string>([...(previous ? siteAssetPaths(previous) : []), ...sessionUploads.current].filter((p) => !keep.has(p)));
+      sessionUploads.current.clear();
+      void removeSiteImages([...unused]);
       qc.setQueryData(["site-content"], saved);
       setDraft(saved);
       toast.success("Site atualizado");
@@ -159,10 +145,9 @@ function SiteEditor() {
                   }
                   setUploading(true);
                   try {
-                    const photos = await Promise.all(
-                      files.map(async (file) => ({ url: await optimizePhoto(file), caption: "" })),
-                    );
-                    setDraft({ ...c, photos: [...c.photos, ...photos] });
+                    const sent = await Promise.all(files.map((file) => uploadSiteImage(file, "photos")));
+                    sent.forEach((f) => sessionUploads.current.add(f.path));
+                    setDraft({ ...c, photos: [...c.photos, ...sent.map((f) => ({ url: f.url, caption: "" }))] });
                   } catch (error) {
                     toast.error(error instanceof Error ? error.message : "Erro ao preparar foto");
                   } finally {
@@ -172,7 +157,7 @@ function SiteEditor() {
                 }}
               />
             </div>
-            {uploading && <p className="mt-3 text-muted-foreground">Preparando fotos...</p>}
+            {uploading && <p className="mt-3 text-muted-foreground">Enviando fotos...</p>}
             <div className="mt-6 grid gap-5 md:grid-cols-3">
               {c.photos.map((photo, i) => (
                 <div key={i} className="space-y-3">
@@ -305,7 +290,9 @@ function SiteEditor() {
                           if (!file) return;
                           setUploading(true);
                           try {
-                            const qrCode = await optimizePhoto(file);
+                            const sent = await uploadSiteImage(file, "pix");
+                            sessionUploads.current.add(sent.path);
+                            const qrCode = sent.url;
                             setDraft({
                               ...c,
                               pixKeys: c.pixKeys.map((r, j) => (j === i ? { ...r, qrCode } : r)),

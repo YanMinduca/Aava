@@ -1,8 +1,28 @@
 import { useEffect, useRef, useState } from "react";
 import jsQR from "jsqr";
+import { AlertTriangle, CheckCircle2, XCircle } from "lucide-react";
+
+export type ScanFeedbackKind = "ok" | "warn" | "error";
+
+/** Sinal grande no centro da câmera: verde = leu, amarelo = aviso (já usado), vermelho = não aceito. */
+export function ScanFeedback({ kind }: { kind: ScanFeedbackKind }) {
+  const cfg = {
+    ok: { Icon: CheckCircle2, bg: "bg-green-600", label: "QR code lido" },
+    warn: { Icon: AlertTriangle, bg: "bg-amber-500", label: "Atenção" },
+    error: { Icon: XCircle, bg: "bg-red-600", label: "Ingresso não aceito" },
+  }[kind];
+  return (
+    <div className="pointer-events-none absolute inset-0 grid place-items-center" role="status" aria-live="polite">
+      <div className={`rounded-full ${cfg.bg} p-5 text-white shadow-2xl animate-in fade-in zoom-in-50 duration-200`}>
+        <cfg.Icon className="h-16 w-16" aria-hidden />
+        <span className="sr-only">{cfg.label}</span>
+      </div>
+    </div>
+  );
+}
 
 /** Lê QR codes pela câmera (precisa de HTTPS ou localhost). Chama onScan uma vez por leitura. */
-export function QrScanner({ onScan }: { onScan: (code: string) => void }) {
+export function QrScanner({ onScan, feedback }: { onScan: (code: string) => void; feedback?: ScanFeedbackKind | null }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [error, setError] = useState("");
   const [ready, setReady] = useState(false);
@@ -65,6 +85,7 @@ export function QrScanner({ onScan }: { onScan: (code: string) => void }) {
       <video ref={videoRef} playsInline muted className="aspect-square w-full object-cover sm:aspect-video" />
       {!ready && <p className="absolute inset-0 grid place-items-center text-sm text-white/80">Abrindo a câmera...</p>}
       <div className="pointer-events-none absolute inset-8 rounded-2xl border-2 border-white/70" />
+      {feedback && <ScanFeedback kind={feedback} />}
     </div>
   );
 }

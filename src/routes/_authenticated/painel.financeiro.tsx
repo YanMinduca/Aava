@@ -11,6 +11,7 @@ import { EXPENSE_CATEGORIES, INCOME_CATEGORIES, MONTHS, PAYMENT_METHODS, brl, da
 import { byCategory, expenses, goalProgress, inPeriod, incomes, sum, txRows, type Goal, type Tx, type TxWithMember } from "@/lib/finance";
 import { downloadXls } from "@/lib/export";
 import { MemberCombobox } from "@/components/members/MemberCombobox";
+import { compressImage, fileExt } from "@/lib/images";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -354,8 +355,9 @@ function TxDialog({ draft, setDraft, onSave, saving }: { draft: TxDraft | null; 
 
   async function upload(f: File) {
     setUploading(true);
-    const path = `${new Date().getFullYear()}/${crypto.randomUUID()}.${f.name.split(".").pop() ?? "pdf"}`;
-    const { error } = await supabase.storage.from("receipts").upload(path, f);
+    const blob = await compressImage(f, { maxSide: 1800, quality: 0.8 }); // PDFs seguem como estão
+    const path = `${new Date().getFullYear()}/${crypto.randomUUID()}.${fileExt(blob, f.name)}`;
+    const { error } = await supabase.storage.from("receipts").upload(path, blob, { contentType: blob.type || f.type });
     setUploading(false);
     if (error) { toast.error(error.message); return; }
     set({ receipt_path: path });
