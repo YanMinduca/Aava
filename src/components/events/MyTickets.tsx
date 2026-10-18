@@ -3,12 +3,14 @@ import { Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import QRCode from "qrcode";
 import { toast } from "sonner";
-import { CalendarDays, Copy, Download, ExternalLink, Upload } from "lucide-react";
+import { CalendarDays, CheckCircle2, Copy, Download, ExternalLink, Upload } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { safeLink } from "@/lib/site-content";
+import { compressImage, fileExt, formatShortCode } from "@/lib/images";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { eventError, fmtDateTime, moneyBR, PAYMENT_STATUS, REGISTRATION_STATUS, TICKET_STATUS } from "@/lib/events";
+import type { Tables } from "@/integrations/supabase/types";
 
 function TicketQr({ code, name }: { code: string; name: string }) {
   const [url, setUrl] = useState("");
@@ -22,6 +24,39 @@ function TicketQr({ code, name }: { code: string; name: string }) {
       <a href={url} download={`ingresso-${name.replace(/\s+/g, "-").toLowerCase()}.png`} className="inline-flex items-center gap-1 text-xs text-primary underline">
         <Download className="h-3 w-3" /> Salvar imagem
       </a>
+    </div>
+  );
+}
+
+/** Um ingresso: QR + código para digitar. Depois da presença confirmada, o QR some e fica só o aviso. */
+export function TicketCard({ ticket, total }: { ticket: Tables<"event_tickets">; total: number }) {
+  const checkedIn = ticket.status === "checked_in";
+  return (
+    <div className="flex flex-col items-center gap-3 rounded-xl border bg-background p-4 text-center">
+      {checkedIn ? (
+        <div className="flex h-44 w-full flex-col items-center justify-center gap-2 rounded-lg bg-primary-soft">
+          <CheckCircle2 className="h-14 w-14 text-primary" aria-hidden />
+          <p className="text-lg font-semibold text-foreground">Presença confirmada</p>
+          {ticket.checked_in_at && <p className="text-xs text-muted-foreground">{fmtDateTime(ticket.checked_in_at)}</p>}
+        </div>
+      ) : ticket.status === "cancelled" ? (
+        <div className="flex h-44 w-full items-center justify-center rounded-lg bg-muted text-sm text-muted-foreground">Ingresso cancelado</div>
+      ) : (
+        <>
+          <TicketQr code={ticket.code} name={ticket.holder_name} />
+          <div>
+            <p className="font-mono text-xl font-semibold tracking-widest text-foreground" aria-label="Código do ingresso">
+              {formatShortCode(ticket.short_code)}
+            </p>
+            <p className="text-xs text-muted-foreground">Se a câmera não ler, informe este código na entrada.</p>
+          </div>
+        </>
+      )}
+      <div>
+        <p className="font-medium text-foreground">{ticket.holder_name}</p>
+        <p className="text-xs text-muted-foreground">Ingresso {ticket.seq} de {total}</p>
+        {!checkedIn && <Badge className="mt-2" variant="outline">{TICKET_STATUS[ticket.status] ?? ticket.status}</Badge>}
+      </div>
     </div>
   );
 }
@@ -71,6 +106,8 @@ export function MyTickets({ uid }: { uid: string }) {
 
   const regs = useQuery({
     queryKey: ["my-registrations", uid],
+    // Enquanto houver ingresso válido, confere a cada 10 s se a presença já foi confirmada
+    refetchInterval: (q) => ((q.state.data ?? []).some((r) => r.status === "confirmed" && (r.event_tickets ?? []).some((t) => t.status === "valid")) ? 10000 : false),
     queryFn: async () => {
       const { data, error } = await supabase
         .from("event_registrations")
@@ -116,9 +153,9 @@ export function MyTickets({ uid }: { uid: string }) {
       toast.error("O arquivo deve ter até 8 MB.");
       return;
     }
-    const ext = (file.name.split(".").pop() ?? "jpg").toLowerCase().replace(/[^a-z0-9]/g, "");
-    const path = `${uid}/${paymentId}-${Date.now()}.${ext || "jpg"}`;
-    const { error } = await supabase.storage.from("event-proofs").upload(path, file);
+    const blob = await compressImage(file, { maxSide: 1800, quality: 0.8 });
+    const path = `${uid}/${paymentId}-${Date.now()}.${fileExt(blob, file.name)}`;
+    const { error } = await supabase.storage.from("event-proofs").upload(path, blob, { contentType: blob.type || file.type });
     if (error) {
       toast.error("Não foi possível enviar o comprovante.");
       return;
@@ -200,14 +237,7 @@ export function MyTickets({ uid }: { uid: string }) {
               {r.status === "confirmed" && (
                 <div className="mt-5 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
                   {tickets.map((t) => (
-                    <div key={t.id} className="flex flex-col items-center gap-3 rounded-xl border bg-background p-4 text-center">
-                      <TicketQr code={t.code} name={t.holder_name} />
-                      <div>
-                        <p className="font-medium text-foreground">{t.holder_name}</p>
-                        <p className="text-xs text-muted-foreground">Ingresso {t.seq} de {r.quantity}</p>
-                        <Badge className="mt-2" variant={t.status === "checked_in" ? "default" : "outline"}>{TICKET_STATUS[t.status] ?? t.status}</Badge>
-                      </div>
-                    </div>
+                    <TicketCard key={t.id} ticket={t} total={r.quantity} />
                   ))}
                 </div>
               )}

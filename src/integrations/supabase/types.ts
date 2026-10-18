@@ -380,6 +380,7 @@ export type Database = {
           id: string
           registration_id: string
           seq: number
+          short_code: string
           status: string
         }
         Insert: {
@@ -392,6 +393,7 @@ export type Database = {
           id?: string
           registration_id: string
           seq: number
+          short_code?: string
           status?: string
         }
         Update: {
@@ -404,6 +406,7 @@ export type Database = {
           id?: string
           registration_id?: string
           seq?: number
+          short_code?: string
           status?: string
         }
         Relationships: [
