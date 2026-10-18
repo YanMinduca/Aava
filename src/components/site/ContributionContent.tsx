@@ -1,5 +1,6 @@
 import { ArrowUpRight, Copy, Heart } from "lucide-react";
 import { toast } from "sonner";
+import { copyText } from "@/lib/clipboard";
 import { Button } from "@/components/ui/button";
 import { safeLink, type SiteContent } from "@/lib/site-content";
 
@@ -38,12 +39,8 @@ export function ContributionContent({ content: c }: { content: SiteContent }) {
                       className="mt-5"
                       variant="outline"
                       onClick={async () => {
-                        try {
-                          await navigator.clipboard.writeText(pix.key);
-                          toast.success("Chave Pix copiada");
-                        } catch {
-                          toast.error("Não foi possível copiar. Selecione a chave acima.");
-                        }
+                        if (await copyText(pix.key)) toast.success("Chave Pix copiada");
+                        else toast.error("Não foi possível copiar. Selecione a chave acima.");
                       }}
                     >
                       <Copy />
