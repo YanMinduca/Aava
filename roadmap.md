@@ -15,3 +15,4 @@
 - [x] Financeiro: membro opcional em qualquer receita e gráfico de evolução mensal de dizimistas
 - [x] Vínculo da conta ao cadastro existente: "Este é você?" por nome + confirmação de CPF
 - [x] Sistema de eventos: landing, inscrição (membro/visitante), pagamento e parcelas, ingresso com QR, check-in e gráficos
+- [x] Dashboard: voluntários, departamentos, dizimistas com tendência, eventos, metas financeiras e pedido de oração mais recente

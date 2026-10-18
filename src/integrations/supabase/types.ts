@@ -979,6 +979,7 @@ export type Database = {
         Args: { _payment: string; _proof_path?: string }
         Returns: undefined
       }
+      dashboard_volunteer_stats: { Args: never; Returns: Json }
       ensure_visitor_profile: {
         Args: { _cpf: string; _name: string; _phone: string }
         Returns: string
