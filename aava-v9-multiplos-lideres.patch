@@ -1,0 +1,433 @@
+From d0ab0c0fec233fe1fb3a4eb1c8b956427b7bc451 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 19 Oct 2026 16:12:24 +0000
+Subject: [PATCH] =?UTF-8?q?Permite=20mais=20de=20um=20l=C3=ADder=20(opcion?=
+ =?UTF-8?q?al)=20por=20departamento?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../0014_department_multiple_leaders.sql      | 92 +++++++++++++++++++
+ drizzle/migrations/meta/_journal.json         |  7 ++
+ src/hooks/use-departments.ts                  |  4 +-
+ src/integrations/supabase/types.ts            | 37 +++++++-
+ src/lib/departments.ts                        | 18 ++--
+ .../painel.departamento.$id.tsx               | 55 ++++++++---
+ .../_authenticated/painel.departamentos.tsx   |  2 +-
+ .../_authenticated/painel.membro.$id.tsx      |  4 +-
+ src/routes/_authenticated/painel.membros.tsx  |  4 +-
+ 9 files changed, 190 insertions(+), 33 deletions(-)
+ create mode 100644 drizzle/migrations/0014_department_multiple_leaders.sql
+
+diff --git a/drizzle/migrations/0014_department_multiple_leaders.sql b/drizzle/migrations/0014_department_multiple_leaders.sql
+new file mode 100644
+index 0000000..b41d5b9
+--- /dev/null
++++ b/drizzle/migrations/0014_department_multiple_leaders.sql
+@@ -0,0 +1,92 @@
++-- Vários líderes (opcionais) por departamento.
++-- Já aplicada no Supabase do Aava; este arquivo mantém o histórico no repositório.
++create table if not exists public.department_leaders (
++  department_id uuid not null references public.departments(id) on delete cascade,
++  member_id uuid not null references public.members(id) on delete cascade,
++  created_at timestamptz not null default now(),
++  primary key (department_id, member_id)
++);
++create index if not exists department_leaders_member_idx on public.department_leaders(member_id);
++
++alter table public.department_leaders enable row level security;
++
++create policy "department_leaders read" on public.department_leaders
++  for select to authenticated using (public.can_view_department(auth.uid(), department_id));
++create policy "department_leaders insert" on public.department_leaders
++  for insert to authenticated with check (public.has_permission(auth.uid(), 'manage_departments'));
++create policy "department_leaders delete" on public.department_leaders
++  for delete to authenticated using (public.has_permission(auth.uid(), 'manage_departments'));
++
++insert into public.department_leaders (department_id, member_id)
++select id, leader_member_id from public.departments where leader_member_id is not null
++on conflict do nothing;
++
++comment on column public.departments.leader_member_id is 'DEPRECATED: use public.department_leaders (vários líderes por departamento)';
++
++create or replace function public.department_members_clear_leader()
++returns trigger language plpgsql security definer set search_path to 'public' as $$
++begin
++  delete from public.department_leaders where department_id = old.department_id and member_id = old.member_id;
++  return old;
++end $$;
++
++create or replace function public.has_dept_permission(_user_id uuid, _dept uuid, _perm text)
++returns boolean language sql stable security definer set search_path to 'public' as $$
++  select _user_id is not null and (
++    public.is_church_leadership(_user_id)
++    or public.has_permission(_user_id, 'manage_departments')
++    or exists (
++      select 1 from public.members m
++      join public.church_roles r on r.id = m.church_role_id
++      where m.user_id = _user_id and _perm = any (r.permissions)
++        and (
++          r.scope = 'all'
++          or (r.scope = 'selected' and exists (
++                select 1 from public.church_role_departments rd where rd.role_id = r.id and rd.department_id = _dept))
++          or (r.scope = 'linked' and exists (
++                select 1 from public.department_members dm where dm.member_id = m.id and dm.department_id = _dept))
++        )
++    )
++    or exists (
++      select 1 from public.department_leaders dl
++      join public.members m on m.id = dl.member_id
++      where m.user_id = _user_id and dl.department_id = _dept
++        and _perm in ('dept_view', 'dept_manage_members', 'dept_report')
++    )
++  );
++$$;
++
++drop function if exists public.department_overview();
++create function public.department_overview()
++returns table (id uuid, name text, description text, leader_member_ids uuid[], leader_names text[], member_count bigint, created_at timestamptz)
++language sql stable security definer set search_path to 'public' as $$
++  select d.id, d.name, d.description,
++         coalesce((select array_agg(dl.member_id order by lm.full_name) from public.department_leaders dl
++                   join public.members lm on lm.id = dl.member_id where dl.department_id = d.id), '{}'::uuid[]),
++         coalesce((select array_agg(lm.full_name order by lm.full_name) from public.department_leaders dl
++                   join public.members lm on lm.id = dl.member_id where dl.department_id = d.id), '{}'::text[]),
++         (select count(*) from public.department_members dm where dm.department_id = d.id), d.created_at
++  from public.departments d
++  where public.can_view_department(auth.uid(), d.id)
++     or exists (select 1 from public.department_members dm join public.members m on m.id = dm.member_id
++                where dm.department_id = d.id and m.user_id = auth.uid())
++  order by d.name;
++$$;
++revoke execute on function public.department_overview() from public, anon;
++grant execute on function public.department_overview() to authenticated;
++
++create or replace function public.department_roster(_dept uuid)
++returns table (member_id uuid, full_name text, phone text, email text, photo_path text, status text, church_role_id uuid, role_name text, joined_at timestamptz, is_leader boolean)
++language plpgsql stable security definer set search_path to 'public' as $$
++begin
++  if not public.can_view_department(auth.uid(), _dept) then raise exception 'Acesso negado'; end if;
++  return query
++    select m.id, m.full_name, m.phone, m.email, m.photo_path, m.status,
++           m.church_role_id, r.name, dm.joined_at,
++           exists (select 1 from public.department_leaders dl where dl.department_id = dm.department_id and dl.member_id = m.id)
++    from public.department_members dm
++    join public.members m on m.id = dm.member_id
++    left join public.church_roles r on r.id = m.church_role_id
++    where dm.department_id = _dept
++    order by 10 desc, m.full_name;
++end $$;
+diff --git a/drizzle/migrations/meta/_journal.json b/drizzle/migrations/meta/_journal.json
+index a0e8a99..b5fb1e7 100644
+--- a/drizzle/migrations/meta/_journal.json
++++ b/drizzle/migrations/meta/_journal.json
+@@ -99,6 +99,13 @@
+       "when": 1792150800000,
+       "tag": "0013_ticket_short_code_and_site_assets",
+       "breakpoints": true
++    },
++    {
++      "idx": 14,
++      "version": "7",
++      "when": 1792237200000,
++      "tag": "0014_department_multiple_leaders",
++      "breakpoints": true
+     }
+   ]
+ }
+diff --git a/src/hooks/use-departments.ts b/src/hooks/use-departments.ts
+index efa5d74..14d224e 100644
+--- a/src/hooks/use-departments.ts
++++ b/src/hooks/use-departments.ts
+@@ -3,7 +3,7 @@ import { supabase } from "@/integrations/supabase/client";
+ import { useAccess } from "@/hooks/use-access";
+ import { LEADER_DEPT_PERMISSIONS } from "@/lib/church";
+ 
+-/** Departamentos visíveis para o usuário (com líder e total de voluntários). */
++/** Departamentos visíveis para o usuário (com líderes e total de voluntários). */
+ export function useDepartments() {
+   return useQuery({
+     queryKey: ["departments"],
+@@ -98,7 +98,7 @@ export function useDeptAccess() {
+   const canIn = (deptId: string, perm: string) => {
+     if (manageAll) return true;
+     const dept = departments.data?.find((d) => d.id === deptId);
+-    if (dept?.leader_member_id && dept.leader_member_id === mine.data?.memberId && LEADER_DEPT_PERMISSIONS.includes(perm)) return true;
++    if (mine.data?.memberId && dept?.leader_member_ids?.includes(mine.data.memberId) && LEADER_DEPT_PERMISSIONS.includes(perm)) return true;
+     const r = mine.data;
+     if (!r || !r.permissions.includes(perm)) return false;
+     return r.scope === "all" || (r.scope === "selected" && r.selected.includes(deptId)) || (r.scope === "linked" && r.linked.includes(deptId));
+diff --git a/src/integrations/supabase/types.ts b/src/integrations/supabase/types.ts
+index f81592f..babadb8 100644
+--- a/src/integrations/supabase/types.ts
++++ b/src/integrations/supabase/types.ts
+@@ -123,6 +123,39 @@ export type Database = {
+           },
+         ]
+       }
++      department_leaders: {
++        Row: {
++          created_at: string
++          department_id: string
++          member_id: string
++        }
++        Insert: {
++          created_at?: string
++          department_id: string
++          member_id: string
++        }
++        Update: {
++          created_at?: string
++          department_id?: string
++          member_id?: string
++        }
++        Relationships: [
++          {
++            foreignKeyName: "department_leaders_department_id_fkey"
++            columns: ["department_id"]
++            isOneToOne: false
++            referencedRelation: "departments"
++            referencedColumns: ["id"]
++          },
++          {
++            foreignKeyName: "department_leaders_member_id_fkey"
++            columns: ["member_id"]
++            isOneToOne: false
++            referencedRelation: "members"
++            referencedColumns: ["id"]
++          },
++        ]
++      }
+       departments: {
+         Row: {
+           created_at: string
+@@ -951,8 +984,8 @@ export type Database = {
+           created_at: string
+           description: string | null
+           id: string
+-          leader_member_id: string | null
+-          leader_name: string | null
++          leader_member_ids: string[]
++          leader_names: string[]
+           member_count: number
+           name: string
+         }[]
+diff --git a/src/lib/departments.ts b/src/lib/departments.ts
+index 24126fa..dad0efe 100644
+--- a/src/lib/departments.ts
++++ b/src/lib/departments.ts
+@@ -15,7 +15,7 @@ export async function syncMemberDepartments(memberId: string, wanted: string[])
+     if (e) throw e;
+   }
+   if (toRemove.length) {
+-    // O banco limpa o líder automaticamente se quem sai era o líder.
++    // O banco remove a liderança automaticamente se quem sai era líder do departamento.
+     const { error: e } = await supabase.from("department_members").delete().eq("member_id", memberId).in("department_id", toRemove);
+     if (e) throw e;
+   }
+@@ -23,23 +23,23 @@ export async function syncMemberDepartments(memberId: string, wanted: string[])
+ 
+ /**
+  * Marca/desmarca o membro como líder nos departamentos escolhidos.
+- * `currentLeaders` = departamento -> id do líder atual (do department_overview).
++ * `currentLeaders` = departamento -> ids dos líderes atuais (do department_overview).
++ * Um departamento pode ter vários líderes (opcional); aqui só entra/sai este membro.
+  * Só mexe nos departamentos em que o membro continua vinculado.
+  */
+ export async function syncDepartmentLeadership(
+   memberId: string,
+   departmentIds: string[],
+   leaderOf: string[],
+-  currentLeaders: Record<string, string | null>,
++  currentLeaders: Record<string, string[]>,
+ ) {
+   for (const deptId of departmentIds) {
+-    const isLeaderNow = currentLeaders[deptId] === memberId;
++    const isLeaderNow = (currentLeaders[deptId] ?? []).includes(memberId);
+     const shouldLead = leaderOf.includes(deptId);
+     if (shouldLead === isLeaderNow) continue;
+-    const { error } = await supabase
+-      .from("departments")
+-      .update({ leader_member_id: shouldLead ? memberId : null })
+-      .eq("id", deptId);
++    const { error } = shouldLead
++      ? await supabase.from("department_leaders").insert({ department_id: deptId, member_id: memberId })
++      : await supabase.from("department_leaders").delete().eq("department_id", deptId).eq("member_id", memberId);
+     if (error) throw error;
+   }
+ }
+@@ -53,7 +53,7 @@ export async function saveMemberDepartmentLinks(args: {
+   departmentIds: string[];
+   leaderDepartmentIds: string[];
+   isLeadershipRole: boolean;
+-  currentLeaders: Record<string, string | null>;
++  currentLeaders: Record<string, string[]>;
+ }) {
+   await syncMemberDepartments(args.memberId, args.departmentIds);
+   await syncDepartmentLeadership(
+diff --git a/src/routes/_authenticated/painel.departamento.$id.tsx b/src/routes/_authenticated/painel.departamento.$id.tsx
+index 518dec0..42b9c88 100644
+--- a/src/routes/_authenticated/painel.departamento.$id.tsx
++++ b/src/routes/_authenticated/painel.departamento.$id.tsx
+@@ -105,13 +105,26 @@ function DepartmentDetail() {
+     onError: (e: Error) => toast.error(e.message),
+   });
+ 
+-  const setLeader = useMutation({
+-    mutationFn: async (memberId: string | null) => {
+-      const { error } = await supabase.from("departments").update({ leader_member_id: memberId }).eq("id", id);
++  // Um departamento pode ter vários líderes (opcional): adiciona/remove um por vez.
++  const addLeader = useMutation({
++    mutationFn: async (memberId: string) => {
++      const { error } = await supabase.from("department_leaders").insert({ department_id: id, member_id: memberId });
+       if (error) throw error;
+     },
+     onSuccess: () => {
+-      toast.success("Liderança atualizada");
++      toast.success("Líder adicionado");
++      refresh();
++    },
++    onError: (e: Error) => toast.error(e.message),
++  });
++
++  const removeLeader = useMutation({
++    mutationFn: async (memberId: string) => {
++      const { error } = await supabase.from("department_leaders").delete().eq("department_id", id).eq("member_id", memberId);
++      if (error) throw error;
++    },
++    onSuccess: () => {
++      toast.success("Líder removido");
+       refresh();
+     },
+     onError: (e: Error) => toast.error(e.message),
+@@ -169,7 +182,7 @@ function DepartmentDetail() {
+         name: "Resumo",
+         rows: [
+           ["Departamento", dept!.name],
+-          ["Líder", dept!.leader_name ?? "—"],
++          [dept!.leader_names?.length > 1 ? "Líderes" : "Líder", dept!.leader_names?.length ? dept!.leader_names.join(", ") : "—"],
+           ["Total de voluntários", rows.length],
+           ["Gerado em", today],
+           [],
+@@ -195,7 +208,7 @@ function DepartmentDetail() {
+           <h1 className="text-3xl text-foreground">{dept.name}</h1>
+           {dept.description && <p className="mt-1 max-w-2xl text-sm text-muted-foreground">{dept.description}</p>}
+           <p className="mt-3 inline-flex items-center gap-2 text-sm text-foreground">
+-            <Crown className="h-4 w-4 text-primary" /> Líder: {dept.leader_name ?? "não definido"}
++            <Crown className="h-4 w-4 text-primary" /> {dept.leader_names?.length > 1 ? "Líderes" : "Líder"}: {dept.leader_names?.length ? dept.leader_names.join(", ") : "não definido"}
+           </p>
+         </div>
+         {manageAll && (
+@@ -218,22 +231,34 @@ function DepartmentDetail() {
+           <TabsContent value="voluntarios">
+             <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+               {manageAll ? (
+-                <div className="flex items-center gap-2">
+-                  <Label className="text-sm">Líder do departamento</Label>
++                <div className="flex flex-wrap items-center gap-2">
++                  <Label className="text-sm">Líderes do departamento <span className="text-muted-foreground">(opcional)</span></Label>
+                   <div className="w-64">
+                     <MemberCombobox
+-                      options={rows.map((r) => ({ id: r.member_id, label: r.full_name }))}
+-                      value={dept.leader_member_id ?? ""}
+-                      onChange={(v) => setLeader.mutate(v || null)}
+-                      placeholder="Escolher líder"
++                      options={rows.filter((r) => !dept.leader_member_ids?.includes(r.member_id)).map((r) => ({ id: r.member_id, label: r.full_name }))}
++                      value=""
++                      onChange={(v) => v && addLeader.mutate(v)}
++                      placeholder="Adicionar líder"
+                     />
+                   </div>
+-                  {dept.leader_member_id && <Button size="sm" variant="ghost" onClick={() => setLeader.mutate(null)}>Remover líder</Button>}
++                  {rows.filter((r) => r.is_leader).map((r) => (
++                    <Badge key={r.member_id} variant="secondary" className="gap-1 pr-1">
++                      <Crown className="h-3 w-3" /> {r.full_name}
++                      <button
++                        type="button"
++                        aria-label={`Remover ${r.full_name} da liderança`}
++                        className="ml-1 rounded-full p-0.5 hover:bg-background/60"
++                        onClick={() => removeLeader.mutate(r.member_id)}
++                      >
++                        <UserMinus className="h-3 w-3" />
++                      </button>
++                    </Badge>
++                  ))}
+                 </div>
+               ) : <span />}
+               {canManageMembers && <Button onClick={() => setAdding(true)}><Plus className="h-4 w-4" /> Adicionar voluntário</Button>}
+             </div>
+-            {manageAll && rows.length === 0 && <p className="mt-2 text-xs text-muted-foreground">Adicione voluntários primeiro; o líder é escolhido entre eles.</p>}
++            {manageAll && rows.length === 0 && <p className="mt-2 text-xs text-muted-foreground">Adicione voluntários primeiro; os líderes são escolhidos entre eles (pode ter mais de um, ou nenhum).</p>}
+ 
+             <div className="mt-4 overflow-x-auto rounded-2xl border bg-card">
+               <table className="w-full text-sm">
+@@ -293,7 +318,7 @@ function DepartmentDetail() {
+               </div>
+               <div className="mt-4 grid gap-4 sm:grid-cols-3">
+                 <div className="rounded-2xl border bg-card p-5"><p className="text-xs text-muted-foreground">Total de voluntários</p><p className="mt-1 text-2xl font-semibold text-foreground">{rows.length}</p></div>
+-                <div className="rounded-2xl border bg-card p-5"><p className="text-xs text-muted-foreground">Líder</p><p className="mt-1 text-lg font-semibold text-foreground">{dept.leader_name ?? "—"}</p></div>
++                <div className="rounded-2xl border bg-card p-5"><p className="text-xs text-muted-foreground">{dept.leader_names?.length > 1 ? "Líderes" : "Líder"}</p><p className="mt-1 text-lg font-semibold text-foreground">{dept.leader_names?.length ? dept.leader_names.join(", ") : "—"}</p></div>
+                 <div className="rounded-2xl border bg-card p-5"><p className="text-xs text-muted-foreground">Gerado em</p><p className="mt-1 text-lg font-semibold text-foreground">{new Date().toLocaleDateString("pt-BR")}</p></div>
+               </div>
+               <div className="mt-4 rounded-2xl border bg-card p-5">
+diff --git a/src/routes/_authenticated/painel.departamentos.tsx b/src/routes/_authenticated/painel.departamentos.tsx
+index 00d6c8c..2a937b2 100644
+--- a/src/routes/_authenticated/painel.departamentos.tsx
++++ b/src/routes/_authenticated/painel.departamentos.tsx
+@@ -106,7 +106,7 @@ function DepartmentList({ canManage }: { canManage: boolean }) {
+             {d.description && <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">{d.description}</p>}
+             <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
+               <span className="inline-flex items-center gap-1.5"><Users className="h-4 w-4" /> {d.member_count} {d.member_count === 1 ? "voluntário" : "voluntários"}</span>
+-              <span className="inline-flex items-center gap-1.5"><Crown className="h-4 w-4" /> {d.leader_name ?? "Sem líder"}</span>
++              <span className="inline-flex items-center gap-1.5"><Crown className="h-4 w-4" /> {d.leader_names?.length ? d.leader_names.join(", ") : "Sem líder"}</span>
+             </div>
+           </Link>
+         ))}
+diff --git a/src/routes/_authenticated/painel.membro.$id.tsx b/src/routes/_authenticated/painel.membro.$id.tsx
+index 7ca5574..c353e6a 100644
+--- a/src/routes/_authenticated/painel.membro.$id.tsx
++++ b/src/routes/_authenticated/painel.membro.$id.tsx
+@@ -111,7 +111,7 @@ function MemberProfile() {
+           departmentIds: deptIds,
+           leaderDepartmentIds: leaderIds,
+           isLeadershipRole: !!roles.data?.find((r) => r.id === m.church_role_id)?.is_leadership,
+-          currentLeaders: Object.fromEntries((departments.data ?? []).map((d) => [d.id, d.leader_member_id])),
++          currentLeaders: Object.fromEntries((departments.data ?? []).map((d) => [d.id, d.leader_member_ids ?? []])),
+         });
+       }
+     },
+@@ -193,7 +193,7 @@ function MemberProfile() {
+         {can("edit_member") && (
+           <Button variant="outline" onClick={() => {
+               setDeptIds((memberDepts.data?.get(m.id) ?? []).map((d) => d.id));
+-              setLeaderIds((departments.data ?? []).filter((d) => d.leader_member_id === m.id).map((d) => d.id));
++              setLeaderIds((departments.data ?? []).filter((d) => (d.leader_member_ids ?? []).includes(m.id)).map((d) => d.id));
+               setEditing({ ...m });
+             }}>
+             <Pencil className="h-4 w-4" /> Editar cadastro
+diff --git a/src/routes/_authenticated/painel.membros.tsx b/src/routes/_authenticated/painel.membros.tsx
+index b30f8ea..79e4ab9 100644
+--- a/src/routes/_authenticated/painel.membros.tsx
++++ b/src/routes/_authenticated/painel.membros.tsx
+@@ -39,7 +39,7 @@ function MembersPage() {
+   const departments = useDepartments();
+   const roles = useChurchRoles();
+   const roleName = (id: string | null) => roles.data?.find((r) => r.id === id)?.name ?? "";
+-  const currentLeaders = () => Object.fromEntries((departments.data ?? []).map((d) => [d.id, d.leader_member_id]));
++  const currentLeaders = () => Object.fromEntries((departments.data ?? []).map((d) => [d.id, d.leader_member_ids ?? []]));
+   const memberDepts = useMemberDepartments(can("view_members") || can("view_departments"));
+   const deptNames = (id: string) => (memberDepts.data?.get(id) ?? []).map((d) => d.name);
+ 
+@@ -56,7 +56,7 @@ function MembersPage() {
+     setEditing(m);
+     setNotes("");
+     setDeptIds(m.id ? (memberDepts.data?.get(m.id) ?? []).map((d) => d.id) : []);
+-    setLeaderIds(m.id ? (departments.data ?? []).filter((d) => d.leader_member_id === m.id).map((d) => d.id) : []);
++    setLeaderIds(m.id ? (departments.data ?? []).filter((d) => (d.leader_member_ids ?? []).includes(m.id as string)).map((d) => d.id) : []);
+     if (m.id && can("view_member_notes")) {
+       const { data } = await supabase.from("member_notes").select("notes").eq("member_id", m.id).maybeSingle();
+       setNotes(data?.notes ?? "");
+-- 
+2.43.0
+
