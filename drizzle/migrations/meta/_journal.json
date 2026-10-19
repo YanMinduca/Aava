@@ -99,6 +99,27 @@
       "when": 1792150800000,
       "tag": "0013_ticket_short_code_and_site_assets",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1792237200000,
+      "tag": "0014_cascade_users_and_cleanup",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1792237260000,
+      "tag": "0015_storage_trash",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1792237320000,
+      "tag": "0016_delete_user_cancel_proofs_dashboard",
+      "breakpoints": true
     }
   ]
 }

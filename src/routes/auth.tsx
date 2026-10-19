@@ -4,6 +4,8 @@ import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { ResendConfirmation } from "@/components/auth/ResendConfirmation";
+import { recordSend } from "@/lib/resend-limit";
 import { Label } from "@/components/ui/label";
 
 export const Route = createFileRoute("/auth")({
@@ -31,7 +33,9 @@ function AuthPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  const [pendingEmail, setPendingEmail] = useState<string | null>(null);
   const navigate = useNavigate();
+  const redirectTo = typeof window === "undefined" ? "" : window.location.origin + (next ?? "/painel");
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -54,10 +58,18 @@ function AuthPage() {
           return;
         }
         toast.success("Conta criada! Confira seu e-mail para confirmar o cadastro.");
+        recordSend(email, { resend: false });
+        setPendingEmail(email);
         setMode("in");
       }
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Erro ao entrar");
+      const message = err instanceof Error ? err.message : "Erro ao entrar";
+      if (/email not confirmed/i.test(message)) {
+        setPendingEmail(email);
+        toast.error("Confirme seu e-mail antes de entrar. Enviamos um link para a sua caixa de entrada.");
+      } else {
+        toast.error(message);
+      }
     } finally {
       setLoading(false);
     }
@@ -92,6 +104,7 @@ function AuthPage() {
         <button className="mt-4 w-full text-center text-sm text-muted-foreground hover:text-foreground" onClick={() => setMode(mode === "in" ? "up" : "in")}>
           {mode === "in" ? "Não tem conta? Criar conta" : "Já tem conta? Entrar"}
         </button>
+        {pendingEmail && <ResendConfirmation email={pendingEmail} redirectTo={redirectTo} />}
       </div>
     </div>
   );

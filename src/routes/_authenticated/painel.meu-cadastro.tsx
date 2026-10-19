@@ -6,7 +6,7 @@ import { Clock, CheckCircle2, XCircle } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { MyContributions } from "@/components/members/MyContributions";
-import { ClaimSuggestion } from "@/components/members/ClaimSuggestion";
+import { ClaimSuggestion, ClaimedNotice } from "@/components/members/ClaimSuggestion";
 import { MyTickets } from "@/components/events/MyTickets";
 import { MemberForm, emptyMember, type MemberDraft } from "@/components/members/MemberForm";
 import { MEMBER_STATUS } from "@/lib/church";
@@ -22,6 +22,7 @@ function MyProfile() {
   const { convite } = Route.useSearch();
   const qc = useQueryClient();
   const [draft, setDraft] = useState<MemberDraft | null>(null);
+  const [claimed, setClaimed] = useState(false);
 
   const me = useQuery({
     queryKey: ["my-member"],
@@ -58,6 +59,7 @@ function MyProfile() {
     onError: (e) => toast.error(e.message),
   });
 
+  if (claimed) return <ClaimedNotice />;
   if (!draft || !me.data) return null;
   const row = me.data?.row;
 
@@ -93,8 +95,7 @@ function MyProfile() {
                 name={draft.full_name}
                 onClaimed={async () => {
                   if (convite) await supabase.rpc("use_invite", { _code: convite });
-                  setDraft(null);
-                  qc.invalidateQueries({ queryKey: ["my-member"] });
+                  setClaimed(true);
                 }}
               />
             ) : undefined

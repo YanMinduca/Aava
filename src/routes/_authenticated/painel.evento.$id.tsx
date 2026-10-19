@@ -18,6 +18,7 @@ import { QrScanner, type ScanFeedbackKind } from "@/components/events/QrScanner"
 import { formatShortCode } from "@/lib/images";
 import { playRead, playWarning, unlockAudio } from "@/lib/sounds";
 import { downloadXls } from "@/lib/export";
+import { purgeStorageTrash } from "@/lib/storage-trash";
 import { eventError, fmtDateTime, moneyBR, PAYMENT_STATUS, REGISTRATION_STATUS, TICKET_STATUS } from "@/lib/events";
 import { siteMeta } from "@/lib/site-query";
 import type { Tables } from "@/integrations/supabase/types";
@@ -77,6 +78,7 @@ function EventAdmin() {
       if (error) throw error;
     },
     onSuccess: () => {
+      void purgeStorageTrash();
       toast.success("Evento excluído");
       qc.invalidateQueries({ queryKey: ["admin-events"] });
       qc.invalidateQueries({ queryKey: ["public-events"] });
@@ -348,7 +350,7 @@ function RegistrationDetail({ reg, onChange }: { reg: RegRow; onChange: () => vo
       const { error } = await fn();
       if (error) throw new Error(error.message);
     },
-    onSuccess: () => { toast.success("Atualizado"); onChange(); },
+    onSuccess: () => { void purgeStorageTrash(); toast.success("Atualizado"); onChange(); },
     onError: (e) => toast.error(eventError(e)),
   });
   async function openProof(path: string) {

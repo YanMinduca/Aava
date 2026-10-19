@@ -12,6 +12,7 @@ import { byCategory, expenses, goalProgress, inPeriod, incomes, sum, txRows, typ
 import { downloadXls } from "@/lib/export";
 import { MemberCombobox } from "@/components/members/MemberCombobox";
 import { compressImage, fileExt } from "@/lib/images";
+import { purgeStorageTrash } from "@/lib/storage-trash";
 import { uuid } from "@/lib/uuid";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -294,7 +295,10 @@ function TxList({ all, year, month, onEdit, onChanged }: { all: TxWithMember[]; 
     if (!confirm("Excluir lançamento?")) return;
     const { error } = await supabase.from("financial_transactions").delete().eq("id", id);
     if (error) toast.error(error.message);
-    else onChanged();
+    else {
+      void purgeStorageTrash();
+      onChanged();
+    }
   }
 
   return (

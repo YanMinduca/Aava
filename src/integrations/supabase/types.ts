@@ -983,6 +983,29 @@ export type Database = {
         Returns: undefined
       }
       dashboard_volunteer_stats: { Args: never; Returns: Json }
+      delete_user_account: {
+        Args: { _delete_member?: boolean; _user: string }
+        Returns: undefined
+      }
+      storage_enqueue_orphans: { Args: never; Returns: number }
+      storage_orphans_preview: {
+        Args: never
+        Returns: {
+          bucket: string
+          created_at: string
+          path: string
+          size: number
+        }[]
+      }
+      storage_trash_done: { Args: { _ids: number[] }; Returns: undefined }
+      storage_trash_next: {
+        Args: { _limit?: number }
+        Returns: {
+          bucket: string
+          id: number
+          path: string
+        }[]
+      }
       ensure_visitor_profile: {
         Args: { _cpf: string; _name: string; _phone: string }
         Returns: string

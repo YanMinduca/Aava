@@ -3,7 +3,6 @@ import { useQuery } from "@tanstack/react-query";
 import { CalendarDays, HandHeart, Minus, Network, Target, TrendingDown, TrendingUp, Users } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAccess } from "@/hooks/use-access";
-import { useDeptAccess } from "@/hooks/use-departments";
 import { Badge } from "@/components/ui/badge";
 import { brl } from "@/lib/church";
 import { activeGoals, tithersSummary, upcomingEvents } from "@/lib/dashboard";
@@ -17,9 +16,12 @@ const PRAYER_STATUS: Record<string, string> = { recebido: "Recebido", em_oracao:
 
 /** Voluntários (membros em algum departamento) e departamentos. */
 export function VolunteerCards() {
-  const { manageAll } = useDeptAccess();
+  // Só para quem recebeu a permissão de departamentos (membro comum não vê estes números)
+  const { can } = useAccess();
+  const allowed = can("manage_departments") || can("view_departments");
   const stats = useQuery({
     queryKey: ["dashboard-volunteers"],
+    enabled: allowed,
     queryFn: async () => {
       const { data, error } = await supabase.rpc("dashboard_volunteer_stats");
       if (error) throw error;
@@ -27,7 +29,7 @@ export function VolunteerCards() {
     },
   });
   const s = stats.data;
-  if (!manageAll && !(s && s.departments > 0)) return null;
+  if (!allowed) return null;
   return (
     <>
       <Link to="/painel/departamentos" className={card}>
