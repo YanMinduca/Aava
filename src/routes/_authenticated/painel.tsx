@@ -1,4 +1,5 @@
 import { createFileRoute, Link, Outlet, useNavigate } from "@tanstack/react-router";
+import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   LayoutDashboard,
@@ -19,6 +20,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { useAccess } from "@/hooks/use-access";
 import { useDeptAccess } from "@/hooks/use-departments";
 import { ROLE_LABELS } from "@/lib/church";
+import { purgeStorageTrash } from "@/lib/storage-trash";
 
 export const Route = createFileRoute("/_authenticated/painel")({
   head: () => ({
@@ -32,6 +34,14 @@ function PanelLayout() {
   const { canViewPage: canViewDepartments } = useDeptAccess();
   const qc = useQueryClient();
   const navigate = useNavigate();
+
+  // Arquivos de coisas apagadas (comprovantes, fotos trocadas...) saem de verdade do armazenamento
+  useEffect(() => {
+    void purgeStorageTrash();
+    const t = setInterval(() => void purgeStorageTrash(), 3 * 60 * 1000);
+    return () => clearInterval(t);
+  }, []);
+
   const items = [
     { to: "/painel", label: "Visão geral", icon: LayoutDashboard, show: true },
     { to: "/painel/meu-cadastro", label: "Meu cadastro", icon: UserCircle, show: true },

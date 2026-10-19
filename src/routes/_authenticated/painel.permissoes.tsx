@@ -8,6 +8,7 @@ import { PERMISSION_GROUPS, ROLE_LABELS } from "@/lib/church";
 import type { Database } from "@/integrations/supabase/types";
 import { Button } from "@/components/ui/button";
 import { siteMeta } from "@/lib/site-query";
+import { DeleteUserSection, StorageCleanupCard } from "@/components/admin/UserAdmin";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
@@ -124,6 +125,9 @@ function PermissionsPage() {
                     </div>
                   ))}
                 </div>
+                {isFullAccess && current.id !== uid && (isCeo || current.role !== "pastor_presidente") && (
+                  <DeleteUserSection user={{ id: current.id, name: current.full_name || current.email || "este usuário" }} onDeleted={() => setSelected(null)} />
+                )}
               </>
             )}
           </div>
@@ -131,6 +135,7 @@ function PermissionsPage() {
           <div className="rounded-2xl border border-dashed p-6 text-sm text-muted-foreground">Selecione um usuário para editar.</div>
         )}
       </div>
+      {isFullAccess && <StorageCleanupCard />}
     </div>
   );
 }

@@ -18,3 +18,4 @@
 - [x] Dashboard: voluntários, departamentos, dizimistas com tendência, eventos, metas financeiras e pedido de oração mais recente
 - [x] Imagens fora do banco: fotos do site e QR do Pix no armazenamento; uploads compactados
 - [x] Ingresso com código curto, "Presença confirmada" no lugar do QR, sinal e som na leitura
+- [x] Excluir usuários (CEO/Pastor Presidente), painel do membro só com eventos e ingressos, reenvio de e-mail de confirmação, exclusão completa (banco + arquivos)

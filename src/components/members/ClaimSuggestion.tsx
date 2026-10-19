@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { UserCheck } from "lucide-react";
+import { CheckCircle2, UserCheck } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,6 +14,24 @@ const MESSAGES: Record<string, string> = {
   unavailable: "Este cadastro não está mais disponível para vincular.",
   already_linked: "Sua conta já está vinculada a um cadastro.",
 };
+
+/** Aviso depois que a conta foi vinculada ao cadastro: pede para atualizar a página. */
+export function ClaimedNotice() {
+  return (
+    <div className="max-w-3xl">
+      <h1 className="text-3xl text-foreground">Meu cadastro</h1>
+      <div className="mt-6 rounded-2xl border border-primary/30 bg-primary-soft p-6" role="status">
+        <p className="flex items-center gap-2 text-lg font-medium text-foreground">
+          <CheckCircle2 className="h-6 w-6 text-primary" aria-hidden /> Cadastro vinculado com sucesso!
+        </p>
+        <p className="mt-2 text-sm text-muted-foreground">
+          Seu CPF foi confirmado e sua conta agora está ligada ao seu cadastro. <strong className="text-foreground">Atualize a página</strong> para carregar seus dados, ingressos e demais informações.
+        </p>
+        <Button type="button" className="mt-4" onClick={() => window.location.reload()}>Atualizar página</Button>
+      </div>
+    </div>
+  );
+}
 
 /**
  * Mostra "Este é você?" quando o nome digitado bate com um cadastro feito pela igreja que ainda não tem conta.

@@ -18,6 +18,7 @@ import { MemberForm, MemberAvatar, emptyMember, type MemberDraft } from "@/compo
 import { APPROVAL_LABELS, MEMBER_STATUS, ageFrom, dateBR } from "@/lib/church";
 import { downloadXls } from "@/lib/export";
 import { copyText } from "@/lib/clipboard";
+import { purgeStorageTrash } from "@/lib/storage-trash";
 import { memberSaveError, saveMemberDepartmentLinks } from "@/lib/departments";
 import { useChurchRoles, useDepartments, useMemberDepartments } from "@/hooks/use-departments";
 
@@ -117,7 +118,10 @@ function MembersPage() {
       const { error } = await supabase.from("members").delete().eq("id", id);
       if (error) throw error;
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["members"] }),
+    onSuccess: () => {
+      void purgeStorageTrash();
+      qc.invalidateQueries({ queryKey: ["members"] });
+    },
     onError: (e) => toast.error(e.message),
   });
 

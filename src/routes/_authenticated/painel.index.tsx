@@ -5,6 +5,7 @@ import { useAccess } from "@/hooks/use-access";
 import { brl } from "@/lib/church";
 import { siteMeta } from "@/lib/site-query";
 import { EventsCard, FinanceCards, PrayerCard, VolunteerCards } from "@/components/dashboard/DashboardCards";
+import { MyTickets } from "@/components/events/MyTickets";
 
 export const Route = createFileRoute("/_authenticated/painel/")({
   head: () =>
@@ -13,7 +14,7 @@ export const Route = createFileRoute("/_authenticated/painel/")({
 });
 
 function Overview() {
-  const { can, isLoading } = useAccess();
+  const { can, isLoading, data: access } = useAccess();
   const members = useQuery({
     queryKey: ["members-count"],
     enabled: can("view_members"),
@@ -35,7 +36,9 @@ function Overview() {
   });
 
   if (isLoading) return null;
-  const nothing = !can("view_members") && !can("view_finance") && !can("view_prayer_requests");
+  // "Painel do membro": sem nenhuma permissão de administração, só eventos e os ingressos da própria pessoa
+  const nothing =
+    !can("view_members") && !can("view_finance") && !can("view_prayer_requests") && !can("view_departments") && !can("manage_departments");
 
   return (
     <div>
@@ -70,6 +73,7 @@ function Overview() {
         <EventsCard />
         <PrayerCard />
       </div>
+      {access?.uid && <MyTickets uid={access.uid} />}
     </div>
   );
 }

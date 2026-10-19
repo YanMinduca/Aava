@@ -7,6 +7,7 @@ import { CalendarDays, CheckCircle2, Copy, Download, ExternalLink, Upload } from
 import { supabase } from "@/integrations/supabase/client";
 import { safeLink } from "@/lib/site-content";
 import { copyText } from "@/lib/clipboard";
+import { purgeStorageTrash } from "@/lib/storage-trash";
 import { compressImage, fileExt, formatShortCode } from "@/lib/images";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -139,6 +140,7 @@ export function MyTickets({ uid }: { uid: string }) {
       if (error) throw error;
     },
     onSuccess: () => {
+      void purgeStorageTrash();
       toast.success("Inscrição cancelada");
       refresh();
       qc.invalidateQueries({ queryKey: ["public-events"] });
