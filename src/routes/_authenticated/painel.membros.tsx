@@ -40,7 +40,7 @@ function MembersPage() {
   const departments = useDepartments();
   const roles = useChurchRoles();
   const roleName = (id: string | null) => roles.data?.find((r) => r.id === id)?.name ?? "";
-  const currentLeaders = () => Object.fromEntries((departments.data ?? []).map((d) => [d.id, d.leader_member_id]));
+  const currentLeaders = () => Object.fromEntries((departments.data ?? []).map((d) => [d.id, d.leader_member_ids ?? []]));
   const memberDepts = useMemberDepartments(can("view_members") || can("view_departments"));
   const deptNames = (id: string) => (memberDepts.data?.get(id) ?? []).map((d) => d.name);
 
@@ -57,7 +57,7 @@ function MembersPage() {
     setEditing(m);
     setNotes("");
     setDeptIds(m.id ? (memberDepts.data?.get(m.id) ?? []).map((d) => d.id) : []);
-    setLeaderIds(m.id ? (departments.data ?? []).filter((d) => d.leader_member_id === m.id).map((d) => d.id) : []);
+    setLeaderIds(m.id ? (departments.data ?? []).filter((d) => (d.leader_member_ids ?? []).includes(m.id as string)).map((d) => d.id) : []);
     if (m.id && can("view_member_notes")) {
       const { data } = await supabase.from("member_notes").select("notes").eq("member_id", m.id).maybeSingle();
       setNotes(data?.notes ?? "");

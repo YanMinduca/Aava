@@ -111,7 +111,7 @@ function MemberProfile() {
           departmentIds: deptIds,
           leaderDepartmentIds: leaderIds,
           isLeadershipRole: !!roles.data?.find((r) => r.id === m.church_role_id)?.is_leadership,
-          currentLeaders: Object.fromEntries((departments.data ?? []).map((d) => [d.id, d.leader_member_id])),
+          currentLeaders: Object.fromEntries((departments.data ?? []).map((d) => [d.id, d.leader_member_ids ?? []])),
         });
       }
     },
@@ -193,7 +193,7 @@ function MemberProfile() {
         {can("edit_member") && (
           <Button variant="outline" onClick={() => {
               setDeptIds((memberDepts.data?.get(m.id) ?? []).map((d) => d.id));
-              setLeaderIds((departments.data ?? []).filter((d) => d.leader_member_id === m.id).map((d) => d.id));
+              setLeaderIds((departments.data ?? []).filter((d) => (d.leader_member_ids ?? []).includes(m.id)).map((d) => d.id));
               setEditing({ ...m });
             }}>
             <Pencil className="h-4 w-4" /> Editar cadastro
