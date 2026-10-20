@@ -1,5 +1,8 @@
 /** Utilitários de imagem sem dependência do Supabase (testáveis). */
 
+/** Lado maior das fotos de membros (elas só aparecem em círculos de até 80 px). */
+export const MEMBER_PHOTO_MAX_SIDE = 400;
+
 export type CompressOptions = { maxSide: number; quality?: number; type?: "image/jpeg" | "image/png" };
 
 /**

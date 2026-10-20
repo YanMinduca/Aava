@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { Camera, ChevronDown, User } from "lucide-react";
-import { compressImage, fileExt } from "@/lib/images";
+import { compressImage, fileExt, MEMBER_PHOTO_MAX_SIDE } from "@/lib/images";
+import { getPhotoUrl, peekPhotoUrl } from "@/lib/photo-urls";
 import { uuid } from "@/lib/uuid";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
@@ -26,10 +27,19 @@ export const emptyMember: MemberDraft = {
 };
 
 export function usePhotoUrl(path?: string | null) {
-  const [url, setUrl] = useState<string | null>(null);
+  const [url, setUrl] = useState<string | null>(() => peekPhotoUrl(path));
   useEffect(() => {
     if (!path) return setUrl(null);
-    supabase.storage.from("member-photos").createSignedUrl(path, 3600).then(({ data }) => setUrl(data?.signedUrl ?? null));
+    let alive = true;
+    const known = peekPhotoUrl(path);
+    if (known) setUrl(known);
+    else {
+      setUrl(null);
+      void getPhotoUrl(path).then((u) => alive && setUrl(u));
+    }
+    return () => {
+      alive = false;
+    };
   }, [path]);
   return url;
 }
@@ -37,7 +47,7 @@ export function usePhotoUrl(path?: string | null) {
 export function MemberAvatar({ path, size = "h-10 w-10" }: { path?: string | null | undefined; size?: string }) {
   const url = usePhotoUrl(path);
   return url ? (
-    <img src={url} alt="" className={`${size} shrink-0 rounded-full object-cover`} />
+    <img src={url} alt="" loading="lazy" decoding="async" className={`${size} shrink-0 rounded-full object-cover`} />
   ) : (
     <div className={`${size} flex shrink-0 items-center justify-center rounded-full bg-primary-soft text-primary`}>
       <User className="h-1/2 w-1/2" />
@@ -139,9 +149,10 @@ export function MemberForm({
 
   async function upload(file: File) {
     setUploading(true);
-    const blob = await compressImage(file, { maxSide: 900, quality: 0.8 });
+    // A foto só aparece em círculos de até 80 px: 400 px já sobra e pesa ~7x menos que 900 px.
+    const blob = await compressImage(file, { maxSide: MEMBER_PHOTO_MAX_SIDE, quality: 0.8 });
     const path = `${photoFolder}/${uuid()}.${fileExt(blob, file.name)}`;
-    const { error } = await supabase.storage.from("member-photos").upload(path, blob, { contentType: blob.type || file.type });
+    const { error } = await supabase.storage.from("member-photos").upload(path, blob, { contentType: blob.type || file.type, cacheControl: "86400" });
     setUploading(false);
     if (error) { toast.error(error.message); return; }
     set({ photo_path: path });

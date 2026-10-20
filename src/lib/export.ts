@@ -1,5 +1,3 @@
-import * as XLSX from "xlsx";
-
 export type Cell = string | number | null | undefined;
 export type Sheet = { name: string; rows: Cell[][] };
 
@@ -14,7 +12,9 @@ function widths(rows: Cell[][]) {
 }
 
 /** Baixa uma planilha Excel com uma ou mais abas. `fileName` vai sem extensão. */
-export function downloadSheets(fileName: string, sheets: Sheet[]) {
+export async function downloadSheets(fileName: string, sheets: Sheet[]) {
+  // A biblioteca de planilhas é pesada (~276 KB): só é baixada quando alguém clica em exportar.
+  const XLSX = await import("xlsx");
   const wb = XLSX.utils.book_new();
   for (const s of sheets) {
     const ws = XLSX.utils.aoa_to_sheet(s.rows.map((r) => r.map((c) => c ?? "")));
@@ -27,5 +27,5 @@ export function downloadSheets(fileName: string, sheets: Sheet[]) {
 }
 
 export function downloadXls(fileName: string, rows: Cell[][], sheetName = "Dados") {
-  downloadSheets(fileName, [{ name: sheetName, rows }]);
+  return downloadSheets(fileName, [{ name: sheetName, rows }]);
 }

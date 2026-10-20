@@ -17,6 +17,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { MemberForm, MemberAvatar, emptyMember, type MemberDraft } from "@/components/members/MemberForm";
 import { APPROVAL_LABELS, MEMBER_STATUS, ageFrom, dateBR } from "@/lib/church";
 import { downloadXls } from "@/lib/export";
+import { OptimizePhotosButton } from "@/components/members/OptimizePhotosButton";
 import { copyText } from "@/lib/clipboard";
 import { purgeStorageTrash } from "@/lib/storage-trash";
 import { memberSaveError, saveMemberDepartmentLinks } from "@/lib/departments";
@@ -146,6 +147,12 @@ function MembersPage() {
       <div className="flex flex-wrap items-center justify-between gap-4">
         <h1 className="text-3xl text-foreground">Membros</h1>
         <div className="flex gap-2">
+          {can("edit_member") && (
+            <OptimizePhotosButton
+              paths={data.map((m) => m.photo_path).filter((p): p is string => !!p)}
+              onDone={() => qc.invalidateQueries({ queryKey: ["members"] })}
+            />
+          )}
           <Button variant="outline" onClick={exportXls}><Download className="h-4 w-4" /> XLS</Button>
           {can("create_member") && (
             <Button onClick={() => openEdit({ ...emptyMember })}><Plus className="h-4 w-4" /> Novo membro</Button>
