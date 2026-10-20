@@ -15,7 +15,7 @@ export async function syncMemberDepartments(memberId: string, wanted: string[]) 
     if (e) throw e;
   }
   if (toRemove.length) {
-    // O banco limpa o líder automaticamente se quem sai era o líder.
+    // O banco remove a liderança automaticamente se quem sai era líder do departamento.
     const { error: e } = await supabase.from("department_members").delete().eq("member_id", memberId).in("department_id", toRemove);
     if (e) throw e;
   }
@@ -23,23 +23,23 @@ export async function syncMemberDepartments(memberId: string, wanted: string[]) 
 
 /**
  * Marca/desmarca o membro como líder nos departamentos escolhidos.
- * `currentLeaders` = departamento -> id do líder atual (do department_overview).
+ * `currentLeaders` = departamento -> ids dos líderes atuais (do department_overview).
+ * Um departamento pode ter vários líderes (opcional); aqui só entra/sai este membro.
  * Só mexe nos departamentos em que o membro continua vinculado.
  */
 export async function syncDepartmentLeadership(
   memberId: string,
   departmentIds: string[],
   leaderOf: string[],
-  currentLeaders: Record<string, string | null>,
+  currentLeaders: Record<string, string[]>,
 ) {
   for (const deptId of departmentIds) {
-    const isLeaderNow = currentLeaders[deptId] === memberId;
+    const isLeaderNow = (currentLeaders[deptId] ?? []).includes(memberId);
     const shouldLead = leaderOf.includes(deptId);
     if (shouldLead === isLeaderNow) continue;
-    const { error } = await supabase
-      .from("departments")
-      .update({ leader_member_id: shouldLead ? memberId : null })
-      .eq("id", deptId);
+    const { error } = shouldLead
+      ? await supabase.from("department_leaders").insert({ department_id: deptId, member_id: memberId })
+      : await supabase.from("department_leaders").delete().eq("department_id", deptId).eq("member_id", memberId);
     if (error) throw error;
   }
 }
@@ -53,7 +53,7 @@ export async function saveMemberDepartmentLinks(args: {
   departmentIds: string[];
   leaderDepartmentIds: string[];
   isLeadershipRole: boolean;
-  currentLeaders: Record<string, string | null>;
+  currentLeaders: Record<string, string[]>;
 }) {
   await syncMemberDepartments(args.memberId, args.departmentIds);
   await syncDepartmentLeadership(

@@ -106,7 +106,7 @@ function DepartmentList({ canManage }: { canManage: boolean }) {
             {d.description && <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">{d.description}</p>}
             <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
               <span className="inline-flex items-center gap-1.5"><Users className="h-4 w-4" /> {d.member_count} {d.member_count === 1 ? "voluntário" : "voluntários"}</span>
-              <span className="inline-flex items-center gap-1.5"><Crown className="h-4 w-4" /> {d.leader_name ?? "Sem líder"}</span>
+              <span className="inline-flex items-center gap-1.5"><Crown className="h-4 w-4" /> {d.leader_names?.length ? d.leader_names.join(", ") : "Sem líder"}</span>
             </div>
           </Link>
         ))}
