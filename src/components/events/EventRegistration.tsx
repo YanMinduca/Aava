@@ -314,7 +314,7 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
             <span>
               <span className="block font-medium text-foreground">Estou de acordo com meu uso de imagem *</span>
               <span className="block text-xs text-muted-foreground">
-                Autorizo o uso da minha imagem (fotos e vídeos) registrada neste evento. É obrigatório para se inscrever.
+                Autorizo o uso da minha imagem (fotos e vídeos) registrada neste evento. 
               </span>
             </span>
           </label>
