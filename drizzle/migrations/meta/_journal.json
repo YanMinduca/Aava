@@ -120,6 +120,13 @@
       "when": 1792237320000,
       "tag": "0016_delete_user_cancel_proofs_dashboard",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1792323720000,
+      "tag": "0017_department_multiple_leaders",
+      "breakpoints": true
     }
   ]
 }

@@ -123,6 +123,39 @@ export type Database = {
           },
         ]
       }
+      department_leaders: {
+        Row: {
+          created_at: string
+          department_id: string
+          member_id: string
+        }
+        Insert: {
+          created_at?: string
+          department_id: string
+          member_id: string
+        }
+        Update: {
+          created_at?: string
+          department_id?: string
+          member_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "department_leaders_department_id_fkey"
+            columns: ["department_id"]
+            isOneToOne: false
+            referencedRelation: "departments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "department_leaders_member_id_fkey"
+            columns: ["member_id"]
+            isOneToOne: false
+            referencedRelation: "members"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       departments: {
         Row: {
           created_at: string
@@ -961,7 +994,9 @@ export type Database = {
           description: string | null
           id: string
           leader_member_id: string | null
+          leader_member_ids: string[]
           leader_name: string | null
+          leader_names: string[]
           member_count: number
           name: string
         }[]

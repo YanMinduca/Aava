@@ -105,13 +105,26 @@ function DepartmentDetail() {
     onError: (e: Error) => toast.error(e.message),
   });
 
-  const setLeader = useMutation({
-    mutationFn: async (memberId: string | null) => {
-      const { error } = await supabase.from("departments").update({ leader_member_id: memberId }).eq("id", id);
+  // Um departamento pode ter vários líderes (opcional): adiciona/remove um por vez.
+  const addLeader = useMutation({
+    mutationFn: async (memberId: string) => {
+      const { error } = await supabase.from("department_leaders").insert({ department_id: id, member_id: memberId });
       if (error) throw error;
     },
     onSuccess: () => {
-      toast.success("Liderança atualizada");
+      toast.success("Líder adicionado");
+      refresh();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const removeLeader = useMutation({
+    mutationFn: async (memberId: string) => {
+      const { error } = await supabase.from("department_leaders").delete().eq("department_id", id).eq("member_id", memberId);
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      toast.success("Líder removido");
       refresh();
     },
     onError: (e: Error) => toast.error(e.message),
@@ -169,7 +182,7 @@ function DepartmentDetail() {
         name: "Resumo",
         rows: [
           ["Departamento", dept!.name],
-          ["Líder", dept!.leader_name ?? "—"],
+          [dept!.leader_names?.length > 1 ? "Líderes" : "Líder", dept!.leader_names?.length ? dept!.leader_names.join(", ") : "—"],
           ["Total de voluntários", rows.length],
           ["Gerado em", today],
           [],
@@ -195,7 +208,7 @@ function DepartmentDetail() {
           <h1 className="text-3xl text-foreground">{dept.name}</h1>
           {dept.description && <p className="mt-1 max-w-2xl text-sm text-muted-foreground">{dept.description}</p>}
           <p className="mt-3 inline-flex items-center gap-2 text-sm text-foreground">
-            <Crown className="h-4 w-4 text-primary" /> Líder: {dept.leader_name ?? "não definido"}
+            <Crown className="h-4 w-4 text-primary" /> {dept.leader_names?.length > 1 ? "Líderes" : "Líder"}: {dept.leader_names?.length ? dept.leader_names.join(", ") : "não definido"}
           </p>
         </div>
         {manageAll && (
@@ -218,22 +231,34 @@ function DepartmentDetail() {
           <TabsContent value="voluntarios">
             <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
               {manageAll ? (
-                <div className="flex items-center gap-2">
-                  <Label className="text-sm">Líder do departamento</Label>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Label className="text-sm">Líderes do departamento <span className="text-muted-foreground">(opcional)</span></Label>
                   <div className="w-64">
                     <MemberCombobox
-                      options={rows.map((r) => ({ id: r.member_id, label: r.full_name }))}
-                      value={dept.leader_member_id ?? ""}
-                      onChange={(v) => setLeader.mutate(v || null)}
-                      placeholder="Escolher líder"
+                      options={rows.filter((r) => !dept.leader_member_ids?.includes(r.member_id)).map((r) => ({ id: r.member_id, label: r.full_name }))}
+                      value=""
+                      onChange={(v) => v && addLeader.mutate(v)}
+                      placeholder="Adicionar líder"
                     />
                   </div>
-                  {dept.leader_member_id && <Button size="sm" variant="ghost" onClick={() => setLeader.mutate(null)}>Remover líder</Button>}
+                  {rows.filter((r) => r.is_leader).map((r) => (
+                    <Badge key={r.member_id} variant="secondary" className="gap-1 pr-1">
+                      <Crown className="h-3 w-3" /> {r.full_name}
+                      <button
+                        type="button"
+                        aria-label={`Remover ${r.full_name} da liderança`}
+                        className="ml-1 rounded-full p-0.5 hover:bg-background/60"
+                        onClick={() => removeLeader.mutate(r.member_id)}
+                      >
+                        <UserMinus className="h-3 w-3" />
+                      </button>
+                    </Badge>
+                  ))}
                 </div>
               ) : <span />}
               {canManageMembers && <Button onClick={() => setAdding(true)}><Plus className="h-4 w-4" /> Adicionar voluntário</Button>}
             </div>
-            {manageAll && rows.length === 0 && <p className="mt-2 text-xs text-muted-foreground">Adicione voluntários primeiro; o líder é escolhido entre eles.</p>}
+            {manageAll && rows.length === 0 && <p className="mt-2 text-xs text-muted-foreground">Adicione voluntários primeiro; os líderes são escolhidos entre eles (pode ter mais de um, ou nenhum).</p>}
 
             <div className="mt-4 overflow-x-auto rounded-2xl border bg-card">
               <table className="w-full text-sm">
@@ -293,7 +318,7 @@ function DepartmentDetail() {
               </div>
               <div className="mt-4 grid gap-4 sm:grid-cols-3">
                 <div className="rounded-2xl border bg-card p-5"><p className="text-xs text-muted-foreground">Total de voluntários</p><p className="mt-1 text-2xl font-semibold text-foreground">{rows.length}</p></div>
-                <div className="rounded-2xl border bg-card p-5"><p className="text-xs text-muted-foreground">Líder</p><p className="mt-1 text-lg font-semibold text-foreground">{dept.leader_name ?? "—"}</p></div>
+                <div className="rounded-2xl border bg-card p-5"><p className="text-xs text-muted-foreground">{dept.leader_names?.length > 1 ? "Líderes" : "Líder"}</p><p className="mt-1 text-lg font-semibold text-foreground">{dept.leader_names?.length ? dept.leader_names.join(", ") : "—"}</p></div>
                 <div className="rounded-2xl border bg-card p-5"><p className="text-xs text-muted-foreground">Gerado em</p><p className="mt-1 text-lg font-semibold text-foreground">{new Date().toLocaleDateString("pt-BR")}</p></div>
               </div>
               <div className="mt-4 rounded-2xl border bg-card p-5">

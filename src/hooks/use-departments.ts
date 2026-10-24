@@ -3,7 +3,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { useAccess } from "@/hooks/use-access";
 import { LEADER_DEPT_PERMISSIONS } from "@/lib/church";
 
-/** Departamentos visíveis para o usuário (com líder e total de voluntários). */
+/** Departamentos visíveis para o usuário (com líderes e total de voluntários). */
 export function useDepartments() {
   return useQuery({
     queryKey: ["departments"],
@@ -98,7 +98,7 @@ export function useDeptAccess() {
   const canIn = (deptId: string, perm: string) => {
     if (manageAll) return true;
     const dept = departments.data?.find((d) => d.id === deptId);
-    if (dept?.leader_member_id && dept.leader_member_id === mine.data?.memberId && LEADER_DEPT_PERMISSIONS.includes(perm)) return true;
+    if (mine.data?.memberId && dept?.leader_member_ids?.includes(mine.data.memberId) && LEADER_DEPT_PERMISSIONS.includes(perm)) return true;
     const r = mine.data;
     if (!r || !r.permissions.includes(perm)) return false;
     return r.scope === "all" || (r.scope === "selected" && r.selected.includes(deptId)) || (r.scope === "linked" && r.linked.includes(deptId));
