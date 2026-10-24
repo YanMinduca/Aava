@@ -291,6 +291,8 @@ export type Database = {
           created_at: string
           event_id: string
           id: string
+          image_consent: boolean
+          image_consent_at: string | null
           installments: number
           lot_id: string
           member_id: string | null
@@ -312,6 +314,8 @@ export type Database = {
           created_at?: string
           event_id: string
           id?: string
+          image_consent?: boolean
+          image_consent_at?: string | null
           installments?: number
           lot_id: string
           member_id?: string | null
@@ -333,6 +337,8 @@ export type Database = {
           created_at?: string
           event_id?: string
           id?: string
+          image_consent?: boolean
+          image_consent_at?: string | null
           installments?: number
           lot_id?: string
           member_id?: string | null
@@ -444,6 +450,7 @@ export type Database = {
           published: boolean
           registration_closes_at: string | null
           registration_opens_at: string | null
+          require_image_consent: boolean
           slug: string
           starts_at: string
           title: string
@@ -465,6 +472,7 @@ export type Database = {
           published?: boolean
           registration_closes_at?: string | null
           registration_opens_at?: string | null
+          require_image_consent?: boolean
           slug: string
           starts_at: string
           title: string
@@ -486,6 +494,7 @@ export type Database = {
           published?: boolean
           registration_closes_at?: string | null
           registration_opens_at?: string | null
+          require_image_consent?: boolean
           slug?: string
           starts_at?: string
           title?: string
@@ -1033,7 +1042,14 @@ export type Database = {
         }[]
       }
       register_for_event: {
-        Args: { _cpf: string; _event: string; _installments?: number; _lot: string; _quantity: number }
+        Args: {
+          _cpf: string
+          _event: string
+          _image_consent?: boolean
+          _installments?: number
+          _lot: string
+          _quantity: number
+        }
         Returns: string
       }
       release_event_registration: { Args: { _reg: string }; Returns: undefined }

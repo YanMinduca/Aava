@@ -39,6 +39,7 @@ describe("utilidades de evento", () => {
   it("traduz erros do banco para mensagens em português", () => {
     expect(eventError(new Error("sold_out"))).toMatch(/vagas/);
     expect(eventError(new Error("limit_exceeded"))).toMatch(/limite/);
+    expect(eventError(new Error("image_consent_required"))).toMatch(/uso de imagem/);
     expect(eventError({ message: "duplicate key value violates unique constraint \"events_slug_key\"" })).toMatch(/endereço/);
   });
 });

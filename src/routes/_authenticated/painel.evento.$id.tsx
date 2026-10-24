@@ -268,11 +268,11 @@ function Registrations({ eventId, title, onChange }: { eventId: string; title: s
   const open = (regs.data ?? []).find((r) => r.id === openId) ?? null;
 
   function exportXls() {
-    const head = ["Nome", "CPF", "Telefone", "E-mail", "Lote", "Quantidade", "Total (R$)", "Parcelas pagas", "Situação", "Inscrito em"];
+    const head = ["Nome", "CPF", "Telefone", "E-mail", "Lote", "Quantidade", "Total (R$)", "Parcelas pagas", "Situação", "Uso de imagem", "Inscrito em"];
     const rows = list.map((r) => [
       r.attendee_name, r.attendee_cpf ?? "", r.attendee_phone ?? "", r.attendee_email ?? "", r.event_lots?.name ?? "", r.quantity, Number(r.total),
       `${(r.event_payments ?? []).filter((p) => p.status === "paid").length}/${(r.event_payments ?? []).length}`,
-      REGISTRATION_STATUS[r.status] ?? r.status, fmtDateTime(r.created_at),
+      REGISTRATION_STATUS[r.status] ?? r.status, r.image_consent ? `Autorizado em ${fmtDateTime(r.image_consent_at)}` : "Não solicitado/sem aceite", fmtDateTime(r.created_at),
     ]);
     downloadXls(`inscricoes-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`, [head, ...rows], "Inscrições");
   }
@@ -365,6 +365,7 @@ function RegistrationDetail({ reg, onChange }: { reg: RegRow; onChange: () => vo
           <p>{reg.event_lots?.name} × {reg.quantity} · {reg.total > 0 ? moneyBR(reg.total) : "Gratuito"}</p>
           <p>CPF: {reg.attendee_cpf || "—"} · Tel.: {reg.attendee_phone || "—"}</p>
           <p>{reg.attendee_email}</p>
+          <p>Uso de imagem: {reg.image_consent ? `autorizado em ${fmtDateTime(reg.image_consent_at)}` : "sem aceite registrado"}</p>
           <p>Inscrito em {fmtDateTime(reg.created_at)}{reg.released_manually ? " · ingresso liberado manualmente" : ""}</p>
           <p><Badge variant={reg.status === "confirmed" ? "default" : "secondary"}>{REGISTRATION_STATUS[reg.status] ?? reg.status}</Badge></p>
         </div>

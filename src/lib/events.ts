@@ -50,6 +50,7 @@ const ERRORS: Record<string, string> = {
   login_required: "Entre na sua conta para continuar.",
   event_not_found: "Evento não encontrado.",
   registration_closed: "As inscrições deste evento não estão abertas.",
+  image_consent_required: "Para se inscrever, marque “Estou de acordo com meu uso de imagem”.",
   lot_not_found: "Lote não encontrado.",
   lot_closed: "Este lote não está disponível no momento.",
   profile_required: "Complete seus dados para se inscrever.",
@@ -120,6 +121,7 @@ export type PublicEvent = {
   max_installments: number;
   limit_per_person: boolean;
   max_per_person: number | null;
+  require_image_consent: boolean;
 };
 export type PublicEventDetail = { event: PublicEvent; lots: PublicLot[] };
 export const asEventDetail = (j: Json | null) => (j ? (j as unknown as PublicEventDetail) : null);

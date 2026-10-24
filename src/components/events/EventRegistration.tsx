@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
@@ -52,6 +53,7 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
   const [qty, setQty] = useState(1);
   const [cpf, setCpf] = useState("");
   const [installments, setInstallments] = useState(1);
+  const [imageConsent, setImageConsent] = useState(false);
   const [visitor, setVisitor] = useState({ name: "", cpf: "", phone: "" });
 
   useEffect(() => {
@@ -105,8 +107,10 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
     mutationFn: async () => {
       if (event.limit_per_person && !isValidCpf(cpf)) throw new Error("invalid_cpf");
       if (cpf && !isValidCpf(cpf)) throw new Error("invalid_cpf");
+      if (event.require_image_consent && !imageConsent) throw new Error("image_consent_required");
       const { error } = await supabase.rpc("register_for_event", {
         _event: event.id, _lot: lotId, _quantity: qty, _cpf: cpf, _installments: installments,
+        _image_consent: event.require_image_consent && imageConsent,
       });
       if (error) throw error;
     },
@@ -299,11 +303,28 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
           </div>
         )}
 
+        {event.require_image_consent && (
+          <label className="flex cursor-pointer items-start gap-3 rounded-lg border bg-primary-soft/40 p-4 text-sm">
+            <Checkbox
+              className="mt-0.5"
+              checked={imageConsent}
+              onCheckedChange={(on) => setImageConsent(on === true)}
+              aria-required="true"
+            />
+            <span>
+              <span className="block font-medium text-foreground">Estou de acordo com meu uso de imagem *</span>
+              <span className="block text-xs text-muted-foreground">
+                Autorizo o uso da minha imagem (fotos e vídeos) registrada neste evento. É obrigatório para se inscrever.
+              </span>
+            </span>
+          </label>
+        )}
+
         <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4">
           <p className="text-sm text-muted-foreground">
             Total: <strong className="text-lg text-foreground">{payRequired ? moneyBR(total) : "Gratuito"}</strong>
           </p>
-          <Button type="submit" size="lg" disabled={register.isPending || !lotId}>Inscrever-se</Button>
+          <Button type="submit" size="lg" disabled={register.isPending || !lotId || (event.require_image_consent && !imageConsent)}>Inscrever-se</Button>
         </div>
       </form>
     </Box>

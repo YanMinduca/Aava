@@ -1,0 +1,328 @@
+diff --git a/drizzle/migrations/0018_event_image_consent.sql b/drizzle/migrations/0018_event_image_consent.sql
+new file mode 100644
+index 0000000..551b665
+--- /dev/null
++++ b/drizzle/migrations/0018_event_image_consent.sql
+@@ -0,0 +1,88 @@
++-- Autorização de uso de imagem nos eventos.
++-- O evento pode exigir "Estou de acordo com meu uso de imagem"; se exigir, a inscrição só é aceita com o aceite.
++
++alter table public.events
++  add column if not exists require_image_consent boolean not null default false;
++
++alter table public.event_registrations
++  add column if not exists image_consent boolean not null default false,
++  add column if not exists image_consent_at timestamptz;
++
++-- A assinatura muda (novo parâmetro), então a versão antiga é removida para não haver duas sobrecargas ambíguas.
++drop function if exists public.register_for_event(uuid, uuid, integer, text, integer);
++
++create or replace function public.register_for_event(
++  _event uuid, _lot uuid, _quantity integer, _cpf text,
++  _installments integer default 1, _image_consent boolean default false
++)
++returns uuid
++language plpgsql
++security definer
++set search_path to 'public'
++as $function$
++declare
++  uid uuid := auth.uid();
++  ev public.events%rowtype; lt public.event_lots%rowtype; m public.members%rowtype;
++  is_member boolean; d text; used int; total numeric; reg uuid; pay_required boolean; n int; base numeric; i int;
++  consent boolean;
++begin
++  if uid is null then raise exception 'login_required'; end if;
++  select * into ev from public.events where id = _event and published;
++  if not found then raise exception 'event_not_found'; end if;
++  if now() < coalesce(ev.registration_opens_at, '-infinity') or now() > coalesce(ev.registration_closes_at, 'infinity') then
++    raise exception 'registration_closed';
++  end if;
++  -- Autorização de uso de imagem: obrigatória quando o evento exige
++  consent := ev.require_image_consent and coalesce(_image_consent, false);
++  if ev.require_image_consent and not consent then raise exception 'image_consent_required'; end if;
++
++  select * into lt from public.event_lots where id = _lot and event_id = _event for update;
++  if not found then raise exception 'lot_not_found'; end if;
++  if (lt.opens_at is not null and now() < lt.opens_at) or (lt.closes_at is not null and now() > lt.closes_at) then
++    raise exception 'lot_closed';
++  end if;
++  select * into m from public.members where user_id = uid;
++  if not found then raise exception 'profile_required'; end if;
++  is_member := m.approval_status = 'aprovado' and m.status <> 'visitante';
++  if ev.audience = 'members' and not is_member and not lt.public_access then raise exception 'members_only'; end if;
++  if _quantity is null or _quantity < 1 or _quantity > 10 then raise exception 'invalid_quantity'; end if;
++
++  d := regexp_replace(coalesce(nullif(btrim(_cpf), ''), m.cpf, ''), '\D', '', 'g');
++  if ev.limit_per_person then
++    if not public.is_valid_cpf(d) then raise exception 'invalid_cpf'; end if;
++    select coalesce(sum(r.quantity), 0) into used from public.event_registrations r
++      where r.event_id = _event and r.status <> 'cancelled'
++        and (r.user_id = uid or regexp_replace(coalesce(r.attendee_cpf, ''), '\D', '', 'g') = d);
++    if used + _quantity > coalesce(ev.max_per_person, 1) then raise exception 'limit_exceeded'; end if;
++  elsif d <> '' and not public.is_valid_cpf(d) then
++    raise exception 'invalid_cpf';
++  end if;
++
++  if lt.capacity is not null and public.lot_taken(lt.id) + _quantity > lt.capacity then raise exception 'sold_out'; end if;
++
++  pay_required := ev.payment_enabled and lt.price > 0;
++  total := lt.price * _quantity;
++  n := case when pay_required and coalesce(_installments, 1) > 1 then _installments else 1 end;
++  if n > 1 and (not ev.allow_installments or n > ev.max_installments) then raise exception 'invalid_installments'; end if;
++
++  insert into public.event_registrations (event_id, lot_id, user_id, member_id, attendee_name, attendee_cpf, attendee_phone, attendee_email,
++                                          quantity, unit_price, total, installments, status, image_consent, image_consent_at)
++  values (_event, _lot, uid, m.id, m.full_name, nullif(d, ''), m.phone, coalesce(m.email, (select u.email from auth.users u where u.id = uid)),
++          _quantity, lt.price, total, n, case when pay_required then 'pending' else 'confirmed' end,
++          consent, case when consent then now() end)
++  returning id into reg;
++
++  if pay_required then
++    base := round(total / n, 2);
++    for i in 1..n loop
++      insert into public.event_payments (registration_id, installment_no, amount)
++      values (reg, i, case when i = n then total - base * (n - 1) else base end);
++    end loop;
++  else
++    perform public.issue_event_tickets(reg);
++  end if;
++  return reg;
++end $function$;
++
++revoke all on function public.register_for_event(uuid, uuid, integer, text, integer, boolean) from public, anon;
++grant execute on function public.register_for_event(uuid, uuid, integer, text, integer, boolean) to authenticated, service_role;
+diff --git a/src/components/events/EventForm.tsx b/src/components/events/EventForm.tsx
+index ff55774..14751b3 100644
+--- a/src/components/events/EventForm.tsx
++++ b/src/components/events/EventForm.tsx
+@@ -40,6 +40,7 @@ export type EventDraft = {
+   max_installments: string;
+   limit_per_person: boolean;
+   max_per_person: string;
++  require_image_consent: boolean;
+ };
+ 
+ const SINGLE_LOT = "Ingresso";
+@@ -50,6 +51,7 @@ export const blankEvent = (): EventDraft => ({
+   payment_enabled: false, payment_link: "", pix_key: "", pix_qr_path: "", accepts_card: false,
+   card_contact_note: "Para pagar no cartão, entre em contato com a igreja.",
+   allow_installments: false, max_installments: "3", limit_per_person: false, max_per_person: "2",
++  require_image_consent: false,
+ });
+ 
+ export function draftFrom(
+@@ -73,6 +75,7 @@ export function draftFrom(
+     card_contact_note: info?.card_contact_note ?? "Para pagar no cartão, entre em contato com a igreja.",
+     allow_installments: e.allow_installments, max_installments: String(Math.max(2, e.max_installments)),
+     limit_per_person: e.limit_per_person, max_per_person: String(e.max_per_person ?? 2),
++    require_image_consent: e.require_image_consent,
+   };
+ }
+ 
+@@ -111,6 +114,7 @@ async function saveEvent(d: EventDraft, userId: string | null | undefined, qrFil
+     allow_installments: d.payment_enabled && d.allow_installments,
+     max_installments: d.payment_enabled && d.allow_installments ? Number(d.max_installments) : 1,
+     limit_per_person: d.limit_per_person, max_per_person: d.limit_per_person ? Number(d.max_per_person) : null,
++    require_image_consent: d.require_image_consent,
+   };
+ 
+   let eventId = d.id;
+@@ -245,6 +249,7 @@ export function EventForm({ initial, onSaved }: { initial: EventDraft; onSaved:
+         {d.limit_per_person && (
+           <Field label="Quantas inscrições cada pessoa pode fazer?"><Input type="number" min={1} value={d.max_per_person} onChange={(e) => set({ max_per_person: e.target.value })} className="max-w-32" /></Field>
+         )}
++        <Toggle checked={d.require_image_consent} onChange={(v) => set({ require_image_consent: v })} title="Exigir autorização de uso de imagem" help="Quem se inscrever precisa marcar “Estou de acordo com meu uso de imagem”. Sem o aceite, a inscrição não é feita." />
+       </section>
+ 
+       <section className="space-y-4">
+diff --git a/src/components/events/EventRegistration.tsx b/src/components/events/EventRegistration.tsx
+index 6efa9d6..b7a8697 100644
+--- a/src/components/events/EventRegistration.tsx
++++ b/src/components/events/EventRegistration.tsx
+@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
+ import { Input } from "@/components/ui/input";
+ import { Label } from "@/components/ui/label";
+ import { Badge } from "@/components/ui/badge";
++import { Checkbox } from "@/components/ui/checkbox";
+ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+ import {
+@@ -52,6 +53,7 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
+   const [qty, setQty] = useState(1);
+   const [cpf, setCpf] = useState("");
+   const [installments, setInstallments] = useState(1);
++  const [imageConsent, setImageConsent] = useState(false);
+   const [visitor, setVisitor] = useState({ name: "", cpf: "", phone: "" });
+ 
+   useEffect(() => {
+@@ -105,8 +107,10 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
+     mutationFn: async () => {
+       if (event.limit_per_person && !isValidCpf(cpf)) throw new Error("invalid_cpf");
+       if (cpf && !isValidCpf(cpf)) throw new Error("invalid_cpf");
++      if (event.require_image_consent && !imageConsent) throw new Error("image_consent_required");
+       const { error } = await supabase.rpc("register_for_event", {
+         _event: event.id, _lot: lotId, _quantity: qty, _cpf: cpf, _installments: installments,
++        _image_consent: event.require_image_consent && imageConsent,
+       });
+       if (error) throw error;
+     },
+@@ -299,11 +303,28 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
+           </div>
+         )}
+ 
++        {event.require_image_consent && (
++          <label className="flex cursor-pointer items-start gap-3 rounded-lg border bg-primary-soft/40 p-4 text-sm">
++            <Checkbox
++              className="mt-0.5"
++              checked={imageConsent}
++              onCheckedChange={(on) => setImageConsent(on === true)}
++              aria-required="true"
++            />
++            <span>
++              <span className="block font-medium text-foreground">Estou de acordo com meu uso de imagem *</span>
++              <span className="block text-xs text-muted-foreground">
++                Autorizo o uso da minha imagem (fotos e vídeos) registrada neste evento. É obrigatório para se inscrever.
++              </span>
++            </span>
++          </label>
++        )}
++
+         <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4">
+           <p className="text-sm text-muted-foreground">
+             Total: <strong className="text-lg text-foreground">{payRequired ? moneyBR(total) : "Gratuito"}</strong>
+           </p>
+-          <Button type="submit" size="lg" disabled={register.isPending || !lotId}>Inscrever-se</Button>
++          <Button type="submit" size="lg" disabled={register.isPending || !lotId || (event.require_image_consent && !imageConsent)}>Inscrever-se</Button>
+         </div>
+       </form>
+     </Box>
+diff --git a/src/integrations/supabase/types.ts b/src/integrations/supabase/types.ts
+index 9851f99..66ee51c 100644
+--- a/src/integrations/supabase/types.ts
++++ b/src/integrations/supabase/types.ts
+@@ -324,6 +324,8 @@ export type Database = {
+           created_at: string
+           event_id: string
+           id: string
++          image_consent: boolean
++          image_consent_at: string | null
+           installments: number
+           lot_id: string
+           member_id: string | null
+@@ -345,6 +347,8 @@ export type Database = {
+           created_at?: string
+           event_id: string
+           id?: string
++          image_consent?: boolean
++          image_consent_at?: string | null
+           installments?: number
+           lot_id: string
+           member_id?: string | null
+@@ -366,6 +370,8 @@ export type Database = {
+           created_at?: string
+           event_id?: string
+           id?: string
++          image_consent?: boolean
++          image_consent_at?: string | null
+           installments?: number
+           lot_id?: string
+           member_id?: string | null
+@@ -477,6 +483,7 @@ export type Database = {
+           published: boolean
+           registration_closes_at: string | null
+           registration_opens_at: string | null
++          require_image_consent: boolean
+           slug: string
+           starts_at: string
+           title: string
+@@ -498,6 +505,7 @@ export type Database = {
+           published?: boolean
+           registration_closes_at?: string | null
+           registration_opens_at?: string | null
++          require_image_consent?: boolean
+           slug: string
+           starts_at: string
+           title: string
+@@ -519,6 +527,7 @@ export type Database = {
+           published?: boolean
+           registration_closes_at?: string | null
+           registration_opens_at?: string | null
++          require_image_consent?: boolean
+           slug?: string
+           starts_at?: string
+           title?: string
+@@ -1068,7 +1077,14 @@ export type Database = {
+         }[]
+       }
+       register_for_event: {
+-        Args: { _cpf: string; _event: string; _installments?: number; _lot: string; _quantity: number }
++        Args: {
++          _cpf: string
++          _event: string
++          _image_consent?: boolean
++          _installments?: number
++          _lot: string
++          _quantity: number
++        }
+         Returns: string
+       }
+       release_event_registration: { Args: { _reg: string }; Returns: undefined }
+diff --git a/src/lib/events.ts b/src/lib/events.ts
+index b602876..f35f72a 100644
+--- a/src/lib/events.ts
++++ b/src/lib/events.ts
+@@ -50,6 +50,7 @@ const ERRORS: Record<string, string> = {
+   login_required: "Entre na sua conta para continuar.",
+   event_not_found: "Evento não encontrado.",
+   registration_closed: "As inscrições deste evento não estão abertas.",
++  image_consent_required: "Para se inscrever, marque “Estou de acordo com meu uso de imagem”.",
+   lot_not_found: "Lote não encontrado.",
+   lot_closed: "Este lote não está disponível no momento.",
+   profile_required: "Complete seus dados para se inscrever.",
+@@ -120,6 +121,7 @@ export type PublicEvent = {
+   max_installments: number;
+   limit_per_person: boolean;
+   max_per_person: number | null;
++  require_image_consent: boolean;
+ };
+ export type PublicEventDetail = { event: PublicEvent; lots: PublicLot[] };
+ export const asEventDetail = (j: Json | null) => (j ? (j as unknown as PublicEventDetail) : null);
+diff --git a/src/routes/_authenticated/painel.evento.$id.tsx b/src/routes/_authenticated/painel.evento.$id.tsx
+index 5db1ccb..07b3c51 100644
+--- a/src/routes/_authenticated/painel.evento.$id.tsx
++++ b/src/routes/_authenticated/painel.evento.$id.tsx
+@@ -268,11 +268,11 @@ function Registrations({ eventId, title, onChange }: { eventId: string; title: s
+   const open = (regs.data ?? []).find((r) => r.id === openId) ?? null;
+ 
+   function exportXls() {
+-    const head = ["Nome", "CPF", "Telefone", "E-mail", "Lote", "Quantidade", "Total (R$)", "Parcelas pagas", "Situação", "Inscrito em"];
++    const head = ["Nome", "CPF", "Telefone", "E-mail", "Lote", "Quantidade", "Total (R$)", "Parcelas pagas", "Situação", "Uso de imagem", "Inscrito em"];
+     const rows = list.map((r) => [
+       r.attendee_name, r.attendee_cpf ?? "", r.attendee_phone ?? "", r.attendee_email ?? "", r.event_lots?.name ?? "", r.quantity, Number(r.total),
+       `${(r.event_payments ?? []).filter((p) => p.status === "paid").length}/${(r.event_payments ?? []).length}`,
+-      REGISTRATION_STATUS[r.status] ?? r.status, fmtDateTime(r.created_at),
++      REGISTRATION_STATUS[r.status] ?? r.status, r.image_consent ? `Autorizado em ${fmtDateTime(r.image_consent_at)}` : "Não solicitado/sem aceite", fmtDateTime(r.created_at),
+     ]);
+     downloadXls(`inscricoes-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`, [head, ...rows], "Inscrições");
+   }
+@@ -365,6 +365,7 @@ function RegistrationDetail({ reg, onChange }: { reg: RegRow; onChange: () => vo
+           <p>{reg.event_lots?.name} × {reg.quantity} · {reg.total > 0 ? moneyBR(reg.total) : "Gratuito"}</p>
+           <p>CPF: {reg.attendee_cpf || "—"} · Tel.: {reg.attendee_phone || "—"}</p>
+           <p>{reg.attendee_email}</p>
++          <p>Uso de imagem: {reg.image_consent ? `autorizado em ${fmtDateTime(reg.image_consent_at)}` : "sem aceite registrado"}</p>
+           <p>Inscrito em {fmtDateTime(reg.created_at)}{reg.released_manually ? " · ingresso liberado manualmente" : ""}</p>
+           <p><Badge variant={reg.status === "confirmed" ? "default" : "secondary"}>{REGISTRATION_STATUS[reg.status] ?? reg.status}</Badge></p>
+         </div>
+diff --git a/src/test/events.test.ts b/src/test/events.test.ts
+index 10d46f3..e90f3f1 100644
+--- a/src/test/events.test.ts
++++ b/src/test/events.test.ts
+@@ -39,6 +39,7 @@ describe("utilidades de evento", () => {
+   it("traduz erros do banco para mensagens em português", () => {
+     expect(eventError(new Error("sold_out"))).toMatch(/vagas/);
+     expect(eventError(new Error("limit_exceeded"))).toMatch(/limite/);
++    expect(eventError(new Error("image_consent_required"))).toMatch(/uso de imagem/);
+     expect(eventError({ message: "duplicate key value violates unique constraint \"events_slug_key\"" })).toMatch(/endereço/);
+   });
+ });

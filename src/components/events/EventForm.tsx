@@ -40,6 +40,7 @@ export type EventDraft = {
   max_installments: string;
   limit_per_person: boolean;
   max_per_person: string;
+  require_image_consent: boolean;
 };
 
 const SINGLE_LOT = "Ingresso";
@@ -50,6 +51,7 @@ export const blankEvent = (): EventDraft => ({
   payment_enabled: false, payment_link: "", pix_key: "", pix_qr_path: "", accepts_card: false,
   card_contact_note: "Para pagar no cartão, entre em contato com a igreja.",
   allow_installments: false, max_installments: "3", limit_per_person: false, max_per_person: "2",
+  require_image_consent: false,
 });
 
 export function draftFrom(
@@ -73,6 +75,7 @@ export function draftFrom(
     card_contact_note: info?.card_contact_note ?? "Para pagar no cartão, entre em contato com a igreja.",
     allow_installments: e.allow_installments, max_installments: String(Math.max(2, e.max_installments)),
     limit_per_person: e.limit_per_person, max_per_person: String(e.max_per_person ?? 2),
+    require_image_consent: e.require_image_consent,
   };
 }
 
@@ -111,6 +114,7 @@ async function saveEvent(d: EventDraft, userId: string | null | undefined, qrFil
     allow_installments: d.payment_enabled && d.allow_installments,
     max_installments: d.payment_enabled && d.allow_installments ? Number(d.max_installments) : 1,
     limit_per_person: d.limit_per_person, max_per_person: d.limit_per_person ? Number(d.max_per_person) : null,
+    require_image_consent: d.require_image_consent,
   };
 
   let eventId = d.id;
@@ -245,6 +249,7 @@ export function EventForm({ initial, onSaved }: { initial: EventDraft; onSaved: 
         {d.limit_per_person && (
           <Field label="Quantas inscrições cada pessoa pode fazer?"><Input type="number" min={1} value={d.max_per_person} onChange={(e) => set({ max_per_person: e.target.value })} className="max-w-32" /></Field>
         )}
+        <Toggle checked={d.require_image_consent} onChange={(v) => set({ require_image_consent: v })} title="Exigir autorização de uso de imagem" help="Quem se inscrever precisa marcar “Estou de acordo com meu uso de imagem”. Sem o aceite, a inscrição não é feita." />
       </section>
 
       <section className="space-y-4">
