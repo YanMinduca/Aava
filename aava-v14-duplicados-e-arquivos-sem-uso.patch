@@ -1,0 +1,920 @@
+diff --git a/drizzle/migrations/0019_member_duplicates_and_orphan_selection.sql b/drizzle/migrations/0019_member_duplicates_and_orphan_selection.sql
+new file mode 100644
+index 0000000..825c6e4
+--- /dev/null
++++ b/drizzle/migrations/0019_member_duplicates_and_orphan_selection.sql
+@@ -0,0 +1,97 @@
++-- 1) Um CPF só pode existir em um cadastro (compara só os dígitos, ignora pontos e traço).
++--    Cadastros sem CPF (ou com CPF incompleto) continuam permitidos.
++create unique index if not exists members_cpf_digits_key
++  on public.members ((regexp_replace(cpf, '\D', '', 'g')))
++  where length(regexp_replace(coalesce(cpf, ''), '\D', '', 'g')) = 11;
++
++-- 2) Para quem cadastra/edita membros: mostra cadastros que já têm o mesmo nome, CPF ou RG.
++create or replace function public.find_member_duplicates(_name text, _cpf text, _rg text, _exclude uuid default null)
++returns table (
++  id uuid, full_name text, registration_number text, status text, approval_status text,
++  has_account boolean, match_name boolean, match_cpf boolean, match_rg boolean
++)
++language plpgsql stable security definer set search_path = public as $$
++declare
++  n text := public.norm_name(_name);
++  c text := regexp_replace(coalesce(_cpf, ''), '\D', '', 'g');
++  r text := regexp_replace(lower(coalesce(_rg, '')), '[^0-9a-z]', '', 'g');
++begin
++  if auth.uid() is null
++     or not (public.has_permission(auth.uid(), 'view_members')
++          or public.has_permission(auth.uid(), 'create_member')
++          or public.has_permission(auth.uid(), 'edit_member')) then
++    raise exception 'Acesso negado';
++  end if;
++  if coalesce(array_length(string_to_array(n, ' '), 1), 0) < 2 then n := null; end if;
++  if length(c) <> 11 then c := null; end if;
++  if length(r) < 5 then r := null; end if;
++  if n is null and c is null and r is null then return; end if;
++  return query
++    with x as (
++      select m.id as mid, m.full_name as mname, m.registration_number as mreg, m.status as mstatus,
++             m.approval_status as mappr, (m.user_id is not null) as macc,
++             (n is not null and public.norm_name(m.full_name) = n) as mn,
++             (c is not null and regexp_replace(coalesce(m.cpf, ''), '\D', '', 'g') = c) as mc,
++             (r is not null and regexp_replace(lower(coalesce(m.rg, '')), '[^0-9a-z]', '', 'g') = r) as mr
++      from public.members m
++      where _exclude is null or m.id <> _exclude
++    )
++    select x.mid, x.mname, x.mreg, x.mstatus, x.mappr, x.macc, x.mn, x.mc, x.mr
++    from x where x.mn or x.mc or x.mr
++    order by x.mc desc, x.mr desc, x.mn desc, x.mname
++    limit 5;
++end $$;
++
++-- 3) Para quem está criando conta: o CPF digitado já tem cadastro? Devolve só o nome abreviado (sem expor dados).
++--    state: claimable (pode vincular) | in_use (já vinculado a outra conta) | pending (aguardando aprovação) | limited (muitas consultas)
++create or replace function public.check_cpf_for_signup(_cpf text)
++returns table (id uuid, masked_name text, state text)
++language plpgsql security definer set search_path = public as $$
++declare
++  uid uuid := auth.uid();
++  c text := regexp_replace(coalesce(_cpf, ''), '\D', '', 'g');
++begin
++  if uid is null then raise exception 'Acesso negado'; end if;
++  if length(c) <> 11 then return; end if;
++  if (select count(*) from public.member_claim_attempts a
++        where a.user_id = uid and a.kind = 'lookup' and a.created_at > now() - interval '1 hour') >= 30 then
++    return query select null::uuid, null::text, 'limited'::text;
++    return;
++  end if;
++  insert into public.member_claim_attempts (user_id, kind) values (uid, 'lookup');
++  return query
++    select m.id,
++           split_part(btrim(m.full_name), ' ', 1)
++             || coalesce(' ' || (select string_agg(left(w, 1) || '.', ' ')
++                                   from unnest((string_to_array(btrim(m.full_name), ' '))[2:]) w where w <> ''), ''),
++           case when m.user_id is not null then 'in_use'
++                when m.approval_status = 'aprovado' then 'claimable'
++                else 'pending' end
++    from public.members m
++    where regexp_replace(coalesce(m.cpf, ''), '\D', '', 'g') = c
++      and m.user_id is distinct from uid
++    limit 1;
++end $$;
++
++-- 4) Arquivos sem uso: apaga só os que a pessoa marcou (e que continuam sem uso na hora de apagar).
++create or replace function public.storage_enqueue_orphans_selected(_items jsonb)
++returns int language plpgsql security definer set search_path = public as $$
++declare n int;
++begin
++  if not public.is_church_leadership(auth.uid()) then raise exception 'Acesso negado'; end if;
++  with wanted as (
++    select i ->> 'bucket' as b, i ->> 'path' as p from jsonb_array_elements(coalesce(_items, '[]'::jsonb)) i
++  ), ins as (
++    insert into public.storage_trash (bucket, path)
++    select o.bucket, o.path from public.storage_orphans_preview() o
++    join wanted w on w.b = o.bucket and w.p = o.path
++    on conflict (bucket, path) do nothing
++    returning 1)
++  select count(*) into n from ins;
++  return n;
++end $$;
++
++revoke all on function public.find_member_duplicates(text, text, text, uuid), public.check_cpf_for_signup(text),
++  public.storage_enqueue_orphans_selected(jsonb) from public, anon;
++grant execute on function public.find_member_duplicates(text, text, text, uuid), public.check_cpf_for_signup(text),
++  public.storage_enqueue_orphans_selected(jsonb) to authenticated, service_role;
+diff --git a/src/components/admin/UserAdmin.tsx b/src/components/admin/UserAdmin.tsx
+index a7aaee9..628ce50 100644
+--- a/src/components/admin/UserAdmin.tsx
++++ b/src/components/admin/UserAdmin.tsx
+@@ -1,7 +1,7 @@
+-import { useState } from "react";
++import { useEffect, useMemo, useState } from "react";
+ import { useMutation, useQueryClient } from "@tanstack/react-query";
+ import { toast } from "sonner";
+-import { Trash2 } from "lucide-react";
++import { ExternalLink, FileText, Trash2 } from "lucide-react";
+ import { supabase } from "@/integrations/supabase/client";
+ import { purgeStorageTrash } from "@/lib/storage-trash";
+ import { Button } from "@/components/ui/button";
+@@ -96,63 +96,184 @@ export function formatBytes(n: number) {
+   return `${(n / 1024 / 1024).toFixed(1)} MB`;
+ }
+ 
+-type Orphan = { bucket: string; path: string; size: number };
++type Orphan = { bucket: string; path: string; size: number; created_at: string };
+ 
+-/** Acha e apaga arquivos que nenhum registro usa mais (sobras de coisas apagadas antes). */
++const orphanKey = (o: Pick<Orphan, "bucket" | "path">) => `${o.bucket}/${o.path}`;
++const isImagePath = (p: string) => /\.(png|jpe?g|gif|webp|avif|svg|bmp)$/i.test(p);
++const PAGE = 24;
++
++/**
++ * Acha arquivos que nenhum registro usa mais (sobras de coisas apagadas antes), mostra cada um
++ * (miniatura, origem, tamanho e data) e apaga só os que a pessoa marcar. Os não marcados ficam guardados.
++ */
+ export function StorageCleanupCard() {
+   const [found, setFound] = useState<Orphan[] | null>(null);
++  const [selected, setSelected] = useState<Set<string>>(new Set());
++  const [bucket, setBucket] = useState("todos");
++  const [visible, setVisible] = useState(PAGE);
++  const [urls, setUrls] = useState<Record<string, string>>({});
++  const [broken, setBroken] = useState<Set<string>>(new Set());
++
+   const check = useMutation({
+     mutationFn: async () => {
+       const { data, error } = await supabase.rpc("storage_orphans_preview");
+       if (error) throw error;
+       return data ?? [];
+     },
+-    onSuccess: (rows) => setFound(rows),
++    onSuccess: (rows) => {
++      setFound(rows);
++      setSelected(new Set());
++      setBucket("todos");
++      setVisible(PAGE);
++      setBroken(new Set());
++    },
+     onError: () => toast.error("Não foi possível verificar os arquivos."),
+   });
++
+   const wipe = useMutation({
+-    mutationFn: async () => {
+-      const { error } = await supabase.rpc("storage_enqueue_orphans");
++    mutationFn: async (items: Orphan[]) => {
++      const { error } = await supabase.rpc("storage_enqueue_orphans_selected", {
++        _items: items.map((o) => ({ bucket: o.bucket, path: o.path })),
++      });
+       if (error) throw error;
+-      return purgeStorageTrash();
++      await purgeStorageTrash();
++      return items;
+     },
+-    onSuccess: (n) => {
+-      toast.success(`${n} ${n === 1 ? "arquivo apagado" : "arquivos apagados"} do armazenamento`);
+-      setFound(null);
++    onSuccess: (items) => {
++      const gone = new Set(items.map(orphanKey));
++      setFound((f) => (f ?? []).filter((o) => !gone.has(orphanKey(o))));
++      setSelected(new Set());
++      toast.success(`${items.length} ${items.length === 1 ? "arquivo apagado" : "arquivos apagados"} do armazenamento`);
+     },
+     onError: () => toast.error("Não foi possível apagar os arquivos."),
+   });
+ 
+-  const byBucket = (found ?? []).reduce<Record<string, { n: number; size: number }>>((acc, o) => {
+-    const b = (acc[o.bucket] ??= { n: 0, size: 0 });
+-    b.n += 1;
+-    b.size += o.size;
+-    return acc;
+-  }, {});
+-  const total = (found ?? []).reduce((s, o) => s + o.size, 0);
++  const all = found ?? [];
++  const counts = all.reduce<Record<string, number>>((acc, o) => ((acc[o.bucket] = (acc[o.bucket] ?? 0) + 1), acc), {});
++  const filtered = useMemo(() => all.filter((o) => bucket === "todos" || o.bucket === bucket), [all, bucket]);
++  const shown = useMemo(() => filtered.slice(0, visible), [filtered, visible]);
++  const chosen = all.filter((o) => selected.has(orphanKey(o)));
++  const chosenSize = chosen.reduce((s, o) => s + o.size, 0);
++
++  // Miniaturas: só das imagens que estão na tela (links temporários, pois os arquivos são privados).
++  useEffect(() => {
++    const need = shown.filter((o) => isImagePath(o.path) && !urls[orphanKey(o)]);
++    if (need.length === 0) return;
++    let alive = true;
++    void (async () => {
++      const add: Record<string, string> = {};
++      const byBucket = new Map<string, Orphan[]>();
++      for (const o of need) byBucket.set(o.bucket, [...(byBucket.get(o.bucket) ?? []), o]);
++      for (const [b, items] of byBucket) {
++        if (b === "site-assets") {
++          for (const o of items) add[orphanKey(o)] = supabase.storage.from(b).getPublicUrl(o.path).data.publicUrl;
++          continue;
++        }
++        const { data } = await supabase.storage.from(b).createSignedUrls(items.map((o) => o.path), 1800);
++        for (const d of data ?? []) if (d.signedUrl && d.path) add[`${b}/${d.path}`] = d.signedUrl;
++      }
++      if (alive) setUrls((u) => ({ ...u, ...add }));
++    })();
++    return () => {
++      alive = false;
++    };
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [shown]);
++
++  const toggle = (o: Orphan, on: boolean) =>
++    setSelected((s) => {
++      const n = new Set(s);
++      if (on) n.add(orphanKey(o));
++      else n.delete(orphanKey(o));
++      return n;
++    });
+ 
+   return (
+     <div className="mt-10 rounded-2xl border bg-card p-6">
+       <p className="font-display text-xl text-foreground">Arquivos sem uso</p>
+       <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+-        Procura no armazenamento arquivos que nenhum cadastro, comprovante, recibo ou página do site usa mais (por exemplo, sobras de coisas apagadas antes) e permite apagá-los para sempre. Só entram arquivos com mais de 1 dia.
++        Procura no armazenamento arquivos que nenhum cadastro, comprovante, recibo ou página do site usa mais (por exemplo, sobras de coisas apagadas antes). Você vê cada arquivo e marca só os que quer apagar; os que ficarem sem marca continuam guardados. Só entram arquivos com mais de 1 dia.
+       </p>
+-      <Button type="button" variant="outline" className="mt-4" disabled={check.isPending} onClick={() => check.mutate()}>Verificar agora</Button>
+-      {found && (
+-        <div className="mt-4 text-sm">
+-          {found.length === 0 ? (
+-            <p className="text-muted-foreground">Nenhum arquivo sem uso. Está tudo em ordem.</p>
+-          ) : (
+-            <>
+-              <p className="text-foreground">{found.length} {found.length === 1 ? "arquivo" : "arquivos"} sem uso ({formatBytes(total)}):</p>
+-              <ul className="mt-2 space-y-1 text-muted-foreground">
+-                {Object.entries(byBucket).map(([b, v]) => <li key={b}>{BUCKET_LABELS[b] ?? b}: {v.n} ({formatBytes(v.size)})</li>)}
+-              </ul>
+-              <Button type="button" variant="destructive" className="mt-4" disabled={wipe.isPending} onClick={() => confirm("Apagar estes arquivos para sempre? Não dá para desfazer.") && wipe.mutate()}>
+-                Apagar para sempre
++      <Button type="button" variant="outline" className="mt-4" disabled={check.isPending} onClick={() => check.mutate()}>
++        {found ? "Verificar de novo" : "Verificar agora"}
++      </Button>
++
++      {found && found.length === 0 && <p className="mt-4 text-sm text-muted-foreground">Nenhum arquivo sem uso. Está tudo em ordem.</p>}
++
++      {found && found.length > 0 && (
++        <div className="mt-5 text-sm">
++          <div className="flex flex-wrap gap-2">
++            {[["todos", `Todos (${all.length})`] as const, ...Object.entries(counts).map(([b, n]) => [b, `${BUCKET_LABELS[b] ?? b} (${n})`] as const)].map(([b, label]) => (
++              <Button key={b} type="button" size="sm" variant={bucket === b ? "default" : "outline"} onClick={() => { setBucket(b); setVisible(PAGE); }}>
++                {label}
+               </Button>
+-            </>
++            ))}
++          </div>
++
++          <div className="mt-4 flex flex-wrap items-center gap-3">
++            <Button type="button" size="sm" variant="secondary" onClick={() => setSelected((s) => new Set([...s, ...shown.map(orphanKey)]))}>
++              Marcar os exibidos ({shown.length})
++            </Button>
++            <Button type="button" size="sm" variant="ghost" disabled={selected.size === 0} onClick={() => setSelected(new Set())}>
++              Desmarcar tudo
++            </Button>
++            <p className="ml-auto text-muted-foreground" aria-live="polite">
++              {chosen.length} de {all.length} marcados para apagar{chosen.length > 0 ? ` (${formatBytes(chosenSize)})` : ""}
++            </p>
++          </div>
++
++          <ul className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
++            {shown.map((o) => {
++              const k = orphanKey(o);
++              const on = selected.has(k);
++              const url = urls[k];
++              return (
++                <li key={k} className={`overflow-hidden rounded-xl border bg-background ${on ? "border-destructive ring-2 ring-destructive/40" : ""}`}>
++                  <div className="relative aspect-square bg-muted">
++                    {url && !broken.has(k) ? (
++                      <img src={url} alt="" loading="lazy" decoding="async" className="h-full w-full object-cover" onError={() => setBroken((b) => new Set(b).add(k))} />
++                    ) : (
++                      <div className="flex h-full w-full flex-col items-center justify-center gap-1 p-2 text-center text-xs text-muted-foreground">
++                        <FileText className="h-8 w-8" aria-hidden />
++                        {isImagePath(o.path) ? (broken.has(k) ? "Não foi possível mostrar" : "Carregando...") : "Arquivo"}
++                      </div>
++                    )}
++                    <label className="absolute left-2 top-2 flex cursor-pointer items-center gap-2 rounded-md bg-background/90 px-2 py-1 text-xs font-medium text-foreground shadow">
++                      <Checkbox checked={on} onCheckedChange={(v) => toggle(o, v === true)} aria-label={`Apagar ${o.path}`} />
++                      Apagar
++                    </label>
++                    {url && (
++                      <a href={url} target="_blank" rel="noreferrer" aria-label="Abrir em tamanho grande" className="absolute right-2 top-2 rounded-md bg-background/90 p-1.5 text-foreground shadow">
++                        <ExternalLink className="h-4 w-4" />
++                      </a>
++                    )}
++                  </div>
++                  <div className="space-y-0.5 p-2.5 text-xs">
++                    <p className="font-medium text-foreground">{BUCKET_LABELS[o.bucket] ?? o.bucket}</p>
++                    <p className="text-muted-foreground">{formatBytes(o.size)} · enviado em {new Date(o.created_at).toLocaleDateString("pt-BR")}</p>
++                    <p className="truncate text-muted-foreground" title={o.path}>{o.path.split("/").pop()}</p>
++                  </div>
++                </li>
++              );
++            })}
++          </ul>
++
++          {filtered.length > shown.length && (
++            <Button type="button" variant="outline" className="mt-4" onClick={() => setVisible((v) => v + PAGE)}>
++              Mostrar mais ({filtered.length - shown.length} restantes)
++            </Button>
+           )}
++
++          <div className="mt-6 border-t pt-4">
++            <Button
++              type="button"
++              variant="destructive"
++              disabled={chosen.length === 0 || wipe.isPending}
++              onClick={() => confirm(`Apagar ${chosen.length} ${chosen.length === 1 ? "arquivo marcado" : "arquivos marcados"} para sempre? Não dá para desfazer. Os não marcados continuam guardados.`) && wipe.mutate(chosen)}
++            >
++              <Trash2 className="h-4 w-4" /> Apagar {chosen.length > 0 ? `${chosen.length} marcado${chosen.length === 1 ? "" : "s"}` : "marcados"} para sempre
++            </Button>
++          </div>
+         </div>
+       )}
+     </div>
+diff --git a/src/components/members/ClaimSuggestion.tsx b/src/components/members/ClaimSuggestion.tsx
+index e0e3936..f8a0405 100644
+--- a/src/components/members/ClaimSuggestion.tsx
++++ b/src/components/members/ClaimSuggestion.tsx
+@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
+ 
+ type Candidate = { id: string; full_name: string; has_cpf: boolean };
+ 
+-const MESSAGES: Record<string, string> = {
++export const CLAIM_MESSAGES: Record<string, string> = {
+   wrong_cpf: "O CPF não confere. Confira os números e tente de novo.",
+   locked: "Muitas tentativas. Procure a secretaria da igreja para vincular seu cadastro.",
+   no_cpf: "Este cadastro não tem CPF registrado. Procure a secretaria da igreja para vincular.",
+@@ -76,7 +76,7 @@ export function ClaimSuggestion({ name, onClaimed }: { name: string; onClaimed:
+       onClaimed();
+       return;
+     }
+-    setNotice(MESSAGES[data ?? ""] ?? "Não foi possível vincular agora.");
++    setNotice(CLAIM_MESSAGES[data ?? ""] ?? "Não foi possível vincular agora.");
+   }
+ 
+   return (
+@@ -93,7 +93,7 @@ export function ClaimSuggestion({ name, onClaimed }: { name: string; onClaimed:
+             type="button"
+             size="sm"
+             onClick={() => {
+-              if (!candidate.has_cpf) return setNotice(MESSAGES["no_cpf"] ?? "");
++              if (!candidate.has_cpf) return setNotice(CLAIM_MESSAGES["no_cpf"] ?? "");
+               setConfirming(candidate.id);
+               setNotice("");
+             }}
+diff --git a/src/components/members/CpfSignupNotice.tsx b/src/components/members/CpfSignupNotice.tsx
+new file mode 100644
+index 0000000..e179e6d
+--- /dev/null
++++ b/src/components/members/CpfSignupNotice.tsx
+@@ -0,0 +1,99 @@
++import { useEffect, useState } from "react";
++import { useQuery } from "@tanstack/react-query";
++import { toast } from "sonner";
++import { ShieldAlert } from "lucide-react";
++import { supabase } from "@/integrations/supabase/client";
++import { Button } from "@/components/ui/button";
++import { CLAIM_MESSAGES } from "@/components/members/ClaimSuggestion";
++import { useDebounced } from "@/lib/use-debounced";
++
++/**
++ * Para quem está criando o próprio cadastro: se o CPF digitado já existe no banco, não deixa criar um novo
++ * cadastro; só oferece vincular a conta ao cadastro que já existe. (O banco também barra o CPF repetido.)
++ */
++export function CpfSignupNotice({
++  cpf,
++  canClaim,
++  onBlockChange,
++  onClaimed,
++}: {
++  cpf: string;
++  /** Falso quando a conta já tem cadastro próprio (aí não há o que vincular). */
++  canClaim: boolean;
++  onBlockChange: (blocked: boolean) => void;
++  onClaimed: () => void;
++}) {
++  const digits = cpf.replace(/\D/g, "");
++  const settled = useDebounced(digits, 500);
++  const [busy, setBusy] = useState(false);
++  const [notice, setNotice] = useState("");
++
++  const q = useQuery({
++    queryKey: ["cpf-signup", settled],
++    enabled: settled.length === 11,
++    staleTime: 30_000,
++    retry: false,
++    queryFn: async () => {
++      const { data, error } = await supabase.rpc("check_cpf_for_signup", { _cpf: settled });
++      if (error) throw error;
++      return data?.[0] ?? null;
++    },
++  });
++
++  const hit = settled.length === 11 && digits === settled ? (q.data ?? null) : null;
++  const blocked = !!hit && hit.state !== "limited";
++  useEffect(() => onBlockChange(blocked), [blocked, onBlockChange]);
++  useEffect(() => setNotice(""), [settled]);
++
++  if (!hit) return null;
++
++  async function claim() {
++    if (!hit?.id) return;
++    setBusy(true);
++    const { data, error } = await supabase.rpc("claim_member", { _member: hit.id, _cpf: cpf });
++    setBusy(false);
++    if (error) {
++      toast.error(error.message);
++      return;
++    }
++    if (data === "ok") {
++      toast.success("Pronto! Sua conta foi vinculada ao cadastro que já existia.");
++      onClaimed();
++      return;
++    }
++    setNotice(CLAIM_MESSAGES[data ?? ""] ?? "Não foi possível vincular agora.");
++  }
++
++  if (hit.state === "limited") {
++    return (
++      <p className="mt-2 text-xs text-muted-foreground">
++        Muitas consultas seguidas. Se este CPF já tiver cadastro na igreja, o sistema vai avisar ao enviar.
++      </p>
++    );
++  }
++
++  const claimable = hit.state === "claimable" && canClaim;
++  return (
++    <div role="alert" className="mt-2 rounded-xl border border-destructive/40 bg-destructive/5 p-4 text-sm">
++      <p className="flex items-start gap-2 font-medium text-foreground">
++        <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-destructive" aria-hidden />
++        <span>
++          {claimable
++            ? <>Já existe um cadastro com este CPF{hit.masked_name ? <> (<strong>{hit.masked_name}</strong>)</> : null}. Para não duplicar, não é possível criar outro cadastro com ele.</>
++            : hit.state === "in_use"
++              ? "Este CPF já está vinculado a outra conta. Se é o seu, procure a secretaria da igreja."
++              : "Este CPF já consta em outro cadastro. Procure a secretaria da igreja para resolver."}
++        </span>
++      </p>
++      {claimable && (
++        <div className="mt-3">
++          <Button type="button" size="sm" disabled={busy} onClick={claim}>
++            Este cadastro é meu — vincular minha conta
++          </Button>
++          <p className="mt-2 text-xs text-muted-foreground">Seus dados ficam como a igreja já tem; depois você pode atualizá-los em “Meu cadastro”.</p>
++        </div>
++      )}
++      {notice && <p className="mt-3 text-destructive">{notice}</p>}
++    </div>
++  );
++}
+diff --git a/src/components/members/MemberDuplicateAlert.tsx b/src/components/members/MemberDuplicateAlert.tsx
+new file mode 100644
+index 0000000..9c8c0ce
+--- /dev/null
++++ b/src/components/members/MemberDuplicateAlert.tsx
+@@ -0,0 +1,95 @@
++import { Link } from "@tanstack/react-router";
++import { useQuery } from "@tanstack/react-query";
++import { AlertTriangle } from "lucide-react";
++import { supabase } from "@/integrations/supabase/client";
++import { Badge } from "@/components/ui/badge";
++import { MEMBER_STATUS } from "@/lib/church";
++import { useDebounced } from "@/lib/use-debounced";
++
++/**
++ * Aviso para quem cadastra/edita membros: mostra se já existe alguém com o mesmo nome, CPF ou RG.
++ * Um CPF repetido é bloqueado pelo banco ao salvar; nome e RG repetidos são só um aviso (pode ser homônimo).
++ */
++export function MemberDuplicateAlert({
++  name,
++  cpf,
++  rg,
++  excludeId,
++  className = "",
++}: {
++  name?: string | null | undefined;
++  cpf?: string | null | undefined;
++  rg?: string | null | undefined;
++  /** Cadastro que está sendo editado (não conta como duplicado de si mesmo). */
++  excludeId?: string | null | undefined;
++  className?: string;
++}) {
++  const typed = useDebounced(JSON.stringify([name ?? "", cpf ?? "", rg ?? ""]));
++  const [n = "", c = "", r = ""] = JSON.parse(typed) as string[];
++  const enabled =
++    n.trim().split(/\s+/).filter(Boolean).length >= 2 ||
++    c.replace(/\D/g, "").length === 11 ||
++    r.replace(/[^0-9a-z]/gi, "").length >= 5;
++
++  const q = useQuery({
++    queryKey: ["member-duplicates", n, c, r, excludeId ?? null],
++    enabled,
++    staleTime: 15_000,
++    retry: false,
++    queryFn: async () => {
++      const { data, error } = await supabase.rpc("find_member_duplicates", {
++        _name: n,
++        _cpf: c,
++        _rg: r,
++        ...(excludeId ? { _exclude: excludeId } : {}),
++      });
++      if (error) throw error;
++      return data ?? [];
++    },
++  });
++
++  const rows = enabled ? (q.data ?? []) : [];
++  if (rows.length === 0) return null;
++  const cpfTaken = rows.some((d) => d.match_cpf);
++
++  return (
++    <div
++      role="alert"
++      className={`rounded-xl border p-4 text-sm ${cpfTaken ? "border-destructive/40 bg-destructive/5" : "border-primary/30 bg-primary-soft"} ${className}`}
++    >
++      <p className="flex items-start gap-2 font-medium text-foreground">
++        <AlertTriangle className={`mt-0.5 h-4 w-4 shrink-0 ${cpfTaken ? "text-destructive" : "text-primary"}`} aria-hidden />
++        {cpfTaken
++          ? "Este CPF já está cadastrado. Não é possível salvar outro cadastro com ele."
++          : "Já existe cadastro parecido. Confira antes de salvar para não duplicar o membro."}
++      </p>
++      <ul className="mt-3 space-y-2">
++        {rows.map((d) => (
++          <li key={d.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border bg-background px-3 py-2">
++            <span className="font-medium text-foreground">{d.full_name}</span>
++            <span className="text-xs text-muted-foreground">
++              {d.registration_number ? `Matrícula ${d.registration_number} · ` : ""}
++              {MEMBER_STATUS[d.status] ?? d.status}
++              {d.approval_status !== "aprovado" ? " · aguardando aprovação" : ""}
++              {d.has_account ? " · já tem conta" : ""}
++            </span>
++            <span className="flex flex-wrap gap-1">
++              {d.match_cpf && <Badge variant="destructive">mesmo CPF</Badge>}
++              {d.match_rg && <Badge variant="secondary">mesmo RG</Badge>}
++              {d.match_name && <Badge variant="secondary">mesmo nome</Badge>}
++            </span>
++            <Link
++              to="/painel/membro/$id"
++              params={{ id: d.id }}
++              target="_blank"
++              rel="noreferrer"
++              className="ml-auto text-xs text-primary underline"
++            >
++              Abrir cadastro
++            </Link>
++          </li>
++        ))}
++      </ul>
++    </div>
++  );
++}
+diff --git a/src/components/members/MemberForm.tsx b/src/components/members/MemberForm.tsx
+index 75cc039..18ee66c 100644
+--- a/src/components/members/MemberForm.tsx
++++ b/src/components/members/MemberForm.tsx
+@@ -16,6 +16,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
+ import { Textarea } from "@/components/ui/textarea";
+ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+ import { MARITAL, MEMBER_STATUS, ageFrom, formatCep, formatCpf } from "@/lib/church";
++import { MemberDuplicateAlert } from "@/components/members/MemberDuplicateAlert";
+ 
+ export type MemberDraft = TablesInsert<"members"> & { id?: string };
+ 
+@@ -122,6 +123,7 @@ export function MemberForm({
+   leaderDepartmentIds,
+   onLeaderDepartmentIdsChange,
+   nameAddon,
++  cpfAddon,
+ }: {
+   value: MemberDraft;
+   onChange: (v: MemberDraft) => void;
+@@ -140,6 +142,8 @@ export function MemberForm({
+   onLeaderDepartmentIdsChange?: (ids: string[]) => void;
+   /** Conteúdo exibido logo abaixo do campo de nome (ex.: "Este é você?"). */
+   nameAddon?: ReactNode;
++  /** Conteúdo exibido logo abaixo do campo de CPF (ex.: aviso de CPF já cadastrado). */
++  cpfAddon?: ReactNode;
+ }) {
+   const set = (patch: Partial<MemberDraft>) => onChange({ ...value, ...patch });
+   const age = ageFrom(value.birth_date);
+@@ -200,8 +204,11 @@ export function MemberForm({
+         <F label="Nome completo *" full><Input required {...txt("full_name")} />{nameAddon}</F>
+         <F label="Data de nascimento"><Input {...dt("birth_date")} /></F>
+         <F label="Idade"><Input disabled value={age !== null ? `${age} anos` : "—"} /></F>
+-        <F label="CPF"><Input value={value.cpf ?? ""} onChange={(e) => set({ cpf: formatCpf(e.target.value) })} placeholder="000.000.000-00" /></F>
++        <F label="CPF"><Input value={value.cpf ?? ""} onChange={(e) => set({ cpf: formatCpf(e.target.value) })} placeholder="000.000.000-00" />{cpfAddon}</F>
+         <F label="RG"><Input {...txt("rg")} /></F>
++        {mode === "admin" && (
++          <MemberDuplicateAlert className="sm:col-span-2" name={value.full_name} cpf={value.cpf} rg={value.rg} excludeId={value.id} />
++        )}
+         <F label="Telefone"><Input {...txt("phone")} placeholder="(12) 90000-0000" /></F>
+         <F label="E-mail"><Input type="email" {...txt("email")} /></F>
+         <F label="Estado civil">
+diff --git a/src/integrations/supabase/types.ts b/src/integrations/supabase/types.ts
+index 66ee51c..767cb2a 100644
+--- a/src/integrations/supabase/types.ts
++++ b/src/integrations/supabase/types.ts
+@@ -1032,6 +1032,7 @@ export type Database = {
+         Returns: undefined
+       }
+       storage_enqueue_orphans: { Args: never; Returns: number }
++      storage_enqueue_orphans_selected: { Args: { _items: Json }; Returns: number }
+       storage_orphans_preview: {
+         Args: never
+         Returns: {
+@@ -1096,10 +1097,32 @@ export type Database = {
+         Args: { _present: boolean; _ticket: string }
+         Returns: undefined
+       }
++      check_cpf_for_signup: {
++        Args: { _cpf: string }
++        Returns: {
++          id: string
++          masked_name: string
++          state: string
++        }[]
++      }
+       claim_member: {
+         Args: { _cpf: string; _member: string }
+         Returns: string
+       }
++      find_member_duplicates: {
++        Args: { _cpf: string; _exclude?: string; _name: string; _rg: string }
++        Returns: {
++          approval_status: string
++          full_name: string
++          has_account: boolean
++          id: string
++          match_cpf: boolean
++          match_name: boolean
++          match_rg: boolean
++          registration_number: string
++          status: string
++        }[]
++      }
+       find_claimable_members: {
+         Args: { _name: string }
+         Returns: {
+diff --git a/src/lib/departments.ts b/src/lib/departments.ts
+index dad0efe..3282737 100644
+--- a/src/lib/departments.ts
++++ b/src/lib/departments.ts
+@@ -66,5 +66,7 @@ export async function saveMemberDepartmentLinks(args: {
+ 
+ /** Traduz erros do banco ao salvar um membro. */
+ export function memberSaveError(e: { message: string }) {
+-  return e.message.includes("members_registration_number_key") ? "Já existe um membro com esta matrícula." : e.message;
++  if (e.message.includes("members_registration_number_key")) return "Já existe um membro com esta matrícula.";
++  if (e.message.includes("members_cpf_digits_key")) return "Já existe um cadastro com este CPF. Procure-o na lista de membros em vez de criar outro.";
++  return e.message;
+ }
+diff --git a/src/lib/use-debounced.ts b/src/lib/use-debounced.ts
+new file mode 100644
+index 0000000..6c4b08f
+--- /dev/null
++++ b/src/lib/use-debounced.ts
+@@ -0,0 +1,11 @@
++import { useEffect, useState } from "react";
++
++/** Devolve o valor só depois que ele parar de mudar por `ms` milissegundos. */
++export function useDebounced<T>(value: T, ms = 600): T {
++  const [v, setV] = useState(value);
++  useEffect(() => {
++    const t = setTimeout(() => setV(value), ms);
++    return () => clearTimeout(t);
++  }, [value, ms]);
++  return v;
++}
+diff --git a/src/routes/_authenticated/painel.meu-cadastro.tsx b/src/routes/_authenticated/painel.meu-cadastro.tsx
+index cb966e6..eee0308 100644
+--- a/src/routes/_authenticated/painel.meu-cadastro.tsx
++++ b/src/routes/_authenticated/painel.meu-cadastro.tsx
+@@ -1,12 +1,14 @@
+ import { createFileRoute } from "@tanstack/react-router";
+ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+-import { useEffect, useState } from "react";
++import { useCallback, useEffect, useState } from "react";
+ import { toast } from "sonner";
+ import { Clock, CheckCircle2, XCircle } from "lucide-react";
+ import { supabase } from "@/integrations/supabase/client";
+ import { Button } from "@/components/ui/button";
+ import { MyContributions } from "@/components/members/MyContributions";
+ import { ClaimSuggestion, ClaimedNotice } from "@/components/members/ClaimSuggestion";
++import { CpfSignupNotice } from "@/components/members/CpfSignupNotice";
++import { memberSaveError } from "@/lib/departments";
+ import { MyTickets } from "@/components/events/MyTickets";
+ import { MemberForm, emptyMember, type MemberDraft } from "@/components/members/MemberForm";
+ import { MEMBER_STATUS } from "@/lib/church";
+@@ -23,6 +25,8 @@ function MyProfile() {
+   const qc = useQueryClient();
+   const [draft, setDraft] = useState<MemberDraft | null>(null);
+   const [claimed, setClaimed] = useState(false);
++  const [cpfBlocked, setCpfBlocked] = useState(false);
++  const onCpfBlock = useCallback((b: boolean) => setCpfBlocked(b), []);
+ 
+   const me = useQuery({
+     queryKey: ["my-member"],
+@@ -56,12 +60,16 @@ function MyProfile() {
+       setDraft(null);
+       qc.invalidateQueries({ queryKey: ["my-member"] });
+     },
+-    onError: (e) => toast.error(e.message),
++    onError: (e) => toast.error(memberSaveError(e)),
+   });
+ 
+   if (claimed) return <ClaimedNotice />;
+   if (!draft || !me.data) return null;
+   const row = me.data?.row;
++  const handleClaimed = async () => {
++    if (convite) await supabase.rpc("use_invite", { _code: convite });
++    setClaimed(true);
++  };
+ 
+   return (
+     <div className="max-w-3xl">
+@@ -83,25 +91,19 @@ function MyProfile() {
+           <XCircle className="h-5 w-5" /> Seu cadastro precisa de ajustes. Revise os dados e envie novamente.
+         </div>
+       )}
+-      <form className="mt-6 space-y-6" onSubmit={(e) => { e.preventDefault(); save.mutate(draft); }}>
++      <form className="mt-6 space-y-6" onSubmit={(e) => { e.preventDefault(); if (!cpfBlocked) save.mutate(draft); }}>
+         <MemberForm
+           mode="self"
+           value={draft}
+           onChange={setDraft}
+           photoFolder={me.data.uid}
+           nameAddon={
+-            !row ? (
+-              <ClaimSuggestion
+-                name={draft.full_name}
+-                onClaimed={async () => {
+-                  if (convite) await supabase.rpc("use_invite", { _code: convite });
+-                  setClaimed(true);
+-                }}
+-              />
+-            ) : undefined
++            !row ? <ClaimSuggestion name={draft.full_name} onClaimed={handleClaimed} /> : undefined
+           }
++          cpfAddon={<CpfSignupNotice cpf={draft.cpf ?? ""} canClaim={!row} onBlockChange={onCpfBlock} onClaimed={handleClaimed} />}
+         />
+-        <Button type="submit" size="lg" disabled={save.isPending}>{row ? "Salvar alterações" : "Enviar cadastro"}</Button>
++        <Button type="submit" size="lg" disabled={save.isPending || cpfBlocked}>{row ? "Salvar alterações" : "Enviar cadastro"}</Button>
++        {cpfBlocked && <p className="text-sm text-muted-foreground">Corrija o CPF (ou vincule sua conta ao cadastro existente) para poder enviar.</p>}
+       </form>
+       <MyTickets uid={me.data.uid} />
+       {row?.approval_status === "aprovado" && <MyContributions memberId={row.id} />}
+diff --git a/src/test/member-duplicates-and-cleanup.test.tsx b/src/test/member-duplicates-and-cleanup.test.tsx
+new file mode 100644
+index 0000000..3ecf4c2
+--- /dev/null
++++ b/src/test/member-duplicates-and-cleanup.test.tsx
+@@ -0,0 +1,149 @@
++import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
++import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
++import { afterEach, describe, expect, it, vi } from "vitest";
++import type { ReactNode } from "react";
++
++const h = vi.hoisted(() => ({
++  rpc: vi.fn(),
++  purge: vi.fn(),
++  signed: vi.fn(),
++  toast: { success: vi.fn(), error: vi.fn() },
++}));
++
++vi.mock("@/integrations/supabase/client", () => ({
++  supabase: {
++    rpc: (...a: unknown[]) => h.rpc(...a),
++    storage: {
++      from: () => ({
++        createSignedUrls: (p: string[]) => h.signed(p),
++        getPublicUrl: (p: string) => ({ data: { publicUrl: `https://pub/${p}` } }),
++      }),
++    },
++  },
++}));
++vi.mock("@tanstack/react-router", () => ({ Link: ({ children }: { children: ReactNode }) => <a>{children}</a> }));
++vi.mock("sonner", () => ({ toast: h.toast }));
++vi.mock("@/lib/storage-trash", () => ({ purgeStorageTrash: h.purge }));
++
++import { MemberDuplicateAlert } from "@/components/members/MemberDuplicateAlert";
++import { CpfSignupNotice } from "@/components/members/CpfSignupNotice";
++import { StorageCleanupCard } from "@/components/admin/UserAdmin";
++import { memberSaveError } from "@/lib/departments";
++
++const wrap = (ui: ReactNode) => (
++  <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>{ui}</QueryClientProvider>
++);
++
++afterEach(() => {
++  cleanup();
++  vi.clearAllMocks();
++});
++
++describe("aviso de membro duplicado (adm)", () => {
++  const row = (o: object) => ({ id: "m1", full_name: "José da Silva", registration_number: "0007", status: "membro", approval_status: "aprovado", has_account: false, match_name: false, match_cpf: false, match_rg: false, ...o });
++
++  it("não consulta o banco enquanto não há nome completo, CPF completo ou RG", async () => {
++    render(wrap(<MemberDuplicateAlert name="Jose" cpf="123" rg="12" />));
++    await new Promise((r) => setTimeout(r, 900));
++    expect(h.rpc).not.toHaveBeenCalled();
++  });
++
++  it("avisa quando o CPF já existe e mostra quem é", async () => {
++    h.rpc.mockResolvedValue({ data: [row({ match_cpf: true, match_name: true })], error: null });
++    render(wrap(<MemberDuplicateAlert name="José da Silva" cpf="529.982.247-25" rg="" excludeId="meu-id" />));
++    await screen.findByText(/CPF já está cadastrado/, undefined, { timeout: 3000 });
++    expect(screen.getByText("José da Silva")).toBeTruthy();
++    expect(screen.getByText("mesmo CPF")).toBeTruthy();
++    expect(h.rpc).toHaveBeenCalledWith("find_member_duplicates", { _name: "José da Silva", _cpf: "529.982.247-25", _rg: "", _exclude: "meu-id" });
++  });
++
++  it("para nome ou RG repetidos só avisa para conferir (não diz que bloqueia)", async () => {
++    h.rpc.mockResolvedValue({ data: [row({ match_name: true })], error: null });
++    render(wrap(<MemberDuplicateAlert name="José da Silva" />));
++    await screen.findByText(/cadastro parecido/, undefined, { timeout: 3000 });
++    expect(screen.queryByText(/Não é possível salvar/)).toBeNull();
++  });
++});
++
++describe("CPF de quem está criando conta", () => {
++  it("bloqueia o envio e oferece vincular ao cadastro existente", async () => {
++    h.rpc.mockImplementation(async (fn: string) =>
++      fn === "check_cpf_for_signup" ? { data: [{ id: "m1", masked_name: "José S.", state: "claimable" }], error: null } : { data: "ok", error: null },
++    );
++    const onBlock = vi.fn();
++    const onClaimed = vi.fn();
++    render(wrap(<CpfSignupNotice cpf="529.982.247-25" canClaim onBlockChange={onBlock} onClaimed={onClaimed} />));
++    await screen.findByText(/Já existe um cadastro com este CPF/, undefined, { timeout: 3000 });
++    expect(screen.getByText("José S.")).toBeTruthy();
++    await waitFor(() => expect(onBlock).toHaveBeenLastCalledWith(true));
++    fireEvent.click(screen.getByText(/vincular minha conta/));
++    await waitFor(() => expect(onClaimed).toHaveBeenCalled());
++    expect(h.rpc).toHaveBeenCalledWith("claim_member", { _member: "m1", _cpf: "529.982.247-25" });
++  });
++
++  it("CPF de cadastro já ligado a outra conta: bloqueia e não oferece vincular", async () => {
++    h.rpc.mockResolvedValue({ data: [{ id: "m2", masked_name: "Ana P.", state: "in_use" }], error: null });
++    const onBlock = vi.fn();
++    render(wrap(<CpfSignupNotice cpf="529.982.247-25" canClaim onBlockChange={onBlock} onClaimed={() => {}} />));
++    await screen.findByText(/já está vinculado a outra conta/, undefined, { timeout: 3000 });
++    expect(screen.queryByText(/vincular minha conta/)).toBeNull();
++    await waitFor(() => expect(onBlock).toHaveBeenLastCalledWith(true));
++  });
++
++  it("CPF livre não bloqueia nada", async () => {
++    h.rpc.mockResolvedValue({ data: [], error: null });
++    const onBlock = vi.fn();
++    render(wrap(<CpfSignupNotice cpf="529.982.247-25" canClaim onBlockChange={onBlock} onClaimed={() => {}} />));
++    await waitFor(() => expect(h.rpc).toHaveBeenCalledWith("check_cpf_for_signup", { _cpf: "52998224725" }), { timeout: 3000 });
++    expect(onBlock).not.toHaveBeenCalledWith(true);
++    expect(screen.queryByRole("alert")).toBeNull();
++  });
++
++  it("traduz o erro do índice de CPF único", () => {
++    expect(memberSaveError({ message: 'duplicate key value violates unique constraint "members_cpf_digits_key"' })).toMatch(/mesmo? CPF|com este CPF/);
++  });
++});
++
++describe("arquivos sem uso: escolher quais apagar", () => {
++  const orphans = [
++    { bucket: "member-photos", path: "admin/a.jpg", size: 120000, created_at: "2026-10-01T10:00:00Z" },
++    { bucket: "member-photos", path: "admin/b.jpg", size: 80000, created_at: "2026-10-02T10:00:00Z" },
++    { bucket: "receipts", path: "x/recibo.pdf", size: 5000, created_at: "2026-10-03T10:00:00Z" },
++  ];
++  const setup = () => {
++    h.rpc.mockImplementation(async (fn: string) => (fn === "storage_orphans_preview" ? { data: orphans, error: null } : { data: 1, error: null }));
++    h.signed.mockResolvedValue({ data: [{ path: "admin/a.jpg", signedUrl: "https://s/a" }, { path: "admin/b.jpg", signedUrl: "https://s/b" }] });
++    h.purge.mockResolvedValue(1);
++    vi.spyOn(window, "confirm").mockReturnValue(true);
++    render(wrap(<StorageCleanupCard />));
++    fireEvent.click(screen.getByText("Verificar agora"));
++  };
++
++  it("lista os arquivos, começa sem nada marcado e só apaga o que foi marcado", async () => {
++    setup();
++    await screen.findByText(/0 de 3 marcados/);
++    expect((screen.getByRole("button", { name: /Apagar marcados/ }) as HTMLButtonElement).disabled).toBe(true);
++
++    fireEvent.click(screen.getByLabelText("Apagar admin/b.jpg"));
++    await screen.findByText(/1 de 3 marcados/);
++    fireEvent.click(screen.getByRole("button", { name: /Apagar 1 marcado/ }));
++
++    await waitFor(() =>
++      expect(h.rpc).toHaveBeenCalledWith("storage_enqueue_orphans_selected", { _items: [{ bucket: "member-photos", path: "admin/b.jpg" }] }),
++    );
++    await waitFor(() => expect(h.purge).toHaveBeenCalled());
++    await screen.findByText(/0 de 2 marcados/);
++    expect(screen.queryByLabelText("Apagar admin/b.jpg")).toBeNull();
++    expect(screen.getByLabelText("Apagar admin/a.jpg")).toBeTruthy();
++  });
++
++  it("filtra por tipo de arquivo e 'Marcar os exibidos' marca só o filtro atual", async () => {
++    setup();
++    await screen.findByText(/0 de 3 marcados/);
++    fireEvent.click(screen.getByText(/Recibos do financeiro \(1\)/));
++    fireEvent.click(screen.getByText(/Marcar os exibidos \(1\)/));
++    await screen.findByText(/1 de 3 marcados/);
++    fireEvent.click(screen.getByText("Desmarcar tudo"));
++    await screen.findByText(/0 de 3 marcados/);
++  });
++});

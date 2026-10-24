@@ -66,5 +66,7 @@ export async function saveMemberDepartmentLinks(args: {
 
 /** Traduz erros do banco ao salvar um membro. */
 export function memberSaveError(e: { message: string }) {
-  return e.message.includes("members_registration_number_key") ? "Já existe um membro com esta matrícula." : e.message;
+  if (e.message.includes("members_registration_number_key")) return "Já existe um membro com esta matrícula.";
+  if (e.message.includes("members_cpf_digits_key")) return "Já existe um cadastro com este CPF. Procure-o na lista de membros em vez de criar outro.";
+  return e.message;
 }

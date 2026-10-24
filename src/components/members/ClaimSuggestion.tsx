@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 
 type Candidate = { id: string; full_name: string; has_cpf: boolean };
 
-const MESSAGES: Record<string, string> = {
+export const CLAIM_MESSAGES: Record<string, string> = {
   wrong_cpf: "O CPF não confere. Confira os números e tente de novo.",
   locked: "Muitas tentativas. Procure a secretaria da igreja para vincular seu cadastro.",
   no_cpf: "Este cadastro não tem CPF registrado. Procure a secretaria da igreja para vincular.",
@@ -76,7 +76,7 @@ export function ClaimSuggestion({ name, onClaimed }: { name: string; onClaimed: 
       onClaimed();
       return;
     }
-    setNotice(MESSAGES[data ?? ""] ?? "Não foi possível vincular agora.");
+    setNotice(CLAIM_MESSAGES[data ?? ""] ?? "Não foi possível vincular agora.");
   }
 
   return (
@@ -93,7 +93,7 @@ export function ClaimSuggestion({ name, onClaimed }: { name: string; onClaimed: 
             type="button"
             size="sm"
             onClick={() => {
-              if (!candidate.has_cpf) return setNotice(MESSAGES["no_cpf"] ?? "");
+              if (!candidate.has_cpf) return setNotice(CLAIM_MESSAGES["no_cpf"] ?? "");
               setConfirming(candidate.id);
               setNotice("");
             }}

@@ -16,6 +16,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { MARITAL, MEMBER_STATUS, ageFrom, formatCep, formatCpf } from "@/lib/church";
+import { MemberDuplicateAlert } from "@/components/members/MemberDuplicateAlert";
 
 export type MemberDraft = TablesInsert<"members"> & { id?: string };
 
@@ -122,6 +123,7 @@ export function MemberForm({
   leaderDepartmentIds,
   onLeaderDepartmentIdsChange,
   nameAddon,
+  cpfAddon,
 }: {
   value: MemberDraft;
   onChange: (v: MemberDraft) => void;
@@ -140,6 +142,8 @@ export function MemberForm({
   onLeaderDepartmentIdsChange?: (ids: string[]) => void;
   /** Conteúdo exibido logo abaixo do campo de nome (ex.: "Este é você?"). */
   nameAddon?: ReactNode;
+  /** Conteúdo exibido logo abaixo do campo de CPF (ex.: aviso de CPF já cadastrado). */
+  cpfAddon?: ReactNode;
 }) {
   const set = (patch: Partial<MemberDraft>) => onChange({ ...value, ...patch });
   const age = ageFrom(value.birth_date);
@@ -200,8 +204,11 @@ export function MemberForm({
         <F label="Nome completo *" full><Input required {...txt("full_name")} />{nameAddon}</F>
         <F label="Data de nascimento"><Input {...dt("birth_date")} /></F>
         <F label="Idade"><Input disabled value={age !== null ? `${age} anos` : "—"} /></F>
-        <F label="CPF"><Input value={value.cpf ?? ""} onChange={(e) => set({ cpf: formatCpf(e.target.value) })} placeholder="000.000.000-00" /></F>
+        <F label="CPF"><Input value={value.cpf ?? ""} onChange={(e) => set({ cpf: formatCpf(e.target.value) })} placeholder="000.000.000-00" />{cpfAddon}</F>
         <F label="RG"><Input {...txt("rg")} /></F>
+        {mode === "admin" && (
+          <MemberDuplicateAlert className="sm:col-span-2" name={value.full_name} cpf={value.cpf} rg={value.rg} excludeId={value.id} />
+        )}
         <F label="Telefone"><Input {...txt("phone")} placeholder="(12) 90000-0000" /></F>
         <F label="E-mail"><Input type="email" {...txt("email")} /></F>
         <F label="Estado civil">

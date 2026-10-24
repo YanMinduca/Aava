@@ -1032,6 +1032,7 @@ export type Database = {
         Returns: undefined
       }
       storage_enqueue_orphans: { Args: never; Returns: number }
+      storage_enqueue_orphans_selected: { Args: { _items: Json }; Returns: number }
       storage_orphans_preview: {
         Args: never
         Returns: {
@@ -1096,9 +1097,31 @@ export type Database = {
         Args: { _present: boolean; _ticket: string }
         Returns: undefined
       }
+      check_cpf_for_signup: {
+        Args: { _cpf: string }
+        Returns: {
+          id: string
+          masked_name: string
+          state: string
+        }[]
+      }
       claim_member: {
         Args: { _cpf: string; _member: string }
         Returns: string
+      }
+      find_member_duplicates: {
+        Args: { _cpf: string; _exclude?: string; _name: string; _rg: string }
+        Returns: {
+          approval_status: string
+          full_name: string
+          has_account: boolean
+          id: string
+          match_cpf: boolean
+          match_name: boolean
+          match_rg: boolean
+          registration_number: string
+          status: string
+        }[]
       }
       find_claimable_members: {
         Args: { _name: string }

@@ -1,12 +1,14 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Clock, CheckCircle2, XCircle } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { MyContributions } from "@/components/members/MyContributions";
 import { ClaimSuggestion, ClaimedNotice } from "@/components/members/ClaimSuggestion";
+import { CpfSignupNotice } from "@/components/members/CpfSignupNotice";
+import { memberSaveError } from "@/lib/departments";
 import { MyTickets } from "@/components/events/MyTickets";
 import { MemberForm, emptyMember, type MemberDraft } from "@/components/members/MemberForm";
 import { MEMBER_STATUS } from "@/lib/church";
@@ -23,6 +25,8 @@ function MyProfile() {
   const qc = useQueryClient();
   const [draft, setDraft] = useState<MemberDraft | null>(null);
   const [claimed, setClaimed] = useState(false);
+  const [cpfBlocked, setCpfBlocked] = useState(false);
+  const onCpfBlock = useCallback((b: boolean) => setCpfBlocked(b), []);
 
   const me = useQuery({
     queryKey: ["my-member"],
@@ -56,12 +60,16 @@ function MyProfile() {
       setDraft(null);
       qc.invalidateQueries({ queryKey: ["my-member"] });
     },
-    onError: (e) => toast.error(e.message),
+    onError: (e) => toast.error(memberSaveError(e)),
   });
 
   if (claimed) return <ClaimedNotice />;
   if (!draft || !me.data) return null;
   const row = me.data?.row;
+  const handleClaimed = async () => {
+    if (convite) await supabase.rpc("use_invite", { _code: convite });
+    setClaimed(true);
+  };
 
   return (
     <div className="max-w-3xl">
@@ -83,25 +91,19 @@ function MyProfile() {
           <XCircle className="h-5 w-5" /> Seu cadastro precisa de ajustes. Revise os dados e envie novamente.
         </div>
       )}
-      <form className="mt-6 space-y-6" onSubmit={(e) => { e.preventDefault(); save.mutate(draft); }}>
+      <form className="mt-6 space-y-6" onSubmit={(e) => { e.preventDefault(); if (!cpfBlocked) save.mutate(draft); }}>
         <MemberForm
           mode="self"
           value={draft}
           onChange={setDraft}
           photoFolder={me.data.uid}
           nameAddon={
-            !row ? (
-              <ClaimSuggestion
-                name={draft.full_name}
-                onClaimed={async () => {
-                  if (convite) await supabase.rpc("use_invite", { _code: convite });
-                  setClaimed(true);
-                }}
-              />
-            ) : undefined
+            !row ? <ClaimSuggestion name={draft.full_name} onClaimed={handleClaimed} /> : undefined
           }
+          cpfAddon={<CpfSignupNotice cpf={draft.cpf ?? ""} canClaim={!row} onBlockChange={onCpfBlock} onClaimed={handleClaimed} />}
         />
-        <Button type="submit" size="lg" disabled={save.isPending}>{row ? "Salvar alterações" : "Enviar cadastro"}</Button>
+        <Button type="submit" size="lg" disabled={save.isPending || cpfBlocked}>{row ? "Salvar alterações" : "Enviar cadastro"}</Button>
+        {cpfBlocked && <p className="text-sm text-muted-foreground">Corrija o CPF (ou vincule sua conta ao cadastro existente) para poder enviar.</p>}
       </form>
       <MyTickets uid={me.data.uid} />
       {row?.approval_status === "aprovado" && <MyContributions memberId={row.id} />}
