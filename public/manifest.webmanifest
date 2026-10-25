@@ -1,0 +1,15 @@
+{
+  "name": "Comunidade Aava",
+  "short_name": "Aava",
+  "description": "Área de membros da Comunidade Aava — igreja em Jacareí - SP.",
+  "start_url": "/painel",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#2f5bd8",
+  "lang": "pt-BR",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
+}

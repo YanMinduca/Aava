@@ -27,6 +27,7 @@ import { Route as AuthenticatedPainelEventosRouteImport } from './routes/_authen
 import { Route as AuthenticatedPainelFinanceiroRouteImport } from './routes/_authenticated/painel.financeiro'
 import { Route as AuthenticatedPainelMembrosRouteImport } from './routes/_authenticated/painel.membros'
 import { Route as AuthenticatedPainelMeuCadastroRouteImport } from './routes/_authenticated/painel.meu-cadastro'
+import { Route as AuthenticatedPainelNotificacoesRouteImport } from './routes/_authenticated/painel.notificacoes'
 import { Route as AuthenticatedPainelOracaoRouteImport } from './routes/_authenticated/painel.oracao'
 import { Route as AuthenticatedPainelPermissoesRouteImport } from './routes/_authenticated/painel.permissoes'
 import { Route as AuthenticatedPainelRelatorioRouteImport } from './routes/_authenticated/painel.relatorio'
@@ -130,6 +131,12 @@ const AuthenticatedPainelMeuCadastroRoute =
     path: '/meu-cadastro',
     getParentRoute: () => AuthenticatedPainelRoute,
   } as any)
+const AuthenticatedPainelNotificacoesRoute =
+  AuthenticatedPainelNotificacoesRouteImport.update({
+    id: '/notificacoes',
+    path: '/notificacoes',
+    getParentRoute: () => AuthenticatedPainelRoute,
+  } as any)
 const AuthenticatedPainelOracaoRoute =
   AuthenticatedPainelOracaoRouteImport.update({
     id: '/oracao',
@@ -189,6 +196,7 @@ export interface FileRoutesByFullPath {
   '/painel/financeiro': typeof AuthenticatedPainelFinanceiroRoute
   '/painel/membros': typeof AuthenticatedPainelMembrosRoute
   '/painel/meu-cadastro': typeof AuthenticatedPainelMeuCadastroRoute
+  '/painel/notificacoes': typeof AuthenticatedPainelNotificacoesRoute
   '/painel/oracao': typeof AuthenticatedPainelOracaoRoute
   '/painel/permissoes': typeof AuthenticatedPainelPermissoesRoute
   '/painel/relatorio': typeof AuthenticatedPainelRelatorioRoute
@@ -214,6 +222,7 @@ export interface FileRoutesByTo {
   '/painel/financeiro': typeof AuthenticatedPainelFinanceiroRoute
   '/painel/membros': typeof AuthenticatedPainelMembrosRoute
   '/painel/meu-cadastro': typeof AuthenticatedPainelMeuCadastroRoute
+  '/painel/notificacoes': typeof AuthenticatedPainelNotificacoesRoute
   '/painel/oracao': typeof AuthenticatedPainelOracaoRoute
   '/painel/permissoes': typeof AuthenticatedPainelPermissoesRoute
   '/painel/relatorio': typeof AuthenticatedPainelRelatorioRoute
@@ -242,6 +251,7 @@ export interface FileRoutesById {
   '/_authenticated/painel/financeiro': typeof AuthenticatedPainelFinanceiroRoute
   '/_authenticated/painel/membros': typeof AuthenticatedPainelMembrosRoute
   '/_authenticated/painel/meu-cadastro': typeof AuthenticatedPainelMeuCadastroRoute
+  '/_authenticated/painel/notificacoes': typeof AuthenticatedPainelNotificacoesRoute
   '/_authenticated/painel/oracao': typeof AuthenticatedPainelOracaoRoute
   '/_authenticated/painel/permissoes': typeof AuthenticatedPainelPermissoesRoute
   '/_authenticated/painel/relatorio': typeof AuthenticatedPainelRelatorioRoute
@@ -270,6 +280,7 @@ export interface FileRouteTypes {
     | '/painel/financeiro'
     | '/painel/membros'
     | '/painel/meu-cadastro'
+    | '/painel/notificacoes'
     | '/painel/oracao'
     | '/painel/permissoes'
     | '/painel/relatorio'
@@ -295,6 +306,7 @@ export interface FileRouteTypes {
     | '/painel/financeiro'
     | '/painel/membros'
     | '/painel/meu-cadastro'
+    | '/painel/notificacoes'
     | '/painel/oracao'
     | '/painel/permissoes'
     | '/painel/relatorio'
@@ -322,6 +334,7 @@ export interface FileRouteTypes {
     | '/_authenticated/painel/financeiro'
     | '/_authenticated/painel/membros'
     | '/_authenticated/painel/meu-cadastro'
+    | '/_authenticated/painel/notificacoes'
     | '/_authenticated/painel/oracao'
     | '/_authenticated/painel/permissoes'
     | '/_authenticated/painel/relatorio'
@@ -474,6 +487,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedPainelMeuCadastroRouteImport
       parentRoute: typeof AuthenticatedPainelRoute
     }
+    '/_authenticated/painel/notificacoes': {
+      id: '/_authenticated/painel/notificacoes'
+      path: '/notificacoes'
+      fullPath: '/painel/notificacoes'
+      preLoaderRoute: typeof AuthenticatedPainelNotificacoesRouteImport
+      parentRoute: typeof AuthenticatedPainelRoute
+    }
     '/_authenticated/painel/oracao': {
       id: '/_authenticated/painel/oracao'
       path: '/oracao'
@@ -532,6 +552,7 @@ interface AuthenticatedPainelRouteChildren {
   AuthenticatedPainelFinanceiroRoute: typeof AuthenticatedPainelFinanceiroRoute
   AuthenticatedPainelMembrosRoute: typeof AuthenticatedPainelMembrosRoute
   AuthenticatedPainelMeuCadastroRoute: typeof AuthenticatedPainelMeuCadastroRoute
+  AuthenticatedPainelNotificacoesRoute: typeof AuthenticatedPainelNotificacoesRoute
   AuthenticatedPainelOracaoRoute: typeof AuthenticatedPainelOracaoRoute
   AuthenticatedPainelPermissoesRoute: typeof AuthenticatedPainelPermissoesRoute
   AuthenticatedPainelRelatorioRoute: typeof AuthenticatedPainelRelatorioRoute
@@ -548,6 +569,7 @@ const AuthenticatedPainelRouteChildren: AuthenticatedPainelRouteChildren = {
   AuthenticatedPainelFinanceiroRoute: AuthenticatedPainelFinanceiroRoute,
   AuthenticatedPainelMembrosRoute: AuthenticatedPainelMembrosRoute,
   AuthenticatedPainelMeuCadastroRoute: AuthenticatedPainelMeuCadastroRoute,
+  AuthenticatedPainelNotificacoesRoute: AuthenticatedPainelNotificacoesRoute,
   AuthenticatedPainelOracaoRoute: AuthenticatedPainelOracaoRoute,
   AuthenticatedPainelPermissoesRoute: AuthenticatedPainelPermissoesRoute,
   AuthenticatedPainelRelatorioRoute: AuthenticatedPainelRelatorioRoute,

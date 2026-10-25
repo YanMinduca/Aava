@@ -482,6 +482,7 @@ export type Database = {
           payment_enabled: boolean
           published: boolean
           registration_closes_at: string | null
+          notified_at: string | null
           registration_opens_at: string | null
           require_image_consent: boolean
           slug: string
@@ -504,6 +505,7 @@ export type Database = {
           payment_enabled?: boolean
           published?: boolean
           registration_closes_at?: string | null
+          notified_at?: string | null
           registration_opens_at?: string | null
           require_image_consent?: boolean
           slug: string
@@ -526,6 +528,7 @@ export type Database = {
           payment_enabled?: boolean
           published?: boolean
           registration_closes_at?: string | null
+          notified_at?: string | null
           registration_opens_at?: string | null
           require_image_consent?: boolean
           slug?: string
@@ -909,6 +912,40 @@ export type Database = {
         }
         Relationships: []
       }
+      push_notifications: {
+        Row: {
+          audience: Json
+          body: string
+          created_at: string
+          created_by: string | null
+          devices: number
+          failed: number
+          id: string
+          kind: string
+          recipients: number
+          sent: number
+          title: string
+          url: string | null
+        }
+        Insert: never
+        Update: never
+        Relationships: []
+      }
+      push_subscriptions: {
+        Row: {
+          auth: string
+          created_at: string
+          endpoint: string
+          id: string
+          last_seen_at: string
+          p256dh: string
+          user_agent: string | null
+          user_id: string
+        }
+        Insert: never
+        Update: never
+        Relationships: []
+      }
       site_content: {
         Row: {
           content: Json
@@ -1031,6 +1068,11 @@ export type Database = {
         Args: { _delete_member?: boolean; _user: string }
         Returns: undefined
       }
+      save_push_subscription: {
+        Args: { _auth: string; _endpoint: string; _p256dh: string; _user_agent?: string }
+        Returns: undefined
+      }
+      delete_push_subscription: { Args: { _endpoint: string }; Returns: undefined }
       storage_enqueue_orphans: { Args: never; Returns: number }
       storage_enqueue_orphans_selected: { Args: { _items: Json }; Returns: number }
       storage_orphans_preview: {

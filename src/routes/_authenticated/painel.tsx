@@ -14,6 +14,7 @@ import {
   Settings,
   Network,
   CalendarDays,
+  Bell,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
@@ -21,6 +22,8 @@ import { useAccess } from "@/hooks/use-access";
 import { useDeptAccess } from "@/hooks/use-departments";
 import { ROLE_LABELS } from "@/lib/church";
 import { purgeStorageTrash } from "@/lib/storage-trash";
+import { forgetPushDevice, syncPush } from "@/lib/push";
+import { PushPrompt } from "@/components/push/PushPrompt";
 
 export const Route = createFileRoute("/_authenticated/painel")({
   head: () => ({
@@ -42,6 +45,11 @@ function PanelLayout() {
     return () => clearInterval(t);
   }, []);
 
+  // Aparelho que já aceitou notificações: renova o registro (e passa para quem está logado agora)
+  useEffect(() => {
+    void syncPush().catch(() => undefined);
+  }, []);
+
   const items = [
     { to: "/painel", label: "Visão geral", icon: LayoutDashboard, show: true },
     { to: "/painel/meu-cadastro", label: "Meu cadastro", icon: UserCircle, show: true },
@@ -61,11 +69,14 @@ function PanelLayout() {
       icon: ShieldCheck,
       show: isFullAccess || can("manage_permissions"),
     },
+    { to: "/painel/notificacoes", label: "Avisos (notificações)", icon: Bell, show: can("send_push") },
     { to: "/painel/site", label: "Editar site", icon: Settings, show: isFullAccess },
   ] as const;
 
   async function signOut() {
     await qc.cancelQueries();
+    // Antes de sair: este aparelho deixa de receber os avisos desta conta
+    await forgetPushDevice().catch(() => undefined);
     qc.clear();
     await supabase.auth.signOut();
     navigate({ to: "/auth", replace: true });
@@ -119,6 +130,7 @@ function PanelLayout() {
         </div>
       </aside>
       <main className="min-w-0 flex-1 p-5 md:p-10">
+        <PushPrompt />
         <Outlet />
         <button
           onClick={signOut}

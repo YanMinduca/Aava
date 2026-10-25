@@ -51,6 +51,10 @@ export const PERMISSION_GROUPS: { label: string; perms: { key: string; label: st
     ],
   },
   {
+    label: "Notificações",
+    perms: [{ key: "send_push", label: "Enviar avisos por notificação (push) para os membros" }],
+  },
+  {
     label: "Configurações",
     perms: [{ key: "manage_permissions", label: "Ver usuários e permissões" }],
   },

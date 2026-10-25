@@ -67,8 +67,10 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { name: "description", content: "Comunidade Aava — igreja em Jacareí - SP." },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
+      { name: "theme-color", content: "#2f5bd8" },
     ],
     links: [
+      { rel: "manifest", href: "/manifest.webmanifest" },
       // Abre a conexão com o Supabase (API e fotos) enquanto o JavaScript ainda carrega.
       ...(SUPABASE_ORIGIN ? [{ rel: "preconnect", href: SUPABASE_ORIGIN, crossOrigin: "anonymous" as const }] : []),
       { rel: "preconnect", href: "https://fonts.googleapis.com" },
