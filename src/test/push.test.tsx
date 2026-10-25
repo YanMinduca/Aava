@@ -100,7 +100,7 @@ describe("service worker (public/sw.js)", () => {
     w.listeners["push"]!({ ...e, data: { json: () => ({ title: "Novo evento: Culto", body: "12/11 às 19h", url: "/eventos/culto", tag: "evento-1" }) } });
     await e.done();
     expect(w.shown[0]!.title).toBe("Novo evento: Culto");
-    expect(w.shown[0]!.opts).toMatchObject({ body: "12/11 às 19h", tag: "evento-1", data: { url: "/eventos/culto" } });
+    expect(w.shown[0]!.opts).toMatchObject({ body: "12/11 às 19h", tag: "evento-1", data: { url: "/eventos/culto" }, icon: "/icon-192.png", badge: "/badge-96.png" });
   });
 
   it("aviso sem dados ainda mostra algo útil em vez de falhar", async () => {

@@ -9,6 +9,7 @@ import { MyContributions } from "@/components/members/MyContributions";
 import { ClaimSuggestion, ClaimedNotice } from "@/components/members/ClaimSuggestion";
 import { CpfSignupNotice } from "@/components/members/CpfSignupNotice";
 import { PushToggle } from "@/components/push/PushToggle";
+import { InstallCard } from "@/components/pwa/InstallApp";
 import { memberSaveError } from "@/lib/departments";
 import { MyTickets } from "@/components/events/MyTickets";
 import { MemberForm, emptyMember, type MemberDraft } from "@/components/members/MemberForm";
@@ -92,7 +93,8 @@ function MyProfile() {
           <XCircle className="h-5 w-5" /> Seu cadastro precisa de ajustes. Revise os dados e envie novamente.
         </div>
       )}
-      <div className="mt-6">
+      <div className="mt-6 space-y-4">
+        <InstallCard />
         <PushToggle />
       </div>
       <form className="mt-6 space-y-6" onSubmit={(e) => { e.preventDefault(); if (!cpfBlocked) save.mutate(draft); }}>

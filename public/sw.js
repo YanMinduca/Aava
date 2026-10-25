@@ -16,7 +16,8 @@ self.addEventListener("push", (event) => {
     self.registration.showNotification(title, {
       body: data.body || "",
       icon: "/icon-192.png",
-      badge: "/icon-192.png",
+      // Ícone pequeno da barra de status (Android): precisa ser uma silhueta; sem ele o Chrome mostra o dele.
+      badge: "/badge-96.png",
       // Mesma "tag" = a notificação nova substitui a anterior do mesmo assunto, sem empilhar repetidas.
       tag: data.tag || undefined,
       data: { url: data.url || "/painel" },

@@ -24,6 +24,7 @@ import { ROLE_LABELS } from "@/lib/church";
 import { purgeStorageTrash } from "@/lib/storage-trash";
 import { forgetPushDevice, syncPush } from "@/lib/push";
 import { PushPrompt } from "@/components/push/PushPrompt";
+import { InstallPrompt } from "@/components/pwa/InstallApp";
 
 export const Route = createFileRoute("/_authenticated/painel")({
   head: () => ({
@@ -130,6 +131,7 @@ function PanelLayout() {
         </div>
       </aside>
       <main className="min-w-0 flex-1 p-5 md:p-10">
+        <InstallPrompt />
         <PushPrompt />
         <Outlet />
         <button

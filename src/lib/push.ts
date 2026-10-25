@@ -1,4 +1,5 @@
 import { supabase } from "@/integrations/supabase/client";
+import { isIos, isStandalone } from "@/lib/pwa";
 
 /** Situação das notificações push neste aparelho. */
 export type PushState = "unsupported" | "needs-install" | "denied" | "off" | "on";
@@ -9,13 +10,6 @@ const inBrowser = () => typeof window !== "undefined" && typeof navigator !== "u
 
 export const pushSupported = () =>
   inBrowser() && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
-
-const isIos = () =>
-  inBrowser() && (/iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1));
-
-const isStandalone = () =>
-  inBrowser() &&
-  (window.matchMedia?.("(display-mode: standalone)").matches === true || (navigator as { standalone?: boolean }).standalone === true);
 
 function flag(name: string, value?: boolean): boolean {
   try {

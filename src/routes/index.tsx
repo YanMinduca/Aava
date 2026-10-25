@@ -1,6 +1,8 @@
 import { Markdown } from "@/components/site/Markdown";
 import { stripMarkdown } from "@/lib/site-content";
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { useEffect } from "react";
+import { consumeLaunchRedirect } from "@/lib/pwa";
 import { ArrowUpRight, Heart, BookOpen, Users, Instagram } from "lucide-react";
 import hero from "@/assets/hero.jpg";
 import { SiteLayout } from "@/components/site/SiteLayout";
@@ -20,6 +22,10 @@ export const Route = createFileRoute("/")({
   component: Home,
 });
 function Home() {
+  const navigate = useNavigate();
+  useEffect(() => {
+    if (consumeLaunchRedirect()) void navigate({ to: "/painel", replace: true });
+  }, [navigate]);
   const c = useSiteContent();
   const embed = instagramEmbed(c.instagramVideo);
   const cover = c.photos[0]?.url || hero;
