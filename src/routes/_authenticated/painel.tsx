@@ -1,6 +1,6 @@
 import { createFileRoute, Link, Outlet, useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   LayoutDashboard,
   Users,
@@ -15,6 +15,7 @@ import {
   Network,
   CalendarDays,
   Bell,
+  CalendarClock,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
@@ -46,6 +47,16 @@ function PanelLayout() {
     return () => clearInterval(t);
   }, []);
 
+  // Mostra "Escalas" no menu só para quem participa de algum departamento (voluntário, líder ou liderança)
+  const shiftDepts = useQuery({
+    queryKey: ["shift-departments"],
+    queryFn: async () => {
+      const { data, error } = await supabase.rpc("shift_departments");
+      if (error) throw error;
+      return data ?? [];
+    },
+  });
+
   // Aparelho que já aceitou notificações: renova o registro (e passa para quem está logado agora)
   useEffect(() => {
     void syncPush().catch(() => undefined);
@@ -70,6 +81,7 @@ function PanelLayout() {
       icon: ShieldCheck,
       show: isFullAccess || can("manage_permissions"),
     },
+    { to: "/painel/escalas", label: "Escalas", icon: CalendarClock, show: (shiftDepts.data?.length ?? 0) > 0 },
     { to: "/painel/notificacoes", label: "Avisos (notificações)", icon: Bell, show: can("send_push") },
     { to: "/painel/site", label: "Editar site", icon: Settings, show: isFullAccess },
   ] as const;

@@ -6,6 +6,7 @@ import { brl } from "@/lib/church";
 import { siteMeta } from "@/lib/site-query";
 import { EventsCard, FinanceCards, PrayerCard, VolunteerCards } from "@/components/dashboard/DashboardCards";
 import { MyTickets } from "@/components/events/MyTickets";
+import { NextShiftCard } from "@/components/shifts/MyShifts";
 
 export const Route = createFileRoute("/_authenticated/painel/")({
   head: () =>
@@ -43,6 +44,7 @@ function Overview() {
   return (
     <div>
       <h1 className="text-3xl text-foreground">Visão geral</h1>
+      <NextShiftCard />
       {nothing && (
         <p className="mt-4 text-muted-foreground">
           Bem-vindo à comunidade! Acesse seu cadastro e conheça a nossa comunidade.

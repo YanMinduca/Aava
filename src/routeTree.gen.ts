@@ -23,6 +23,7 @@ import { Route as EventosIndexRouteImport } from './routes/eventos.index'
 import { Route as EventosSlugRouteImport } from './routes/eventos.$slug'
 import { Route as AuthenticatedPainelIndexRouteImport } from './routes/_authenticated/painel.index'
 import { Route as AuthenticatedPainelDepartamentosRouteImport } from './routes/_authenticated/painel.departamentos'
+import { Route as AuthenticatedPainelEscalasRouteImport } from './routes/_authenticated/painel.escalas'
 import { Route as AuthenticatedPainelEventosRouteImport } from './routes/_authenticated/painel.eventos'
 import { Route as AuthenticatedPainelFinanceiroRouteImport } from './routes/_authenticated/painel.financeiro'
 import { Route as AuthenticatedPainelMembrosRouteImport } from './routes/_authenticated/painel.membros'
@@ -105,6 +106,12 @@ const AuthenticatedPainelDepartamentosRoute =
   AuthenticatedPainelDepartamentosRouteImport.update({
     id: '/departamentos',
     path: '/departamentos',
+    getParentRoute: () => AuthenticatedPainelRoute,
+  } as any)
+const AuthenticatedPainelEscalasRoute =
+  AuthenticatedPainelEscalasRouteImport.update({
+    id: '/escalas',
+    path: '/escalas',
     getParentRoute: () => AuthenticatedPainelRoute,
   } as any)
 const AuthenticatedPainelEventosRoute =
@@ -192,6 +199,7 @@ export interface FileRoutesByFullPath {
   '/eventos/$slug': typeof EventosSlugRoute
   '/eventos/': typeof EventosIndexRoute
   '/painel/departamentos': typeof AuthenticatedPainelDepartamentosRoute
+  '/painel/escalas': typeof AuthenticatedPainelEscalasRoute
   '/painel/eventos': typeof AuthenticatedPainelEventosRoute
   '/painel/financeiro': typeof AuthenticatedPainelFinanceiroRoute
   '/painel/membros': typeof AuthenticatedPainelMembrosRoute
@@ -218,6 +226,7 @@ export interface FileRoutesByTo {
   '/eventos/$slug': typeof EventosSlugRoute
   '/eventos': typeof EventosIndexRoute
   '/painel/departamentos': typeof AuthenticatedPainelDepartamentosRoute
+  '/painel/escalas': typeof AuthenticatedPainelEscalasRoute
   '/painel/eventos': typeof AuthenticatedPainelEventosRoute
   '/painel/financeiro': typeof AuthenticatedPainelFinanceiroRoute
   '/painel/membros': typeof AuthenticatedPainelMembrosRoute
@@ -247,6 +256,7 @@ export interface FileRoutesById {
   '/eventos/$slug': typeof EventosSlugRoute
   '/eventos/': typeof EventosIndexRoute
   '/_authenticated/painel/departamentos': typeof AuthenticatedPainelDepartamentosRoute
+  '/_authenticated/painel/escalas': typeof AuthenticatedPainelEscalasRoute
   '/_authenticated/painel/eventos': typeof AuthenticatedPainelEventosRoute
   '/_authenticated/painel/financeiro': typeof AuthenticatedPainelFinanceiroRoute
   '/_authenticated/painel/membros': typeof AuthenticatedPainelMembrosRoute
@@ -276,6 +286,7 @@ export interface FileRouteTypes {
     | '/eventos/$slug'
     | '/eventos/'
     | '/painel/departamentos'
+    | '/painel/escalas'
     | '/painel/eventos'
     | '/painel/financeiro'
     | '/painel/membros'
@@ -302,6 +313,7 @@ export interface FileRouteTypes {
     | '/eventos/$slug'
     | '/eventos'
     | '/painel/departamentos'
+    | '/painel/escalas'
     | '/painel/eventos'
     | '/painel/financeiro'
     | '/painel/membros'
@@ -330,6 +342,7 @@ export interface FileRouteTypes {
     | '/eventos/$slug'
     | '/eventos/'
     | '/_authenticated/painel/departamentos'
+    | '/_authenticated/painel/escalas'
     | '/_authenticated/painel/eventos'
     | '/_authenticated/painel/financeiro'
     | '/_authenticated/painel/membros'
@@ -459,6 +472,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedPainelDepartamentosRouteImport
       parentRoute: typeof AuthenticatedPainelRoute
     }
+    '/_authenticated/painel/escalas': {
+      id: '/_authenticated/painel/escalas'
+      path: '/escalas'
+      fullPath: '/painel/escalas'
+      preLoaderRoute: typeof AuthenticatedPainelEscalasRouteImport
+      parentRoute: typeof AuthenticatedPainelRoute
+    }
     '/_authenticated/painel/eventos': {
       id: '/_authenticated/painel/eventos'
       path: '/eventos'
@@ -548,6 +568,7 @@ declare module '@tanstack/react-router' {
 
 interface AuthenticatedPainelRouteChildren {
   AuthenticatedPainelDepartamentosRoute: typeof AuthenticatedPainelDepartamentosRoute
+  AuthenticatedPainelEscalasRoute: typeof AuthenticatedPainelEscalasRoute
   AuthenticatedPainelEventosRoute: typeof AuthenticatedPainelEventosRoute
   AuthenticatedPainelFinanceiroRoute: typeof AuthenticatedPainelFinanceiroRoute
   AuthenticatedPainelMembrosRoute: typeof AuthenticatedPainelMembrosRoute
@@ -565,6 +586,7 @@ interface AuthenticatedPainelRouteChildren {
 
 const AuthenticatedPainelRouteChildren: AuthenticatedPainelRouteChildren = {
   AuthenticatedPainelDepartamentosRoute: AuthenticatedPainelDepartamentosRoute,
+  AuthenticatedPainelEscalasRoute: AuthenticatedPainelEscalasRoute,
   AuthenticatedPainelEventosRoute: AuthenticatedPainelEventosRoute,
   AuthenticatedPainelFinanceiroRoute: AuthenticatedPainelFinanceiroRoute,
   AuthenticatedPainelMembrosRoute: AuthenticatedPainelMembrosRoute,

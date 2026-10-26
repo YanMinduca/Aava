@@ -2,7 +2,7 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
-import { ArrowLeft, Crown, Download, Pencil, Plus, Printer, Trash2, UserMinus } from "lucide-react";
+import { ArrowLeft, CalendarClock, Crown, Download, Pencil, Plus, Printer, Trash2, UserMinus } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useChurchRoles, useDeptAccess, useDepartments } from "@/hooks/use-departments";
 import { dateBR, MEMBER_STATUS } from "@/lib/church";
@@ -210,6 +210,13 @@ function DepartmentDetail() {
           <p className="mt-3 inline-flex items-center gap-2 text-sm text-foreground">
             <Crown className="h-4 w-4 text-primary" /> {dept.leader_names?.length > 1 ? "Líderes" : "Líder"}: {dept.leader_names?.length ? dept.leader_names.join(", ") : "não definido"}
           </p>
+          <div className="mt-3 print:hidden">
+            <Button asChild variant="outline" size="sm">
+              <Link to="/painel/escalas" search={{ dept: dept.id }}>
+                <CalendarClock className="h-4 w-4" /> Ver escala
+              </Link>
+            </Button>
+          </div>
         </div>
         {manageAll && (
           <div className="flex gap-2 print:hidden">

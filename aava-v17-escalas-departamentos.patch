@@ -1,0 +1,2005 @@
+diff --git a/drizzle/migrations/0021_department_schedules.sql b/drizzle/migrations/0021_department_schedules.sql
+new file mode 100644
+index 0000000..d7c8017
+--- /dev/null
++++ b/drizzle/migrations/0021_department_schedules.sql
+@@ -0,0 +1,417 @@
++-- Escalas dos departamentos.
++-- Só o líder do departamento (e a liderança da igreja: CEO/pastor presidente) cria e altera a escala.
++-- Os voluntários do departamento veem, dão "Estou ciente" ou pedem alteração com motivo.
++-- Todas as gravações passam por funções (RPC): o banco é quem decide, o site só mostra/esconde botões.
++
++create or replace function public.today_br() returns date language sql stable set search_path = public as $$
++  select (now() at time zone 'America/Sao_Paulo')::date
++$$;
++
++-- Um "dia de escala" = um culto de um departamento numa data (pode haver mais de um culto no mesmo dia).
++create table if not exists public.dept_shifts (
++  id uuid primary key default gen_random_uuid(),
++  department_id uuid not null references public.departments(id) on delete cascade,
++  shift_date date not null,
++  service_name text not null check (length(btrim(service_name)) between 1 and 80),
++  service_time time,
++  notes text check (notes is null or length(notes) <= 300),
++  created_by uuid references auth.users(id) on delete set null,
++  created_at timestamptz not null default now(),
++  updated_at timestamptz not null default now()
++);
++create unique index if not exists dept_shifts_slot_key
++  on public.dept_shifts (department_id, shift_date, coalesce(service_time, time '00:00'));
++create index if not exists dept_shifts_date_idx on public.dept_shifts (shift_date);
++
++-- Quem está escalado, e como respondeu (pending = aguardando ciente | confirmed = ciente | change_requested = pediu alteração).
++create table if not exists public.dept_shift_members (
++  shift_id uuid not null references public.dept_shifts(id) on delete cascade,
++  member_id uuid not null references public.members(id) on delete cascade,
++  status text not null default 'pending' check (status in ('pending', 'confirmed', 'change_requested')),
++  acknowledged_at timestamptz,
++  change_reason text check (change_reason is null or length(change_reason) between 5 and 300),
++  change_requested_at timestamptz,
++  leader_note text check (leader_note is null or length(leader_note) <= 300),
++  primary key (shift_id, member_id)
++);
++create index if not exists dept_shift_members_member_idx on public.dept_shift_members (member_id);
++
++-- ---------------------------------------------------------------------------------------------
++-- Permissões
++create or replace function public.can_manage_shifts(_user uuid, _dept uuid) returns boolean
++language sql stable security definer set search_path = public as $$
++  select _user is not null and (
++    public.is_church_leadership(_user)
++    or exists (
++      select 1 from public.department_leaders dl join public.members m on m.id = dl.member_id
++      where dl.department_id = _dept and m.user_id = _user)
++  )
++$$;
++
++create or replace function public.can_see_shifts(_user uuid, _dept uuid) returns boolean
++language sql stable security definer set search_path = public as $$
++  select _user is not null and (
++    public.can_manage_shifts(_user, _dept)
++    or public.can_view_department(_user, _dept)
++    or exists (
++      select 1 from public.department_members dm join public.members m on m.id = dm.member_id
++      where dm.department_id = _dept and m.user_id = _user)
++  )
++$$;
++
++create or replace function public.shift_dept(_shift uuid) returns uuid
++language sql stable security definer set search_path = public as $$
++  select department_id from public.dept_shifts where id = _shift
++$$;
++
++alter table public.dept_shifts enable row level security;
++alter table public.dept_shift_members enable row level security;
++revoke all on public.dept_shifts, public.dept_shift_members from anon;
++revoke insert, update, delete on public.dept_shifts, public.dept_shift_members from authenticated;
++drop policy if exists "shifts read" on public.dept_shifts;
++create policy "shifts read" on public.dept_shifts for select to authenticated
++  using (public.can_see_shifts(auth.uid(), department_id));
++drop policy if exists "shift members read" on public.dept_shift_members;
++create policy "shift members read" on public.dept_shift_members for select to authenticated
++  using (public.can_see_shifts(auth.uid(), public.shift_dept(shift_id)));
++
++-- Quem sai do departamento deixa as escalas futuras dele.
++create or replace function public.trg_dept_member_left_shifts() returns trigger
++language plpgsql security definer set search_path = public as $$
++begin
++  delete from public.dept_shift_members sm using public.dept_shifts s
++   where sm.shift_id = s.id and s.department_id = old.department_id
++     and sm.member_id = old.member_id and s.shift_date >= public.today_br();
++  return old;
++end $$;
++drop trigger if exists dept_member_left_shifts on public.department_members;
++create trigger dept_member_left_shifts after delete on public.department_members
++  for each row execute function public.trg_dept_member_left_shifts();
++
++-- ---------------------------------------------------------------------------------------------
++-- Textos e avisos (push)
++create or replace function public.shift_label(_service text, _date date, _time time) returns text
++language sql stable set search_path = public as $$
++  select _service || ' · '
++    || (array['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb'])[extract(dow from _date)::int + 1]
++    || ' ' || to_char(_date, 'DD/MM')
++    || case when _time is not null and _time <> time '00:00' then ' às ' || to_char(_time, 'HH24"h"MI') else '' end
++$$;
++
++create or replace function public.shift_push(_member uuid, _title text, _body text, _tag text) returns void
++language plpgsql security definer set search_path = public as $$
++declare uid uuid;
++begin
++  select m.user_id into uid from public.members m where m.id = _member;
++  if uid is not null then
++    perform public.push_notify(jsonb_build_object('type', 'user', 'id', uid), _title, _body, '/painel', _tag);
++  end if;
++end $$;
++
++create or replace function public.shift_push_leaders(_dept uuid, _title text, _body text, _tag text) returns void
++language plpgsql security definer set search_path = public as $$
++declare r record;
++begin
++  for r in select m.user_id from public.department_leaders dl join public.members m on m.id = dl.member_id
++           where dl.department_id = _dept and m.user_id is not null loop
++    perform public.push_notify(jsonb_build_object('type', 'user', 'id', r.user_id), _title, _body, '/painel/escalas', _tag);
++  end loop;
++end $$;
++
++revoke all on function public.shift_push(uuid, text, text, text), public.shift_push_leaders(uuid, text, text, text) from public, anon, authenticated;
++
++-- ---------------------------------------------------------------------------------------------
++-- Leitura
++create or replace function public.shift_departments()
++returns table (id uuid, name text, can_manage boolean)
++language sql stable security definer set search_path = public as $$
++  select d.id, d.name, public.can_manage_shifts(auth.uid(), d.id)
++  from public.departments d where public.can_see_shifts(auth.uid(), d.id) order by d.name
++$$;
++
++create or replace function public.dept_schedule(_dept uuid, _from date, _to date)
++returns table (
++  shift_id uuid, shift_date date, service_name text, service_time time, notes text,
++  member_id uuid, member_name text, has_account boolean, status text, acknowledged_at timestamptz,
++  change_reason text, change_requested_at timestamptz, leader_note text, is_me boolean
++)
++language plpgsql stable security definer set search_path = public as $$
++declare uid uuid := auth.uid(); mgr boolean;
++begin
++  if not public.can_see_shifts(uid, _dept) then raise exception 'forbidden'; end if;
++  mgr := public.can_manage_shifts(uid, _dept);
++  return query
++    select s.id, s.shift_date, s.service_name, s.service_time, s.notes,
++           m.id, m.full_name, (m.user_id is not null), sm.status, sm.acknowledged_at,
++           case when mgr or m.user_id = uid then sm.change_reason end,
++           sm.change_requested_at,
++           case when mgr or m.user_id = uid then sm.leader_note end,
++           coalesce(m.user_id = uid, false)
++    from public.dept_shifts s
++    left join public.dept_shift_members sm on sm.shift_id = s.id
++    left join public.members m on m.id = sm.member_id
++    where s.department_id = _dept and s.shift_date between _from and _to
++    order by s.shift_date, coalesce(s.service_time, time '00:00'), s.service_name, m.full_name;
++end $$;
++
++-- Próximas escalas da própria pessoa (dashboard e "Minhas escalas").
++create or replace function public.my_shifts(_limit int default 20)
++returns table (
++  shift_id uuid, department_id uuid, department_name text, shift_date date, service_name text, service_time time,
++  notes text, status text, change_reason text, leader_note text, team text[]
++)
++language sql stable security definer set search_path = public as $$
++  select s.id, s.department_id, d.name, s.shift_date, s.service_name, s.service_time, s.notes,
++         sm.status, sm.change_reason, sm.leader_note,
++         coalesce((select array_agg(m2.full_name order by m2.full_name)
++                   from public.dept_shift_members sm2 join public.members m2 on m2.id = sm2.member_id
++                   where sm2.shift_id = s.id and sm2.member_id <> sm.member_id), '{}'::text[])
++  from public.dept_shift_members sm
++  join public.members me on me.id = sm.member_id and me.user_id = auth.uid()
++  join public.dept_shifts s on s.id = sm.shift_id
++  join public.departments d on d.id = s.department_id
++  where s.shift_date >= public.today_br()
++  order by s.shift_date, coalesce(s.service_time, time '00:00')
++  limit greatest(1, least(coalesce(_limit, 20), 100))
++$$;
++
++-- Voluntários que o líder pode escalar (aprovados no departamento) e quantas vezes já estão escalados no mês.
++create or replace function public.shift_candidates(_dept uuid, _date date, _exclude uuid default null)
++returns table (member_id uuid, full_name text, has_account boolean, month_count int)
++language plpgsql stable security definer set search_path = public as $$
++declare mstart date := date_trunc('month', _date)::date;
++begin
++  if not public.can_manage_shifts(auth.uid(), _dept) then raise exception 'forbidden'; end if;
++  return query
++    select m.id, m.full_name, (m.user_id is not null),
++           (select count(*)::int from public.dept_shift_members sm2 join public.dept_shifts s2 on s2.id = sm2.shift_id
++             where sm2.member_id = m.id and s2.shift_date >= mstart and s2.shift_date < (mstart + interval '1 month')::date
++               and (_exclude is null or s2.id <> _exclude))
++    from public.department_members dm join public.members m on m.id = dm.member_id
++    where dm.department_id = _dept and m.approval_status = 'aprovado'
++    order by m.full_name;
++end $$;
++
++-- ---------------------------------------------------------------------------------------------
++-- Avisos para o líder (NÃO bloqueiam): culto seguido, mesmo culto em dois departamentos, mais de 3 escalas no mês.
++-- "Culto seguido" = o culto imediatamente anterior ou seguinte que já tem escala (de qualquer departamento).
++create or replace function public.shift_warnings(_dept uuid, _date date, _time time, _members uuid[], _exclude uuid default null)
++returns table (member_id uuid, kind text, detail text, total int)
++language plpgsql stable security definer set search_path = public as $$
++declare
++  t time := coalesce(_time, time '00:00');
++  prev_d date; prev_t time; next_d date; next_t time;
++  mstart date := date_trunc('month', _date)::date;
++  months text[] := array['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
++begin
++  if not public.can_manage_shifts(auth.uid(), _dept) then raise exception 'forbidden'; end if;
++
++  select s.shift_date, coalesce(s.service_time, time '00:00') into prev_d, prev_t
++    from public.dept_shifts s
++    where (_exclude is null or s.id <> _exclude)
++      and (s.shift_date, coalesce(s.service_time, time '00:00')) < (_date, t)
++    order by s.shift_date desc, coalesce(s.service_time, time '00:00') desc limit 1;
++  select s.shift_date, coalesce(s.service_time, time '00:00') into next_d, next_t
++    from public.dept_shifts s
++    where (_exclude is null or s.id <> _exclude)
++      and (s.shift_date, coalesce(s.service_time, time '00:00')) > (_date, t)
++    order by s.shift_date, coalesce(s.service_time, time '00:00') limit 1;
++
++  return query
++    -- mesmo culto em outro departamento
++    select distinct sm.member_id, 'double'::text,
++           'já está escalado neste mesmo culto em outro departamento'::text, null::int
++      from public.dept_shift_members sm join public.dept_shifts s on s.id = sm.shift_id
++     where sm.member_id = any(coalesce(_members, '{}')) and s.shift_date = _date
++       and coalesce(s.service_time, time '00:00') = t and (_exclude is null or s.id <> _exclude)
++    union all
++    -- culto anterior
++    select distinct sm.member_id, 'consecutive'::text,
++           ('também está escalado no culto anterior (' || to_char(prev_d, 'DD/MM')
++             || case when prev_t <> time '00:00' then ' às ' || to_char(prev_t, 'HH24"h"MI') else '' end || ')')::text, null::int
++      from public.dept_shift_members sm join public.dept_shifts s on s.id = sm.shift_id
++     where prev_d is not null and sm.member_id = any(coalesce(_members, '{}')) and s.shift_date = prev_d
++       and coalesce(s.service_time, time '00:00') = prev_t and (_exclude is null or s.id <> _exclude)
++    union all
++    -- culto seguinte
++    select distinct sm.member_id, 'consecutive'::text,
++           ('também está escalado no culto seguinte (' || to_char(next_d, 'DD/MM')
++             || case when next_t <> time '00:00' then ' às ' || to_char(next_t, 'HH24"h"MI') else '' end || ')')::text, null::int
++      from public.dept_shift_members sm join public.dept_shifts s on s.id = sm.shift_id
++     where next_d is not null and sm.member_id = any(coalesce(_members, '{}')) and s.shift_date = next_d
++       and coalesce(s.service_time, time '00:00') = next_t and (_exclude is null or s.id <> _exclude)
++    union all
++    -- mais de 3 escalas no mês (contando esta)
++    select c.mid, 'monthly'::text,
++           ('ficará com ' || (c.cnt + 1) || ' escalas em ' || months[extract(month from _date)::int] || ' (somando todos os departamentos)')::text,
++           (c.cnt + 1)::int
++      from (select x.mid,
++                   (select count(*) from public.dept_shift_members sm2 join public.dept_shifts s2 on s2.id = sm2.shift_id
++                     where sm2.member_id = x.mid and s2.shift_date >= mstart
++                       and s2.shift_date < (mstart + interval '1 month')::date
++                       and (_exclude is null or s2.id <> _exclude)) as cnt
++              from unnest(coalesce(_members, '{}')) x(mid)) c
++     where c.cnt + 1 > 3;
++end $$;
++
++-- ---------------------------------------------------------------------------------------------
++-- Gravação (só o líder)
++create or replace function public.save_shift(
++  _dept uuid, _date date, _service_name text, _service_time time, _member_ids uuid[],
++  _notes text default null, _shift_id uuid default null
++) returns uuid
++language plpgsql security definer set search_path = public as $$
++declare
++  uid uuid := auth.uid();
++  sid uuid := _shift_id;
++  cur public.dept_shifts%rowtype;
++  ids uuid[] := coalesce(_member_ids, '{}');
++  dname text; lbl text; changed_slot boolean := false; r record;
++  svc text := btrim(coalesce(_service_name, ''));
++begin
++  if not public.can_manage_shifts(uid, _dept) then raise exception 'forbidden'; end if;
++  if _date is null or svc = '' or length(svc) > 80 then raise exception 'invalid_shift'; end if;
++  if coalesce(array_length(ids, 1), 0) = 0 then raise exception 'no_members'; end if;
++  if _date < public.today_br() then raise exception 'shift_past'; end if;
++  if exists (
++    select 1 from unnest(ids) x(mid) where not exists (
++      select 1 from public.department_members dm join public.members m on m.id = dm.member_id
++      where dm.department_id = _dept and dm.member_id = x.mid and m.approval_status = 'aprovado')
++  ) then raise exception 'invalid_member'; end if;
++
++  select d.name into dname from public.departments d where d.id = _dept;
++  lbl := public.shift_label(svc, _date, _service_time);
++
++  if sid is null then
++    begin
++      insert into public.dept_shifts (department_id, shift_date, service_name, service_time, notes, created_by)
++      values (_dept, _date, svc, _service_time, nullif(btrim(_notes), ''), uid) returning id into sid;
++    exception when unique_violation then raise exception 'shift_exists'; end;
++  else
++    select * into cur from public.dept_shifts s where s.id = sid and s.department_id = _dept for update;
++    if not found then raise exception 'shift_not_found'; end if;
++    if cur.shift_date < public.today_br() then raise exception 'shift_past'; end if;
++    changed_slot := (cur.shift_date, coalesce(cur.service_time, time '00:00'))
++                    is distinct from (_date, coalesce(_service_time, time '00:00'));
++    begin
++      update public.dept_shifts
++         set shift_date = _date, service_name = svc, service_time = _service_time,
++             notes = nullif(btrim(_notes), ''), updated_at = now()
++       where id = sid;
++    exception when unique_violation then raise exception 'shift_exists'; end;
++  end if;
++
++  -- saíram da escala
++  for r in select sm.member_id from public.dept_shift_members sm where sm.shift_id = sid and not (sm.member_id = any(ids)) loop
++    delete from public.dept_shift_members where shift_id = sid and member_id = r.member_id;
++    perform public.shift_push(r.member_id, 'Escala atualizada', 'Você não está mais escalado: ' || dname || ' · ' || lbl, 'escala-' || sid);
++  end loop;
++
++  -- mudou a data/horário: quem já estava precisa dar ciente de novo
++  if changed_slot then
++    update public.dept_shift_members
++       set status = 'pending', acknowledged_at = null, change_reason = null, change_requested_at = null, leader_note = null
++     where shift_id = sid and member_id = any(ids);
++    for r in select sm.member_id from public.dept_shift_members sm where sm.shift_id = sid loop
++      perform public.shift_push(r.member_id, 'Escala alterada', dname || ' · ' || lbl, 'escala-' || sid);
++    end loop;
++  end if;
++
++  -- entraram agora
++  for r in select x.mid from unnest(ids) x(mid)
++           where not exists (select 1 from public.dept_shift_members sm where sm.shift_id = sid and sm.member_id = x.mid) loop
++    insert into public.dept_shift_members (shift_id, member_id) values (sid, r.mid);
++    perform public.shift_push(r.mid, 'Você foi escalado', dname || ' · ' || lbl, 'escala-' || sid);
++  end loop;
++
++  return sid;
++end $$;
++
++create or replace function public.delete_shift(_shift uuid) returns void
++language plpgsql security definer set search_path = public as $$
++declare s public.dept_shifts%rowtype; dname text; r record;
++begin
++  select * into s from public.dept_shifts x where x.id = _shift;
++  if not found then return; end if;
++  if not public.can_manage_shifts(auth.uid(), s.department_id) then raise exception 'forbidden'; end if;
++  if s.shift_date >= public.today_br() then
++    select d.name into dname from public.departments d where d.id = s.department_id;
++    for r in select sm.member_id from public.dept_shift_members sm where sm.shift_id = _shift loop
++      perform public.shift_push(r.member_id, 'Escala cancelada', dname || ' · ' || public.shift_label(s.service_name, s.shift_date, s.service_time), 'escala-' || _shift);
++    end loop;
++  end if;
++  delete from public.dept_shifts where id = _shift;
++end $$;
++
++-- Voluntário: "Estou ciente"
++create or replace function public.ack_shift(_shift uuid) returns void
++language plpgsql security definer set search_path = public as $$
++begin
++  update public.dept_shift_members sm
++     set status = 'confirmed', acknowledged_at = now(), change_reason = null, change_requested_at = null
++    from public.dept_shifts s, public.members m
++   where sm.shift_id = _shift and s.id = sm.shift_id and m.id = sm.member_id
++     and m.user_id = auth.uid() and s.shift_date >= public.today_br();
++  if not found then raise exception 'shift_not_found'; end if;
++end $$;
++
++-- Voluntário: pedir alteração (motivo obrigatório); avisa os líderes.
++create or replace function public.request_shift_change(_shift uuid, _reason text) returns void
++language plpgsql security definer set search_path = public as $$
++declare why text := btrim(coalesce(_reason, '')); who text; s public.dept_shifts%rowtype; mid uuid;
++begin
++  if length(why) < 5 or length(why) > 300 then raise exception 'invalid_reason'; end if;
++  select m.id, m.full_name into mid, who from public.members m where m.user_id = auth.uid();
++  select * into s from public.dept_shifts x where x.id = _shift and x.shift_date >= public.today_br();
++  if mid is null or s.id is null then raise exception 'shift_not_found'; end if;
++  update public.dept_shift_members
++     set status = 'change_requested', change_reason = why, change_requested_at = now(), acknowledged_at = null, leader_note = null
++   where shift_id = _shift and member_id = mid;
++  if not found then raise exception 'shift_not_found'; end if;
++  perform public.shift_push_leaders(s.department_id, 'Pedido de alteração de escala',
++    who || ' · ' || public.shift_label(s.service_name, s.shift_date, s.service_time), 'pedido-' || _shift || '-' || mid);
++end $$;
++
++-- Líder: mantém a pessoa na escala (resposta opcional) ou marca o ciente por ela (quem não tem conta).
++create or replace function public.resolve_shift_change(_shift uuid, _member uuid, _note text default null) returns void
++language plpgsql security definer set search_path = public as $$
++declare s public.dept_shifts%rowtype; note text := nullif(btrim(coalesce(_note, '')), '');
++begin
++  select * into s from public.dept_shifts x where x.id = _shift;
++  if not found or not public.can_manage_shifts(auth.uid(), s.department_id) then raise exception 'forbidden'; end if;
++  update public.dept_shift_members
++     set status = 'pending', change_reason = null, change_requested_at = null, acknowledged_at = null, leader_note = left(note, 300)
++   where shift_id = _shift and member_id = _member and status = 'change_requested';
++  if found then
++    perform public.shift_push(_member, 'O líder manteve sua escala',
++      public.shift_label(s.service_name, s.shift_date, s.service_time) || coalesce(' · ' || note, ''), 'escala-' || _shift);
++  end if;
++end $$;
++
++create or replace function public.leader_confirm_shift(_shift uuid, _member uuid) returns void
++language plpgsql security definer set search_path = public as $$
++declare s public.dept_shifts%rowtype;
++begin
++  select * into s from public.dept_shifts x where x.id = _shift;
++  if not found or not public.can_manage_shifts(auth.uid(), s.department_id) then raise exception 'forbidden'; end if;
++  update public.dept_shift_members
++     set status = 'confirmed', acknowledged_at = now(), change_reason = null, change_requested_at = null
++   where shift_id = _shift and member_id = _member;
++end $$;
++
++revoke all on function
++  public.can_manage_shifts(uuid, uuid), public.can_see_shifts(uuid, uuid), public.shift_dept(uuid),
++  public.shift_departments(), public.dept_schedule(uuid, date, date), public.my_shifts(int),
++  public.shift_candidates(uuid, date, uuid), public.shift_warnings(uuid, date, time, uuid[], uuid),
++  public.save_shift(uuid, date, text, time, uuid[], text, uuid), public.delete_shift(uuid),
++  public.ack_shift(uuid), public.request_shift_change(uuid, text),
++  public.resolve_shift_change(uuid, uuid, text), public.leader_confirm_shift(uuid, uuid)
++from public, anon;
++grant execute on function
++  public.can_manage_shifts(uuid, uuid), public.can_see_shifts(uuid, uuid), public.shift_dept(uuid),
++  public.shift_departments(), public.dept_schedule(uuid, date, date), public.my_shifts(int),
++  public.shift_candidates(uuid, date, uuid), public.shift_warnings(uuid, date, time, uuid[], uuid),
++  public.save_shift(uuid, date, text, time, uuid[], text, uuid), public.delete_shift(uuid),
++  public.ack_shift(uuid), public.request_shift_change(uuid, text),
++  public.resolve_shift_change(uuid, uuid, text), public.leader_confirm_shift(uuid, uuid)
++to authenticated, service_role;
+diff --git a/src/components/shifts/DeptSchedule.tsx b/src/components/shifts/DeptSchedule.tsx
+new file mode 100644
+index 0000000..3d9034f
+--- /dev/null
++++ b/src/components/shifts/DeptSchedule.tsx
+@@ -0,0 +1,308 @@
++import { useMemo, useState } from "react";
++import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
++import { toast } from "sonner";
++import { ptBR } from "react-day-picker/locale";
++import { CalendarPlus, Check, Clock, Pencil, Trash2 } from "lucide-react";
++import { supabase } from "@/integrations/supabase/client";
++import { useSiteContent } from "@/lib/site-query";
++import { Badge } from "@/components/ui/badge";
++import { Button } from "@/components/ui/button";
++import { Calendar } from "@/components/ui/calendar";
++import { Input } from "@/components/ui/input";
++import { ShiftEditor } from "@/components/shifts/ShiftEditor";
++import { MyShiftActions } from "@/components/shifts/MyShifts";
++import {
++  STATUS_LABEL,
++  fmtShiftLong,
++  fmtShiftShort,
++  fmtShiftTime,
++  groupShifts,
++  monthBounds,
++  parseISODate,
++  shiftError,
++  toISODate,
++  todayBR,
++  type MyShift,
++  type Shift,
++  type ShiftMember,
++  type ShiftRow,
++} from "@/lib/shifts";
++
++type Dept = { id: string; name: string; can_manage: boolean };
++
++function useSchedule(dept: Dept, from: string, to: string, enabled = true, tag = "month") {
++  return useQuery({
++    queryKey: ["dept-schedule", dept.id, tag, from, to],
++    enabled,
++    queryFn: async () => {
++      const { data, error } = await supabase.rpc("dept_schedule", { _dept: dept.id, _from: from, _to: to });
++      if (error) throw error;
++      return groupShifts((data ?? []) as ShiftRow[]);
++    },
++  });
++}
++
++const statusBadge = (m: ShiftMember) =>
++  m.status === "confirmed" ? (
++    <Badge className="bg-success text-success-foreground">{STATUS_LABEL.confirmed}</Badge>
++  ) : m.status === "change_requested" ? (
++    <Badge variant="destructive">{STATUS_LABEL.change_requested}</Badge>
++  ) : (
++    <Badge variant="secondary">{STATUS_LABEL.pending}</Badge>
++  );
++
++/** Calendário da escala de um departamento: o líder cria e edita; os voluntários só veem e respondem. */
++export function DeptSchedule({ dept }: { dept: Dept }) {
++  const content = useSiteContent();
++  const [month, setMonth] = useState(() => new Date());
++  const [day, setDay] = useState<Date>(() => new Date());
++  const [editing, setEditing] = useState<{ shift: Shift | null; date: string } | null>(null);
++  const today = todayBR();
++
++  const { from, to } = monthBounds(month);
++  const monthQ = useSchedule(dept, from, to);
++  const horizon = toISODate(new Date(Date.now() + 120 * 86400_000));
++  const upcoming = useSchedule(dept, today, horizon, dept.can_manage, "upcoming");
++
++  const shifts = monthQ.data ?? [];
++  const dayIso = toISODate(day);
++  const dayShifts = shifts.filter((s) => s.date === dayIso);
++  const hasShift = useMemo(() => shifts.map((s) => parseISODate(s.date)), [shifts]);
++  const mine = useMemo(() => shifts.filter((s) => s.members.some((m) => m.isMe)).map((s) => parseISODate(s.date)), [shifts]);
++  const requests = (upcoming.data ?? []).flatMap((s) => s.members.filter((m) => m.status === "change_requested").map((m) => ({ shift: s, member: m })));
++
++  const goTo = (iso: string) => {
++    const d = parseISODate(iso);
++    setMonth(d);
++    setDay(d);
++  };
++
++  return (
++    <section aria-label={`Escala do departamento ${dept.name}`}>
++      {dept.can_manage && requests.length > 0 && (
++        <div className="mb-6 rounded-2xl border border-destructive/40 bg-destructive/5 p-4 text-sm">
++          <p className="font-medium text-foreground">
++            {requests.length} {requests.length === 1 ? "pedido de alteração aguardando você" : "pedidos de alteração aguardando você"}
++          </p>
++          <ul className="mt-3 space-y-2">
++            {requests.map(({ shift, member }) => (
++              <li key={`${shift.id}-${member.memberId}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border bg-background p-3">
++                <span>
++                  <strong className="text-foreground">{member.name}</strong> · {shift.name} · <span className="capitalize">{fmtShiftShort(shift.date)}</span>
++                  {member.changeReason && <span className="block text-muted-foreground">Motivo: {member.changeReason}</span>}
++                </span>
++                <Button size="sm" variant="outline" className="ml-auto" onClick={() => goTo(shift.date)}>
++                  Abrir no calendário
++                </Button>
++              </li>
++            ))}
++          </ul>
++        </div>
++      )}
++
++      <div className="grid gap-6 lg:grid-cols-[auto_1fr]">
++        <div>
++          <Calendar
++            mode="single"
++            locale={ptBR}
++            selected={day}
++            onSelect={(d) => d && setDay(d)}
++            month={month}
++            onMonthChange={setMonth}
++            modifiers={{ hasShift, mine }}
++            modifiersClassNames={{ hasShift: "font-bold text-primary", mine: "ring-2 ring-primary rounded-md" }}
++            className="rounded-xl border"
++          />
++          <p className="mt-2 max-w-xs text-xs text-muted-foreground">Dias em azul e negrito têm escala. O contorno marca os dias em que você está escalado.</p>
++        </div>
++
++        <div className="min-w-0 space-y-4">
++          <div className="flex flex-wrap items-center justify-between gap-2">
++            <h3 className="font-display text-xl capitalize text-foreground">{fmtShiftLong(dayIso)}</h3>
++            {dept.can_manage && dayIso >= today && (
++              <Button size="sm" onClick={() => setEditing({ shift: null, date: dayIso })}>
++                <CalendarPlus className="h-4 w-4" /> Escalar este dia
++              </Button>
++            )}
++          </div>
++
++          {monthQ.isLoading && <p className="text-sm text-muted-foreground">Carregando a escala…</p>}
++          {!monthQ.isLoading && dayShifts.length === 0 && (
++            <p className="rounded-xl border border-dashed p-6 text-sm text-muted-foreground">
++              Nenhum culto escalado neste dia.{dept.can_manage && dayIso >= today ? " Use “Escalar este dia” para montar a escala." : ""}
++            </p>
++          )}
++          {dayShifts.map((s) => (
++            <ShiftCard key={s.id} shift={s} dept={dept} past={s.date < today} onEdit={() => setEditing({ shift: s, date: s.date })} />
++          ))}
++        </div>
++      </div>
++
++      {shifts.length > 0 && (
++        <div className="mt-8">
++          <h3 className="font-display text-lg text-foreground">Escalas deste mês</h3>
++          <ul className="mt-3 grid gap-2 sm:grid-cols-2">
++            {shifts.map((s) => (
++              <li key={s.id}>
++                <button type="button" onClick={() => goTo(s.date)} className="w-full rounded-xl border bg-card p-3 text-left text-sm transition-shadow hover:shadow-soft">
++                  <span className="font-medium capitalize text-foreground">{fmtShiftShort(s.date)}</span>
++                  <span className="text-muted-foreground">
++                    {" "}
++                    · {s.name}
++                    {fmtShiftTime(s.time) ? ` · ${fmtShiftTime(s.time)}` : ""} · {s.members.length} {s.members.length === 1 ? "voluntário" : "voluntários"}
++                  </span>
++                </button>
++              </li>
++            ))}
++          </ul>
++        </div>
++      )}
++
++      {editing && (
++        <ShiftEditor
++          dept={dept}
++          initialDate={editing.date >= today ? editing.date : today}
++          shift={editing.shift}
++          schedule={content.schedule}
++          onClose={() => setEditing(null)}
++        />
++      )}
++    </section>
++  );
++}
++
++function ShiftCard({ shift, dept, past, onEdit }: { shift: Shift; dept: Dept; past: boolean; onEdit: () => void }) {
++  const qc = useQueryClient();
++  const refresh = () => {
++    void qc.invalidateQueries({ queryKey: ["dept-schedule"] });
++    void qc.invalidateQueries({ queryKey: ["my-shifts"] });
++  };
++  const onError = (e: unknown) => toast.error(shiftError(e));
++
++  const remove = useMutation({
++    mutationFn: async () => {
++      const { error } = await supabase.rpc("delete_shift", { _shift: shift.id });
++      if (error) throw error;
++    },
++    onSuccess: () => {
++      toast.success("Escala apagada.");
++      refresh();
++    },
++    onError,
++  });
++  const confirmFor = useMutation({
++    mutationFn: async (memberId: string) => {
++      const { error } = await supabase.rpc("leader_confirm_shift", { _shift: shift.id, _member: memberId });
++      if (error) throw error;
++    },
++    onSuccess: refresh,
++    onError,
++  });
++  const keep = useMutation({
++    mutationFn: async ({ memberId, note }: { memberId: string; note: string }) => {
++      const { error } = await supabase.rpc("resolve_shift_change", { _shift: shift.id, _member: memberId, ...(note ? { _note: note } : {}) });
++      if (error) throw error;
++    },
++    onSuccess: () => {
++      toast.success("Pronto: a pessoa foi mantida na escala e avisada.");
++      refresh();
++    },
++    onError,
++  });
++
++  const me = shift.members.find((m) => m.isMe);
++  const time = fmtShiftTime(shift.time);
++  const asMine: MyShift | null = me
++    ? {
++        shift_id: shift.id,
++        department_id: dept.id,
++        department_name: dept.name,
++        shift_date: shift.date,
++        service_name: shift.name,
++        service_time: shift.time,
++        notes: shift.notes,
++        status: me.status,
++        change_reason: me.changeReason,
++        leader_note: me.leaderNote,
++        team: shift.members.filter((m) => !m.isMe).map((m) => m.name),
++      }
++    : null;
++
++  return (
++    <article className="rounded-2xl border bg-card p-5">
++      <header className="flex flex-wrap items-start justify-between gap-2">
++        <div>
++          <h4 className="text-lg font-semibold text-foreground">{shift.name}</h4>
++          {time && (
++            <p className="flex items-center gap-1 text-sm text-muted-foreground">
++              <Clock className="h-4 w-4" aria-hidden /> {time}
++            </p>
++          )}
++        </div>
++        {dept.can_manage && (
++          <div className="flex gap-2">
++            <Button size="sm" variant="outline" disabled={past} onClick={onEdit}>
++              <Pencil className="h-4 w-4" /> Editar
++            </Button>
++            <Button
++              size="sm"
++              variant="ghost"
++              disabled={remove.isPending}
++              aria-label="Apagar escala"
++              onClick={() => confirm(`Apagar a escala de ${shift.name} em ${fmtShiftShort(shift.date)}? Os voluntários serão avisados.`) && remove.mutate()}
++            >
++              <Trash2 className="h-4 w-4" />
++            </Button>
++          </div>
++        )}
++      </header>
++      {shift.notes && <p className="mt-2 text-sm text-muted-foreground">Observação: {shift.notes}</p>}
++
++      <ul className="mt-4 divide-y">
++        {shift.members.map((m) => (
++          <li key={m.memberId} className="py-3 text-sm">
++            <div className="flex flex-wrap items-center gap-2">
++              <span className="font-medium text-foreground">
++                {m.name}
++                {m.isMe ? " (você)" : ""}
++              </span>
++              {statusBadge(m)}
++              {dept.can_manage && !m.hasAccount && <span className="text-xs text-muted-foreground">sem conta</span>}
++              {dept.can_manage && !past && m.status !== "confirmed" && !m.hasAccount && (
++                <Button size="sm" variant="outline" className="ml-auto" disabled={confirmFor.isPending} onClick={() => confirmFor.mutate(m.memberId)}>
++                  <Check className="h-4 w-4" /> Marcar ciente
++                </Button>
++              )}
++            </div>
++            {dept.can_manage && m.status === "change_requested" && (
++              <ChangeRequestPanel
++                reason={m.changeReason}
++                disabled={past || keep.isPending}
++                onKeep={(note) => keep.mutate({ memberId: m.memberId, note })}
++              />
++            )}
++          </li>
++        ))}
++      </ul>
++
++      {asMine && !past && <MyShiftActions shift={asMine} />}
++    </article>
++  );
++}
++
++/** Para o líder: vê o motivo e decide. Para trocar a pessoa, basta editar a escala e desmarcá-la. */
++function ChangeRequestPanel({ reason, disabled, onKeep }: { reason: string | null; disabled: boolean; onKeep: (note: string) => void }) {
++  const [note, setNote] = useState("");
++  return (
++    <div className="mt-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3">
++      <p className="text-foreground">Motivo do pedido: {reason ?? "—"}</p>
++      <p className="mt-1 text-xs text-muted-foreground">Para aceitar, clique em “Editar” e desmarque a pessoa (ela é avisada). Para manter, responda abaixo.</p>
++      <div className="mt-2 flex flex-wrap gap-2">
++        <Input className="h-8 max-w-64" placeholder="Resposta (opcional)" maxLength={300} value={note} onChange={(e) => setNote(e.target.value)} />
++        <Button size="sm" variant="outline" disabled={disabled} onClick={() => onKeep(note.trim())}>
++          Manter na escala
++        </Button>
++      </div>
++    </div>
++  );
++}
+diff --git a/src/components/shifts/MyShifts.tsx b/src/components/shifts/MyShifts.tsx
+new file mode 100644
+index 0000000..f6bd91a
+--- /dev/null
++++ b/src/components/shifts/MyShifts.tsx
+@@ -0,0 +1,191 @@
++import { useState } from "react";
++import { Link } from "@tanstack/react-router";
++import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
++import { toast } from "sonner";
++import { CalendarClock, Check, Clock, MessageSquareWarning } from "lucide-react";
++import { supabase } from "@/integrations/supabase/client";
++import { Badge } from "@/components/ui/badge";
++import { Button } from "@/components/ui/button";
++import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
++import { Label } from "@/components/ui/label";
++import { Textarea } from "@/components/ui/textarea";
++import { fmtShiftLong, fmtShiftTime, shiftError, type MyShift } from "@/lib/shifts";
++
++/** Próximas escalas da própria pessoa (usado no dashboard e em "Escalas"). */
++export function useMyShifts(limit = 20) {
++  return useQuery({
++    queryKey: ["my-shifts", limit],
++    queryFn: async () => {
++      const { data, error } = await supabase.rpc("my_shifts", { _limit: limit });
++      if (error) throw error;
++      return (data ?? []) as MyShift[];
++    },
++  });
++}
++
++/** Pede o motivo do pedido de alteração (obrigatório). */
++export function ChangeRequestDialog({
++  open,
++  onOpenChange,
++  title,
++  busy,
++  onSubmit,
++}: {
++  open: boolean;
++  onOpenChange: (o: boolean) => void;
++  title: string;
++  busy: boolean;
++  onSubmit: (reason: string) => void;
++}) {
++  const [reason, setReason] = useState("");
++  const ok = reason.trim().length >= 5;
++  return (
++    <Dialog open={open} onOpenChange={onOpenChange}>
++      <DialogContent>
++        <form
++          onSubmit={(e) => {
++            e.preventDefault();
++            if (ok) onSubmit(reason.trim());
++          }}
++        >
++          <DialogHeader>
++            <DialogTitle>Solicitar alteração da escala</DialogTitle>
++            <DialogDescription>{title}</DialogDescription>
++          </DialogHeader>
++          <div className="my-4 space-y-2">
++            <Label htmlFor="shift-reason">Motivo *</Label>
++            <Textarea
++              id="shift-reason"
++              value={reason}
++              maxLength={300}
++              rows={4}
++              onChange={(e) => setReason(e.target.value)}
++              placeholder="Ex.: estarei viajando nesse dia."
++            />
++            <p className="text-xs text-muted-foreground">O líder do departamento recebe o seu pedido e o motivo. {reason.length}/300</p>
++          </div>
++          <DialogFooter>
++            <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
++              Cancelar
++            </Button>
++            <Button type="submit" disabled={!ok || busy}>
++              Enviar pedido
++            </Button>
++          </DialogFooter>
++        </form>
++      </DialogContent>
++    </Dialog>
++  );
++}
++
++/** Botões e situação de uma escala para quem foi escalado: "Estou ciente" e "Solicitar alteração". */
++export function MyShiftActions({ shift }: { shift: MyShift }) {
++  const qc = useQueryClient();
++  const [asking, setAsking] = useState(false);
++  const refresh = () => {
++    void qc.invalidateQueries({ queryKey: ["my-shifts"] });
++    void qc.invalidateQueries({ queryKey: ["dept-schedule"] });
++  };
++
++  const ack = useMutation({
++    mutationFn: async () => {
++      const { error } = await supabase.rpc("ack_shift", { _shift: shift.shift_id });
++      if (error) throw error;
++    },
++    onSuccess: () => {
++      toast.success("Obrigado! Seu ciente foi registrado.");
++      refresh();
++    },
++    onError: (e) => toast.error(shiftError(e)),
++  });
++
++  const change = useMutation({
++    mutationFn: async (reason: string) => {
++      const { error } = await supabase.rpc("request_shift_change", { _shift: shift.shift_id, _reason: reason });
++      if (error) throw error;
++    },
++    onSuccess: () => {
++      toast.success("Pedido enviado ao líder do departamento.");
++      setAsking(false);
++      refresh();
++    },
++    onError: (e) => toast.error(shiftError(e)),
++  });
++
++  const label = `${shift.department_name} · ${shift.service_name} · ${fmtShiftLong(shift.shift_date)}`;
++
++  return (
++    <div className="mt-4">
++      {shift.status === "confirmed" && (
++        <p className="flex items-center gap-2 text-sm font-medium text-success">
++          <Check className="h-4 w-4" aria-hidden /> Você está ciente desta escala.
++        </p>
++      )}
++      {shift.status === "change_requested" && (
++        <div className="rounded-lg border border-primary/30 bg-primary-soft p-3 text-sm">
++          <p className="flex items-center gap-2 font-medium text-foreground">
++            <MessageSquareWarning className="h-4 w-4 text-primary" aria-hidden /> Alteração solicitada: aguardando o líder
++          </p>
++          {shift.change_reason && <p className="mt-1 text-muted-foreground">Seu motivo: {shift.change_reason}</p>}
++        </div>
++      )}
++      {shift.leader_note && shift.status === "pending" && (
++        <p className="mb-3 rounded-lg border bg-muted/40 p-3 text-sm text-muted-foreground">Resposta do líder: {shift.leader_note}</p>
++      )}
++
++      <div className="mt-3 flex flex-wrap gap-2">
++        {shift.status !== "confirmed" && (
++          <Button disabled={ack.isPending} onClick={() => ack.mutate()}>
++            <Check className="h-4 w-4" /> Estou ciente
++          </Button>
++        )}
++        <Button variant="outline" disabled={change.isPending} onClick={() => setAsking(true)}>
++          {shift.status === "change_requested" ? "Mudar o pedido" : "Solicitar alteração"}
++        </Button>
++      </div>
++
++      {asking && <ChangeRequestDialog open onOpenChange={setAsking} title={label} busy={change.isPending} onSubmit={(r) => change.mutate(r)} />}
++    </div>
++  );
++}
++
++/** Dashboard: "Próxima escala" com o botão "Estou ciente" logo abaixo. Some se a pessoa não tem escala futura. */
++export function NextShiftCard() {
++  const q = useMyShifts(5);
++  const next = q.data?.[0];
++  if (!next) return null;
++  const more = (q.data?.length ?? 1) - 1;
++  const time = fmtShiftTime(next.service_time);
++
++  return (
++    <section className="mt-6 rounded-2xl border bg-card p-6" aria-labelledby="next-shift-title">
++      <div className="flex flex-wrap items-center justify-between gap-2">
++        <h2 id="next-shift-title" className="flex items-center gap-2 text-sm text-muted-foreground">
++          <CalendarClock className="h-4 w-4" aria-hidden /> Próxima escala
++        </h2>
++        <Badge variant="secondary">{next.department_name}</Badge>
++      </div>
++
++      <p className="mt-3 font-display text-2xl capitalize text-foreground">{fmtShiftLong(next.shift_date)}</p>
++      <p className="mt-1 flex flex-wrap items-center gap-x-3 text-foreground">
++        <span className="font-medium">{next.service_name}</span>
++        {time && (
++          <span className="flex items-center gap-1 text-muted-foreground">
++            <Clock className="h-4 w-4" aria-hidden /> {time}
++          </span>
++        )}
++      </p>
++      {next.team.length > 0 && <p className="mt-2 text-sm text-muted-foreground">Com: {next.team.join(", ")}</p>}
++      {next.notes && <p className="mt-2 text-sm text-muted-foreground">Observação do líder: {next.notes}</p>}
++
++      <MyShiftActions shift={next} />
++
++      <p className="mt-4 text-xs text-muted-foreground">
++        <Link to="/painel/escalas" className="text-primary underline">
++          Ver todas as escalas
++        </Link>
++        {more > 0 ? ` · mais ${more} ${more === 1 ? "escala" : "escalas"} à frente` : ""}
++      </p>
++    </section>
++  );
++}
+diff --git a/src/components/shifts/ShiftEditor.tsx b/src/components/shifts/ShiftEditor.tsx
+new file mode 100644
+index 0000000..8afb879
+--- /dev/null
++++ b/src/components/shifts/ShiftEditor.tsx
+@@ -0,0 +1,245 @@
++import { useMemo, useState } from "react";
++import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
++import { toast } from "sonner";
++import { AlertTriangle } from "lucide-react";
++import { supabase } from "@/integrations/supabase/client";
++import { Button } from "@/components/ui/button";
++import { Checkbox } from "@/components/ui/checkbox";
++import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
++import { Input } from "@/components/ui/input";
++import { Label } from "@/components/ui/label";
++import { Textarea } from "@/components/ui/textarea";
++import { useDebounced } from "@/lib/use-debounced";
++import { fmtShiftLong, parseISODate, servicesForDate, shiftError, todayBR, type Shift, type ShiftWarning } from "@/lib/shifts";
++
++const MONTH = new Intl.DateTimeFormat("pt-BR", { month: "long" });
++const hhmm = (t: string | null) => (t ? t.slice(0, 5) : "");
++
++/**
++ * Janela do líder para montar a escala de um culto: escolhe o culto, marca os voluntários e vê, ao vivo,
++ * os avisos (culto seguido, mesmo culto em dois departamentos, mais de 3 escalas no mês).
++ * Os avisos NÃO impedem de salvar.
++ */
++export function ShiftEditor({
++  dept,
++  initialDate,
++  shift,
++  schedule,
++  onClose,
++}: {
++  dept: { id: string; name: string };
++  initialDate: string;
++  shift: Shift | null;
++  schedule: { day: string; time: string; name: string }[];
++  onClose: () => void;
++}) {
++  const qc = useQueryClient();
++  const [date, setDate] = useState(shift?.date ?? initialDate);
++  const options = useMemo(() => servicesForDate(parseISODate(date), schedule), [date, schedule]);
++
++  const [choice, setChoice] = useState<string>(() => {
++    if (!shift) return "0";
++    const i = servicesForDate(parseISODate(shift.date), schedule).findIndex((o) => o.name === shift.name && (o.time ?? "") === hhmm(shift.time));
++    return i >= 0 ? String(i) : "custom";
++  });
++  const [customName, setCustomName] = useState(shift && choice === "custom" ? shift.name : "");
++  const [customTime, setCustomTime] = useState(shift && choice === "custom" ? hhmm(shift.time) : "");
++  const [selected, setSelected] = useState<Set<string>>(new Set(shift?.members.map((m) => m.memberId) ?? []));
++  const [notes, setNotes] = useState(shift?.notes ?? "");
++  const [search, setSearch] = useState("");
++
++  const opt = choice === "custom" ? undefined : options[Number(choice)];
++  const service = opt ?? { name: customName.trim(), time: customTime || null };
++  const monthLabel = MONTH.format(parseISODate(date));
++  const valid = /^\d{4}-\d{2}-\d{2}$/.test(date);
++  const inPast = valid && date < todayBR();
++
++  const candidates = useQuery({
++    queryKey: ["shift-candidates", dept.id, date.slice(0, 7), shift?.id ?? null],
++    enabled: valid,
++    queryFn: async () => {
++      const { data, error } = await supabase.rpc("shift_candidates", { _dept: dept.id, _date: date, _exclude: shift?.id ?? null });
++      if (error) throw error;
++      return data ?? [];
++    },
++  });
++
++  const ids = [...selected].sort();
++  const stable = useDebounced(JSON.stringify([date, service.time, ids]), 350);
++  const warnings = useQuery({
++    queryKey: ["shift-warnings", dept.id, shift?.id ?? null, stable],
++    enabled: valid && ids.length > 0,
++    queryFn: async () => {
++      const { data, error } = await supabase.rpc("shift_warnings", {
++        _dept: dept.id,
++        _date: date,
++        _time: service.time,
++        _members: ids,
++        _exclude: shift?.id ?? null,
++      });
++      if (error) throw error;
++      return (data ?? []) as ShiftWarning[];
++    },
++  });
++
++  const byMember = new Map<string, ShiftWarning[]>();
++  for (const w of warnings.data ?? []) byMember.set(w.member_id, [...(byMember.get(w.member_id) ?? []), w]);
++  const nameOf = (id: string) => candidates.data?.find((c) => c.member_id === id)?.full_name ?? "Voluntário";
++  const flagged = [...byMember.keys()].filter((id) => selected.has(id));
++
++  const save = useMutation({
++    mutationFn: async () => {
++      const { error } = await supabase.rpc("save_shift", {
++        _dept: dept.id,
++        _date: date,
++        _service_name: service.name,
++        _service_time: service.time,
++        _member_ids: ids,
++        _notes: notes.trim() || null,
++        _shift_id: shift?.id ?? null,
++      });
++      if (error) throw error;
++    },
++    onSuccess: () => {
++      toast.success(shift ? "Escala atualizada." : "Escala criada. Os voluntários foram avisados.");
++      void qc.invalidateQueries({ queryKey: ["dept-schedule"] });
++      void qc.invalidateQueries({ queryKey: ["my-shifts"] });
++      void qc.invalidateQueries({ queryKey: ["shift-candidates"] });
++      onClose();
++    },
++    onError: (e) => toast.error(shiftError(e)),
++  });
++
++  const shown = (candidates.data ?? []).filter((c) => c.full_name.toLowerCase().includes(search.trim().toLowerCase()));
++  const toggle = (id: string, on: boolean) =>
++    setSelected((s) => {
++      const n = new Set(s);
++      if (on) n.add(id);
++      else n.delete(id);
++      return n;
++    });
++  const canSave = valid && !inPast && service.name.length > 0 && selected.size > 0 && !save.isPending;
++
++  return (
++    <Dialog open onOpenChange={(o) => !o && onClose()}>
++      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-xl">
++        <form
++          onSubmit={(e) => {
++            e.preventDefault();
++            if (canSave) save.mutate();
++          }}
++        >
++          <DialogHeader>
++            <DialogTitle>{shift ? "Editar escala" : "Nova escala"} · {dept.name}</DialogTitle>
++            <DialogDescription className="capitalize">{valid ? fmtShiftLong(date) : "Escolha a data"}</DialogDescription>
++          </DialogHeader>
++
++          <div className="my-4 grid gap-4 sm:grid-cols-2">
++            <div className="space-y-2">
++              <Label htmlFor="shift-date">Data</Label>
++              <Input id="shift-date" type="date" min={todayBR()} value={date} onChange={(e) => setDate(e.target.value)} />
++            </div>
++            <div className="space-y-2">
++              <Label htmlFor="shift-service">Culto</Label>
++              <select
++                id="shift-service"
++                value={opt ? choice : "custom"}
++                onChange={(e) => setChoice(e.target.value)}
++                className="flex h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
++              >
++                {options.map((o, i) => (
++                  <option key={`${o.name}-${i}`} value={String(i)}>
++                    {o.name}
++                    {o.time ? ` · ${o.time.replace(":", "h")}` : ""}
++                  </option>
++                ))}
++                <option value="custom">Outro culto ou horário…</option>
++              </select>
++            </div>
++            {!opt && (
++              <>
++                <div className="space-y-2">
++                  <Label htmlFor="shift-name">Nome do culto *</Label>
++                  <Input id="shift-name" value={customName} maxLength={80} onChange={(e) => setCustomName(e.target.value)} placeholder="Ex.: Culto de Jovens" />
++                </div>
++                <div className="space-y-2">
++                  <Label htmlFor="shift-time">Horário</Label>
++                  <Input id="shift-time" type="time" value={customTime} onChange={(e) => setCustomTime(e.target.value)} />
++                </div>
++              </>
++            )}
++          </div>
++
++          {flagged.length > 0 && (
++            <div role="status" className="mb-4 rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
++              <p className="flex items-center gap-2 font-medium text-foreground">
++                <AlertTriangle className="h-4 w-4 text-amber-600" aria-hidden /> Atenção — isto é só um aviso, você pode escalar mesmo assim
++              </p>
++              <ul className="mt-2 space-y-1 text-muted-foreground">
++                {flagged.flatMap((id) =>
++                  (byMember.get(id) ?? []).map((w) => (
++                    <li key={`${id}-${w.kind}-${w.detail}`}>
++                      <strong className="text-foreground">{nameOf(id)}</strong> {w.detail}
++                    </li>
++                  )),
++                )}
++              </ul>
++            </div>
++          )}
++
++          <div className="space-y-2">
++            <div className="flex items-center justify-between gap-2">
++              <Label htmlFor="shift-search">Voluntários ({selected.size} escalados)</Label>
++              <Input id="shift-search" className="h-8 max-w-48" placeholder="Buscar nome" value={search} onChange={(e) => setSearch(e.target.value)} />
++            </div>
++            <ul className="max-h-64 space-y-2 overflow-y-auto rounded-xl border p-2">
++              {candidates.isLoading && <li className="p-2 text-sm text-muted-foreground">Carregando voluntários…</li>}
++              {!candidates.isLoading && shown.length === 0 && (
++                <li className="p-2 text-sm text-muted-foreground">
++                  {(candidates.data ?? []).length === 0 ? "Este departamento ainda não tem voluntários aprovados." : "Ninguém com esse nome."}
++                </li>
++              )}
++              {shown.map((c) => {
++                const on = selected.has(c.member_id);
++                const ws = on ? (byMember.get(c.member_id) ?? []) : [];
++                return (
++                  <li key={c.member_id}>
++                    <label className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 text-sm ${on ? "border-primary bg-primary-soft" : ""}`}>
++                      <Checkbox className="mt-0.5" checked={on} onCheckedChange={(v) => toggle(c.member_id, v === true)} aria-label={c.full_name} />
++                      <span className="min-w-0 flex-1">
++                        <span className="font-medium text-foreground">{c.full_name}</span>
++                        <span className="ml-2 text-xs text-muted-foreground">
++                          {c.month_count} {c.month_count === 1 ? "escala" : "escalas"} em {monthLabel}
++                          {c.has_account ? "" : " · sem conta (não recebe aviso no celular)"}
++                        </span>
++                        {ws.length > 0 && (
++                          <span className="mt-1 block text-xs text-amber-700 dark:text-amber-400">⚠ {ws.map((w) => w.detail).join(" · ")}</span>
++                        )}
++                      </span>
++                    </label>
++                  </li>
++                );
++              })}
++            </ul>
++          </div>
++
++          <div className="mt-4 space-y-2">
++            <Label htmlFor="shift-notes">Observação (opcional)</Label>
++            <Textarea id="shift-notes" rows={2} maxLength={300} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Ex.: chegar às 17h para a passagem de som." />
++          </div>
++
++          {inPast && <p className="mt-3 text-sm text-destructive">Escolha uma data de hoje em diante.</p>}
++
++          <DialogFooter className="mt-6">
++            <Button type="button" variant="ghost" onClick={onClose}>
++              Cancelar
++            </Button>
++            <Button type="submit" disabled={!canSave}>
++              {shift ? "Salvar alterações" : "Criar escala"}
++            </Button>
++          </DialogFooter>
++        </form>
++      </DialogContent>
++    </Dialog>
++  );
++}
+diff --git a/src/integrations/supabase/types.ts b/src/integrations/supabase/types.ts
+index d5eb36b..483d712 100644
+--- a/src/integrations/supabase/types.ts
++++ b/src/integrations/supabase/types.ts
+@@ -1068,6 +1068,67 @@ export type Database = {
+         Args: { _delete_member?: boolean; _user: string }
+         Returns: undefined
+       }
++      ack_shift: { Args: { _shift: string }; Returns: undefined }
++      delete_shift: { Args: { _shift: string }; Returns: undefined }
++      dept_schedule: {
++        Args: { _dept: string; _from: string; _to: string }
++        Returns: {
++          acknowledged_at: string | null
++          change_reason: string | null
++          change_requested_at: string | null
++          has_account: boolean | null
++          is_me: boolean | null
++          leader_note: string | null
++          member_id: string | null
++          member_name: string | null
++          notes: string | null
++          service_name: string
++          service_time: string | null
++          shift_date: string
++          shift_id: string
++          status: string | null
++        }[]
++      }
++      leader_confirm_shift: { Args: { _member: string; _shift: string }; Returns: undefined }
++      my_shifts: {
++        Args: { _limit?: number }
++        Returns: {
++          change_reason: string | null
++          department_id: string
++          department_name: string
++          leader_note: string | null
++          notes: string | null
++          service_name: string
++          service_time: string | null
++          shift_date: string
++          shift_id: string
++          status: string
++          team: string[]
++        }[]
++      }
++      request_shift_change: { Args: { _reason: string; _shift: string }; Returns: undefined }
++      resolve_shift_change: { Args: { _member: string; _note?: string; _shift: string }; Returns: undefined }
++      save_shift: {
++        Args: {
++          _date: string
++          _dept: string
++          _member_ids: string[]
++          _notes?: string | null
++          _service_name: string
++          _service_time: string | null
++          _shift_id?: string | null
++        }
++        Returns: string
++      }
++      shift_candidates: {
++        Args: { _date: string; _dept: string; _exclude?: string | null }
++        Returns: { full_name: string; has_account: boolean; member_id: string; month_count: number }[]
++      }
++      shift_departments: { Args: never; Returns: { can_manage: boolean; id: string; name: string }[] }
++      shift_warnings: {
++        Args: { _date: string; _dept: string; _exclude?: string | null; _members: string[]; _time: string | null }
++        Returns: { detail: string; kind: string; member_id: string; total: number | null }[]
++      }
+       save_push_subscription: {
+         Args: { _auth: string; _endpoint: string; _p256dh: string; _user_agent?: string }
+         Returns: undefined
+diff --git a/src/lib/shifts.ts b/src/lib/shifts.ts
+new file mode 100644
+index 0000000..f20d3fc
+--- /dev/null
++++ b/src/lib/shifts.ts
+@@ -0,0 +1,165 @@
++/** Escalas dos departamentos: tipos e funções puras (datas, cultos do site, agrupamento). */
++
++export type ShiftStatus = "pending" | "confirmed" | "change_requested";
++
++/** Uma linha de `dept_schedule` (um voluntário em um culto). */
++export type ShiftRow = {
++  shift_id: string;
++  shift_date: string;
++  service_name: string;
++  service_time: string | null;
++  notes: string | null;
++  member_id: string | null;
++  member_name: string | null;
++  has_account: boolean | null;
++  status: string | null;
++  acknowledged_at: string | null;
++  change_reason: string | null;
++  change_requested_at: string | null;
++  leader_note: string | null;
++  is_me: boolean | null;
++};
++
++/** Uma linha de `my_shifts` (próxima escala da própria pessoa). */
++export type MyShift = {
++  shift_id: string;
++  department_id: string;
++  department_name: string;
++  shift_date: string;
++  service_name: string;
++  service_time: string | null;
++  notes: string | null;
++  status: string;
++  change_reason: string | null;
++  leader_note: string | null;
++  team: string[];
++};
++
++export type ShiftMember = {
++  memberId: string;
++  name: string;
++  hasAccount: boolean;
++  status: ShiftStatus;
++  acknowledgedAt: string | null;
++  changeReason: string | null;
++  changeRequestedAt: string | null;
++  leaderNote: string | null;
++  isMe: boolean;
++};
++
++export type Shift = { id: string; date: string; name: string; time: string | null; notes: string | null; members: ShiftMember[] };
++
++export type ShiftWarning = { member_id: string; kind: "double" | "consecutive" | "monthly"; detail: string; total: number | null };
++
++export const STATUS_LABEL: Record<ShiftStatus, string> = {
++  pending: "Aguardando ciente",
++  confirmed: "Ciente",
++  change_requested: "Pediu alteração",
++};
++
++/** "2026-11-08" -> Date local (sem deslocar o dia por causa do fuso). */
++export function parseISODate(iso: string): Date {
++  const [y = 1970, m = 1, d = 1] = iso.slice(0, 10).split("-").map(Number);
++  return new Date(y, m - 1, d);
++}
++
++export function toISODate(d: Date): string {
++  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
++}
++
++/** Hoje no horário de Brasília, como "AAAA-MM-DD" (a escala segue o dia da igreja, não o do aparelho). */
++export function todayBR(now = new Date()): string {
++  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo" }).format(now);
++}
++
++const WEEKDAY = new Intl.DateTimeFormat("pt-BR", { weekday: "long" });
++const LONG = new Intl.DateTimeFormat("pt-BR", { weekday: "long", day: "2-digit", month: "long" });
++const SHORT = new Intl.DateTimeFormat("pt-BR", { weekday: "short", day: "2-digit", month: "2-digit" });
++
++export const fmtShiftLong = (iso: string) => LONG.format(parseISODate(iso));
++export const fmtShiftShort = (iso: string) => SHORT.format(parseISODate(iso)).replace(".", "");
++export const weekdayName = (d: Date) => WEEKDAY.format(d);
++
++/** "18:00:00" -> "18h00"; sem horário (ou 00:00) -> "". */
++export function fmtShiftTime(t: string | null | undefined): string {
++  if (!t) return "";
++  const [h = "00", m = "00"] = t.split(":");
++  if (h === "00" && m === "00") return "";
++  return `${String(Number(h)).padStart(2, "0")}h${m}`;
++}
++
++/** "18h00" / "20h" / "19:30" -> "18:00" (ou null se não der para entender). */
++export function parseServiceTime(text: string): string | null {
++  const m = /(\d{1,2})\s*(?:h|:)\s*(\d{2})?/i.exec(text);
++  if (!m) return null;
++  const hh = Number(m[1]);
++  const mm = Number(m[2] ?? "0");
++  if (hh > 23 || mm > 59) return null;
++  return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
++}
++
++const DAY_KEYS = ["dom", "seg", "ter", "qua", "qui", "sex", "sab"];
++const normalize = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
++
++/** Dia da semana (0 = domingo) de um texto como "Domingo" ou "Quarta-feira"; null se não reconhecer. */
++export function weekdayFromText(text: string): number | null {
++  const i = DAY_KEYS.indexOf(normalize(text).slice(0, 3));
++  return i >= 0 ? i : null;
++}
++
++export type ServiceOption = { name: string; time: string | null };
++
++/** Cultos do site (aba Cultos) que acontecem no dia da semana da data escolhida. */
++export function servicesForDate(date: Date, schedule: { day: string; time: string; name: string }[]): ServiceOption[] {
++  return schedule
++    .filter((s) => weekdayFromText(s.day) === date.getDay())
++    .map((s) => ({ name: s.name.trim() || "Culto", time: parseServiceTime(s.time) }));
++}
++
++/** Junta as linhas (voluntário por linha) em cultos com a lista de voluntários. */
++export function groupShifts(rows: ShiftRow[]): Shift[] {
++  const map = new Map<string, Shift>();
++  for (const r of rows) {
++    let s = map.get(r.shift_id);
++    if (!s) {
++      s = { id: r.shift_id, date: r.shift_date, name: r.service_name, time: r.service_time, notes: r.notes, members: [] };
++      map.set(r.shift_id, s);
++    }
++    if (r.member_id) {
++      s.members.push({
++        memberId: r.member_id,
++        name: r.member_name ?? "",
++        hasAccount: r.has_account ?? false,
++        status: (r.status as ShiftStatus) ?? "pending",
++        acknowledgedAt: r.acknowledged_at,
++        changeReason: r.change_reason,
++        changeRequestedAt: r.change_requested_at,
++        leaderNote: r.leader_note,
++        isMe: r.is_me ?? false,
++      });
++    }
++  }
++  return [...map.values()];
++}
++
++/** Primeiro e último dia (inclusive) do mês de `d`, como "AAAA-MM-DD". */
++export function monthBounds(d: Date): { from: string; to: string } {
++  return { from: toISODate(new Date(d.getFullYear(), d.getMonth(), 1)), to: toISODate(new Date(d.getFullYear(), d.getMonth() + 1, 0)) };
++}
++
++/** Traduz os códigos de erro das funções do banco para frases claras. */
++export function shiftError(e: unknown): string {
++  const m = e instanceof Error ? e.message : typeof e === "object" && e && "message" in e ? String((e as { message: unknown }).message) : String(e);
++  const table: Record<string, string> = {
++    forbidden: "Você não tem permissão para fazer isso.",
++    shift_exists: "Já existe uma escala deste departamento nesse dia e horário.",
++    shift_past: "Não dá para criar ou alterar escala de uma data que já passou.",
++    no_members: "Escolha pelo menos um voluntário.",
++    invalid_member: "Algum voluntário escolhido não faz parte do departamento.",
++    invalid_reason: "Explique o motivo com pelo menos 5 letras.",
++    shift_not_found: "Essa escala não existe mais ou a data já passou.",
++    invalid_shift: "Confira a data e o nome do culto.",
++  };
++  const code = Object.keys(table).find((k) => m.includes(k));
++  return code ? (table[code] as string) : "Não foi possível concluir agora. Tente de novo em instantes.";
++}
+diff --git a/src/routeTree.gen.ts b/src/routeTree.gen.ts
+index e0561ad..e6f4348 100644
+--- a/src/routeTree.gen.ts
++++ b/src/routeTree.gen.ts
+@@ -23,6 +23,7 @@ import { Route as EventosIndexRouteImport } from './routes/eventos.index'
+ import { Route as EventosSlugRouteImport } from './routes/eventos.$slug'
+ import { Route as AuthenticatedPainelIndexRouteImport } from './routes/_authenticated/painel.index'
+ import { Route as AuthenticatedPainelDepartamentosRouteImport } from './routes/_authenticated/painel.departamentos'
++import { Route as AuthenticatedPainelEscalasRouteImport } from './routes/_authenticated/painel.escalas'
+ import { Route as AuthenticatedPainelEventosRouteImport } from './routes/_authenticated/painel.eventos'
+ import { Route as AuthenticatedPainelFinanceiroRouteImport } from './routes/_authenticated/painel.financeiro'
+ import { Route as AuthenticatedPainelMembrosRouteImport } from './routes/_authenticated/painel.membros'
+@@ -107,6 +108,12 @@ const AuthenticatedPainelDepartamentosRoute =
+     path: '/departamentos',
+     getParentRoute: () => AuthenticatedPainelRoute,
+   } as any)
++const AuthenticatedPainelEscalasRoute =
++  AuthenticatedPainelEscalasRouteImport.update({
++    id: '/escalas',
++    path: '/escalas',
++    getParentRoute: () => AuthenticatedPainelRoute,
++  } as any)
+ const AuthenticatedPainelEventosRoute =
+   AuthenticatedPainelEventosRouteImport.update({
+     id: '/eventos',
+@@ -192,6 +199,7 @@ export interface FileRoutesByFullPath {
+   '/eventos/$slug': typeof EventosSlugRoute
+   '/eventos/': typeof EventosIndexRoute
+   '/painel/departamentos': typeof AuthenticatedPainelDepartamentosRoute
++  '/painel/escalas': typeof AuthenticatedPainelEscalasRoute
+   '/painel/eventos': typeof AuthenticatedPainelEventosRoute
+   '/painel/financeiro': typeof AuthenticatedPainelFinanceiroRoute
+   '/painel/membros': typeof AuthenticatedPainelMembrosRoute
+@@ -218,6 +226,7 @@ export interface FileRoutesByTo {
+   '/eventos/$slug': typeof EventosSlugRoute
+   '/eventos': typeof EventosIndexRoute
+   '/painel/departamentos': typeof AuthenticatedPainelDepartamentosRoute
++  '/painel/escalas': typeof AuthenticatedPainelEscalasRoute
+   '/painel/eventos': typeof AuthenticatedPainelEventosRoute
+   '/painel/financeiro': typeof AuthenticatedPainelFinanceiroRoute
+   '/painel/membros': typeof AuthenticatedPainelMembrosRoute
+@@ -247,6 +256,7 @@ export interface FileRoutesById {
+   '/eventos/$slug': typeof EventosSlugRoute
+   '/eventos/': typeof EventosIndexRoute
+   '/_authenticated/painel/departamentos': typeof AuthenticatedPainelDepartamentosRoute
++  '/_authenticated/painel/escalas': typeof AuthenticatedPainelEscalasRoute
+   '/_authenticated/painel/eventos': typeof AuthenticatedPainelEventosRoute
+   '/_authenticated/painel/financeiro': typeof AuthenticatedPainelFinanceiroRoute
+   '/_authenticated/painel/membros': typeof AuthenticatedPainelMembrosRoute
+@@ -276,6 +286,7 @@ export interface FileRouteTypes {
+     | '/eventos/$slug'
+     | '/eventos/'
+     | '/painel/departamentos'
++    | '/painel/escalas'
+     | '/painel/eventos'
+     | '/painel/financeiro'
+     | '/painel/membros'
+@@ -302,6 +313,7 @@ export interface FileRouteTypes {
+     | '/eventos/$slug'
+     | '/eventos'
+     | '/painel/departamentos'
++    | '/painel/escalas'
+     | '/painel/eventos'
+     | '/painel/financeiro'
+     | '/painel/membros'
+@@ -330,6 +342,7 @@ export interface FileRouteTypes {
+     | '/eventos/$slug'
+     | '/eventos/'
+     | '/_authenticated/painel/departamentos'
++    | '/_authenticated/painel/escalas'
+     | '/_authenticated/painel/eventos'
+     | '/_authenticated/painel/financeiro'
+     | '/_authenticated/painel/membros'
+@@ -459,6 +472,13 @@ declare module '@tanstack/react-router' {
+       preLoaderRoute: typeof AuthenticatedPainelDepartamentosRouteImport
+       parentRoute: typeof AuthenticatedPainelRoute
+     }
++    '/_authenticated/painel/escalas': {
++      id: '/_authenticated/painel/escalas'
++      path: '/escalas'
++      fullPath: '/painel/escalas'
++      preLoaderRoute: typeof AuthenticatedPainelEscalasRouteImport
++      parentRoute: typeof AuthenticatedPainelRoute
++    }
+     '/_authenticated/painel/eventos': {
+       id: '/_authenticated/painel/eventos'
+       path: '/eventos'
+@@ -548,6 +568,7 @@ declare module '@tanstack/react-router' {
+ 
+ interface AuthenticatedPainelRouteChildren {
+   AuthenticatedPainelDepartamentosRoute: typeof AuthenticatedPainelDepartamentosRoute
++  AuthenticatedPainelEscalasRoute: typeof AuthenticatedPainelEscalasRoute
+   AuthenticatedPainelEventosRoute: typeof AuthenticatedPainelEventosRoute
+   AuthenticatedPainelFinanceiroRoute: typeof AuthenticatedPainelFinanceiroRoute
+   AuthenticatedPainelMembrosRoute: typeof AuthenticatedPainelMembrosRoute
+@@ -565,6 +586,7 @@ interface AuthenticatedPainelRouteChildren {
+ 
+ const AuthenticatedPainelRouteChildren: AuthenticatedPainelRouteChildren = {
+   AuthenticatedPainelDepartamentosRoute: AuthenticatedPainelDepartamentosRoute,
++  AuthenticatedPainelEscalasRoute: AuthenticatedPainelEscalasRoute,
+   AuthenticatedPainelEventosRoute: AuthenticatedPainelEventosRoute,
+   AuthenticatedPainelFinanceiroRoute: AuthenticatedPainelFinanceiroRoute,
+   AuthenticatedPainelMembrosRoute: AuthenticatedPainelMembrosRoute,
+diff --git a/src/routes/_authenticated/painel.departamento.$id.tsx b/src/routes/_authenticated/painel.departamento.$id.tsx
+index 42b9c88..d593e3b 100644
+--- a/src/routes/_authenticated/painel.departamento.$id.tsx
++++ b/src/routes/_authenticated/painel.departamento.$id.tsx
+@@ -2,7 +2,7 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+ import { useState } from "react";
+ import { toast } from "sonner";
+-import { ArrowLeft, Crown, Download, Pencil, Plus, Printer, Trash2, UserMinus } from "lucide-react";
++import { ArrowLeft, CalendarClock, Crown, Download, Pencil, Plus, Printer, Trash2, UserMinus } from "lucide-react";
+ import { supabase } from "@/integrations/supabase/client";
+ import { useChurchRoles, useDeptAccess, useDepartments } from "@/hooks/use-departments";
+ import { dateBR, MEMBER_STATUS } from "@/lib/church";
+@@ -210,6 +210,13 @@ function DepartmentDetail() {
+           <p className="mt-3 inline-flex items-center gap-2 text-sm text-foreground">
+             <Crown className="h-4 w-4 text-primary" /> {dept.leader_names?.length > 1 ? "Líderes" : "Líder"}: {dept.leader_names?.length ? dept.leader_names.join(", ") : "não definido"}
+           </p>
++          <div className="mt-3 print:hidden">
++            <Button asChild variant="outline" size="sm">
++              <Link to="/painel/escalas" search={{ dept: dept.id }}>
++                <CalendarClock className="h-4 w-4" /> Ver escala
++              </Link>
++            </Button>
++          </div>
+         </div>
+         {manageAll && (
+           <div className="flex gap-2 print:hidden">
+diff --git a/src/routes/_authenticated/painel.escalas.tsx b/src/routes/_authenticated/painel.escalas.tsx
+new file mode 100644
+index 0000000..3bf866a
+--- /dev/null
++++ b/src/routes/_authenticated/painel.escalas.tsx
+@@ -0,0 +1,100 @@
++import { createFileRoute } from "@tanstack/react-router";
++import { useQuery } from "@tanstack/react-query";
++import { supabase } from "@/integrations/supabase/client";
++import { siteMeta } from "@/lib/site-query";
++import { Badge } from "@/components/ui/badge";
++import { Button } from "@/components/ui/button";
++import { DeptSchedule } from "@/components/shifts/DeptSchedule";
++import { MyShiftActions, useMyShifts } from "@/components/shifts/MyShifts";
++import { fmtShiftLong, fmtShiftTime } from "@/lib/shifts";
++
++export const Route = createFileRoute("/_authenticated/painel/escalas")({
++  validateSearch: (s: Record<string, unknown>): { dept?: string } => (typeof s["dept"] === "string" ? { dept: s["dept"] } : {}),
++  head: () => siteMeta("Escalas — Área de membros Aava", "Escalas dos departamentos de voluntários."),
++  component: ShiftsPage,
++});
++
++/** Departamentos cujas escalas a pessoa pode ver (líder, voluntário ou liderança da igreja). */
++export function useShiftDepartments() {
++  return useQuery({
++    queryKey: ["shift-departments"],
++    queryFn: async () => {
++      const { data, error } = await supabase.rpc("shift_departments");
++      if (error) throw error;
++      return data ?? [];
++    },
++  });
++}
++
++function ShiftsPage() {
++  const search = Route.useSearch();
++  const navigate = Route.useNavigate();
++  const depts = useShiftDepartments();
++  const mine = useMyShifts(20);
++
++  if (depts.isLoading) return <p className="text-muted-foreground">Carregando...</p>;
++  const list = depts.data ?? [];
++  if (list.length === 0) {
++    return (
++      <div>
++        <h1 className="text-3xl text-foreground">Escalas</h1>
++        <p className="mt-4 text-muted-foreground">Você ainda não participa de nenhum departamento. Quando entrar em um, a escala aparece aqui.</p>
++      </div>
++    );
++  }
++  const current = list.find((d) => d.id === search.dept) ?? list[0]!;
++
++  return (
++    <div>
++      <h1 className="text-3xl text-foreground">Escalas</h1>
++      <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
++        {current.can_manage
++          ? "Você é líder: escolha o dia no calendário e marque os voluntários. Os voluntários só veem a escala, dão ciente ou pedem alteração."
++          : "Veja quando você está escalado, dê o seu ciente ou peça alteração informando o motivo."}
++      </p>
++
++      {(mine.data ?? []).length > 0 && (
++        <section className="mt-8" aria-labelledby="mine-title">
++          <h2 id="mine-title" className="font-display text-xl text-foreground">
++            Minhas próximas escalas
++          </h2>
++          <ul className="mt-4 grid gap-4 lg:grid-cols-2">
++            {(mine.data ?? []).map((s) => (
++              <li key={s.shift_id} className="rounded-2xl border bg-card p-5">
++                <div className="flex flex-wrap items-center justify-between gap-2">
++                  <p className="font-display text-lg capitalize text-foreground">{fmtShiftLong(s.shift_date)}</p>
++                  <Badge variant="secondary">{s.department_name}</Badge>
++                </div>
++                <p className="mt-1 text-sm text-foreground">
++                  {s.service_name}
++                  {fmtShiftTime(s.service_time) ? ` · ${fmtShiftTime(s.service_time)}` : ""}
++                </p>
++                {s.team.length > 0 && <p className="mt-1 text-sm text-muted-foreground">Com: {s.team.join(", ")}</p>}
++                <MyShiftActions shift={s} />
++              </li>
++            ))}
++          </ul>
++        </section>
++      )}
++
++      <section className="mt-10" aria-labelledby="dept-title">
++        <h2 id="dept-title" className="font-display text-xl text-foreground">
++          Escala do departamento
++        </h2>
++        {list.length > 1 && (
++          <div className="mt-3 flex flex-wrap gap-2">
++            {list.map((d) => (
++              <Button key={d.id} size="sm" variant={d.id === current.id ? "default" : "outline"} onClick={() => void navigate({ search: { dept: d.id } })}>
++                {d.name}
++              </Button>
++            ))}
++          </div>
++        )}
++        {list.length === 1 && <p className="mt-1 text-sm text-muted-foreground">{current.name}</p>}
++        <div className="mt-5">
++          <DeptSchedule key={current.id} dept={current} />
++        </div>
++      </section>
++    </div>
++  );
++}
+diff --git a/src/routes/_authenticated/painel.index.tsx b/src/routes/_authenticated/painel.index.tsx
+index 9c6c639..888b5fb 100644
+--- a/src/routes/_authenticated/painel.index.tsx
++++ b/src/routes/_authenticated/painel.index.tsx
+@@ -6,6 +6,7 @@ import { brl } from "@/lib/church";
+ import { siteMeta } from "@/lib/site-query";
+ import { EventsCard, FinanceCards, PrayerCard, VolunteerCards } from "@/components/dashboard/DashboardCards";
+ import { MyTickets } from "@/components/events/MyTickets";
++import { NextShiftCard } from "@/components/shifts/MyShifts";
+ 
+ export const Route = createFileRoute("/_authenticated/painel/")({
+   head: () =>
+@@ -43,6 +44,7 @@ function Overview() {
+   return (
+     <div>
+       <h1 className="text-3xl text-foreground">Visão geral</h1>
++      <NextShiftCard />
+       {nothing && (
+         <p className="mt-4 text-muted-foreground">
+           Bem-vindo à comunidade! Acesse seu cadastro e conheça a nossa comunidade.
+diff --git a/src/routes/_authenticated/painel.tsx b/src/routes/_authenticated/painel.tsx
+index f429ce1..21fc8d4 100644
+--- a/src/routes/_authenticated/painel.tsx
++++ b/src/routes/_authenticated/painel.tsx
+@@ -1,6 +1,6 @@
+ import { createFileRoute, Link, Outlet, useNavigate } from "@tanstack/react-router";
+ import { useEffect } from "react";
+-import { useQueryClient } from "@tanstack/react-query";
++import { useQuery, useQueryClient } from "@tanstack/react-query";
+ import {
+   LayoutDashboard,
+   Users,
+@@ -15,6 +15,7 @@ import {
+   Network,
+   CalendarDays,
+   Bell,
++  CalendarClock,
+ } from "lucide-react";
+ import { Button } from "@/components/ui/button";
+ import { supabase } from "@/integrations/supabase/client";
+@@ -46,6 +47,16 @@ function PanelLayout() {
+     return () => clearInterval(t);
+   }, []);
+ 
++  // Mostra "Escalas" no menu só para quem participa de algum departamento (voluntário, líder ou liderança)
++  const shiftDepts = useQuery({
++    queryKey: ["shift-departments"],
++    queryFn: async () => {
++      const { data, error } = await supabase.rpc("shift_departments");
++      if (error) throw error;
++      return data ?? [];
++    },
++  });
++
+   // Aparelho que já aceitou notificações: renova o registro (e passa para quem está logado agora)
+   useEffect(() => {
+     void syncPush().catch(() => undefined);
+@@ -70,6 +81,7 @@ function PanelLayout() {
+       icon: ShieldCheck,
+       show: isFullAccess || can("manage_permissions"),
+     },
++    { to: "/painel/escalas", label: "Escalas", icon: CalendarClock, show: (shiftDepts.data?.length ?? 0) > 0 },
+     { to: "/painel/notificacoes", label: "Avisos (notificações)", icon: Bell, show: can("send_push") },
+     { to: "/painel/site", label: "Editar site", icon: Settings, show: isFullAccess },
+   ] as const;
+diff --git a/src/test/shifts.test.tsx b/src/test/shifts.test.tsx
+new file mode 100644
+index 0000000..e1cb7c6
+--- /dev/null
++++ b/src/test/shifts.test.tsx
+@@ -0,0 +1,270 @@
++import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
++import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
++import type { ReactNode } from "react";
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++
++const h = vi.hoisted(() => ({ rpc: vi.fn(), toast: { success: vi.fn(), error: vi.fn() } }));
++
++vi.mock("@/integrations/supabase/client", () => ({ supabase: { rpc: (...a: unknown[]) => h.rpc(...a) } }));
++vi.mock("sonner", () => ({ toast: h.toast }));
++vi.mock("@tanstack/react-router", () => ({ Link: ({ children }: { children: ReactNode }) => <a>{children}</a> }));
++vi.mock("@/lib/site-query", () => ({
++  useSiteContent: () => ({ schedule: [{ day: "Domingo", time: "18h00", name: "Culto de Celebração" }, { day: "Quarta-feira", time: "20h00", name: "Culto de Oração" }] }),
++  siteMeta: () => ({}),
++}));
++
++import {
++  fmtShiftLong, fmtShiftTime, groupShifts, monthBounds, parseISODate, parseServiceTime, servicesForDate, shiftError, toISODate, todayBR, weekdayFromText,
++  type MyShift, type Shift, type ShiftRow,
++} from "@/lib/shifts";
++import { NextShiftCard } from "@/components/shifts/MyShifts";
++import { ShiftEditor } from "@/components/shifts/ShiftEditor";
++import { DeptSchedule } from "@/components/shifts/DeptSchedule";
++
++// O jsdom não tem ResizeObserver (os navegadores têm); os checkboxes do Radix dentro de formulário precisam dele.
++vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
++
++const wrap = (ui: ReactNode) => <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>{ui}</QueryClientProvider>;
++const ahead = (days: number) => toISODate(new Date(Date.now() + days * 86400_000));
++const nextSunday = () => {
++  const d = new Date();
++  d.setDate(d.getDate() + ((7 - d.getDay()) % 7 || 7));
++  return toISODate(d);
++};
++
++beforeEach(() => h.rpc.mockResolvedValue({ data: [], error: null }));
++afterEach(() => {
++  cleanup();
++  vi.clearAllMocks();
++});
++
++describe("lógica de escalas (lib/shifts)", () => {
++  it("entende dia e horário dos cultos escritos no site", () => {
++    expect(parseServiceTime("18h00")).toBe("18:00");
++    expect(parseServiceTime("20h")).toBe("20:00");
++    expect(parseServiceTime("19:30")).toBe("19:30");
++    expect(parseServiceTime("em breve")).toBeNull();
++    expect(parseServiceTime("25h00")).toBeNull();
++    expect(weekdayFromText("Domingo")).toBe(0);
++    expect(weekdayFromText("Quarta-feira")).toBe(3);
++    expect(weekdayFromText("Sábado")).toBe(6);
++    expect(weekdayFromText("todo mês")).toBeNull();
++  });
++
++  it("sugere só os cultos do dia da semana escolhido", () => {
++    const schedule = [{ day: "Domingo", time: "18h00", name: "Celebração" }, { day: "Quarta-feira", time: "20h00", name: "Oração" }];
++    expect(servicesForDate(parseISODate("2026-11-08"), schedule)).toEqual([{ name: "Celebração", time: "18:00" }]); // domingo
++    expect(servicesForDate(parseISODate("2026-11-11"), schedule)).toEqual([{ name: "Oração", time: "20:00" }]); // quarta
++    expect(servicesForDate(parseISODate("2026-11-10"), schedule)).toEqual([]); // terça
++  });
++
++  it("formata data sem deslocar o dia e usa o horário de Brasília", () => {
++    expect(fmtShiftLong("2026-11-08")).toMatch(/domingo.*08.*novembro/i);
++    expect(toISODate(parseISODate("2026-11-08"))).toBe("2026-11-08");
++    expect(todayBR(new Date("2026-10-25T02:00:00Z"))).toBe("2026-10-24"); // 23h do dia 24 em Brasília
++    expect(fmtShiftTime("18:00:00")).toBe("18h00");
++    expect(fmtShiftTime("00:00:00")).toBe("");
++    expect(fmtShiftTime(null)).toBe("");
++    expect(monthBounds(parseISODate("2026-02-10"))).toEqual({ from: "2026-02-01", to: "2026-02-28" });
++  });
++
++  it("junta as linhas em cultos com seus voluntários", () => {
++    const base = { shift_id: "s1", shift_date: "2026-11-08", service_name: "Celebração", service_time: "18:00:00", notes: null, has_account: true, acknowledged_at: null, change_reason: null, change_requested_at: null, leader_note: null };
++    const rows: ShiftRow[] = [
++      { ...base, member_id: "a", member_name: "Ana", status: "confirmed", is_me: true },
++      { ...base, member_id: "b", member_name: "Bia", status: "change_requested", is_me: false },
++      { ...base, shift_id: "s2", member_id: null, member_name: null, status: null, is_me: null },
++    ];
++    const shifts = groupShifts(rows);
++    expect(shifts).toHaveLength(2);
++    expect(shifts[0]!.members.map((m) => [m.name, m.status, m.isMe])).toEqual([["Ana", "confirmed", true], ["Bia", "change_requested", false]]);
++    expect(shifts[1]!.members).toEqual([]);
++  });
++
++  it("traduz os erros do banco", () => {
++    expect(shiftError(new Error("shift_exists"))).toMatch(/Já existe uma escala/);
++    expect(shiftError({ message: "forbidden" })).toMatch(/permissão/);
++    expect(shiftError(new Error("invalid_reason"))).toMatch(/motivo/);
++    expect(shiftError(new Error("qualquer coisa"))).toMatch(/Não foi possível/);
++  });
++});
++
++describe("dashboard: Próxima escala", () => {
++  const mine = (o: Partial<MyShift> = {}): MyShift => ({
++    shift_id: "s1", department_id: "d1", department_name: "Louvor", shift_date: ahead(5), service_name: "Culto de Celebração", service_time: "18:00:00",
++    notes: null, status: "pending", change_reason: null, leader_note: null, team: ["Bia", "Caio"], ...o,
++  });
++  const serve = (rows: MyShift[]) =>
++    h.rpc.mockImplementation(async (fn: string) => (fn === "my_shifts" ? { data: rows, error: null } : { data: null, error: null }));
++
++  it("não aparece para quem não tem escala", async () => {
++    serve([]);
++    const { container } = render(wrap(<NextShiftCard />));
++    await waitFor(() => expect(h.rpc).toHaveBeenCalledWith("my_shifts", expect.anything()));
++    expect(container.textContent).toBe("");
++  });
++
++  it("mostra a próxima escala e 'Estou ciente' registra o ciente", async () => {
++    serve([mine(), mine({ shift_id: "s2", shift_date: ahead(12) })]);
++    render(wrap(<NextShiftCard />));
++    await screen.findByText("Próxima escala");
++    expect(screen.getByText("Louvor")).toBeTruthy();
++    expect(screen.getByText("Culto de Celebração")).toBeTruthy();
++    expect(screen.getByText(/Com: Bia, Caio/)).toBeTruthy();
++    expect(screen.getByText(/mais 1 escala à frente/)).toBeTruthy();
++    fireEvent.click(screen.getByRole("button", { name: /Estou ciente/ }));
++    await waitFor(() => expect(h.rpc).toHaveBeenCalledWith("ack_shift", { _shift: "s1" }));
++  });
++
++  it("já ciente: some o botão e aparece a confirmação", async () => {
++    serve([mine({ status: "confirmed" })]);
++    render(wrap(<NextShiftCard />));
++    await screen.findByText(/Você está ciente desta escala/);
++    expect(screen.queryByRole("button", { name: /Estou ciente/ })).toBeNull();
++  });
++
++  it("pedir alteração exige motivo e avisa o líder", async () => {
++    serve([mine()]);
++    render(wrap(<NextShiftCard />));
++    fireEvent.click(await screen.findByRole("button", { name: /Solicitar alteração/ }));
++    const send = (await screen.findByRole("button", { name: /Enviar pedido/ })) as HTMLButtonElement;
++    expect(send.disabled).toBe(true); // sem motivo não envia
++    fireEvent.change(screen.getByLabelText(/Motivo/), { target: { value: "abc" } });
++    expect(send.disabled).toBe(true); // motivo curto demais
++    fireEvent.change(screen.getByLabelText(/Motivo/), { target: { value: "Estarei viajando nesse dia" } });
++    fireEvent.click(send);
++    await waitFor(() => expect(h.rpc).toHaveBeenCalledWith("request_shift_change", { _shift: "s1", _reason: "Estarei viajando nesse dia" }));
++  });
++
++  it("com pedido em andamento mostra o motivo e a resposta do líder aparece quando mantida", async () => {
++    serve([mine({ status: "change_requested", change_reason: "Viagem" })]);
++    const { unmount } = render(wrap(<NextShiftCard />));
++    await screen.findByText(/aguardando o líder/);
++    expect(screen.getByText(/Seu motivo: Viagem/)).toBeTruthy();
++    unmount();
++    serve([mine({ status: "pending", leader_note: "Preciso de você nesse dia" })]);
++    render(wrap(<NextShiftCard />));
++    await screen.findByText(/Resposta do líder: Preciso de você nesse dia/);
++  });
++});
++
++describe("editor da escala (líder)", () => {
++  const schedule = [{ day: "Domingo", time: "18h00", name: "Culto de Celebração" }];
++  const serve = (warnings: object[] = []) =>
++    h.rpc.mockImplementation(async (fn: string) => {
++      if (fn === "shift_candidates")
++        return { data: [{ member_id: "ana", full_name: "Ana Souza", has_account: true, month_count: 3 }, { member_id: "bia", full_name: "Bia Lima", has_account: false, month_count: 0 }], error: null };
++      if (fn === "shift_warnings") return { data: warnings, error: null };
++      return { data: "novo-id", error: null };
++    });
++
++  it("só deixa criar com pelo menos um voluntário e mostra quantas escalas cada um já tem", async () => {
++    serve();
++    render(wrap(<ShiftEditor dept={{ id: "d1", name: "Louvor" }} initialDate={nextSunday()} shift={null} schedule={schedule} onClose={() => {}} />));
++    await screen.findByText("Ana Souza");
++    expect(screen.getByText(/3 escalas em/)).toBeTruthy();
++    expect(screen.getByText(/sem conta/)).toBeTruthy();
++    expect((screen.getByRole("button", { name: "Criar escala" }) as HTMLButtonElement).disabled).toBe(true);
++  });
++
++  it("mostra o aviso de culto seguido, mas deixa salvar mesmo assim", async () => {
++    serve([{ member_id: "ana", kind: "consecutive", detail: "também está escalado no culto anterior (01/11 às 18h00)", total: null }]);
++    const onClose = vi.fn();
++    const date = nextSunday();
++    render(wrap(<ShiftEditor dept={{ id: "d1", name: "Louvor" }} initialDate={date} shift={null} schedule={schedule} onClose={onClose} />));
++    fireEvent.click(await screen.findByRole("checkbox", { name: "Ana Souza" }));
++    const alert = await screen.findByRole("status", {}, { timeout: 3000 });
++    expect(within(alert).getByText(/você pode escalar mesmo assim/)).toBeTruthy();
++    expect(within(alert).getByText(/também está escalado no culto anterior/)).toBeTruthy();
++
++    const save = screen.getByRole("button", { name: "Criar escala" }) as HTMLButtonElement;
++    expect(save.disabled).toBe(false); // aviso não bloqueia
++    fireEvent.click(save);
++    await waitFor(() =>
++      expect(h.rpc).toHaveBeenCalledWith("save_shift", {
++        _dept: "d1", _date: date, _service_name: "Culto de Celebração", _service_time: "18:00", _member_ids: ["ana"], _notes: null, _shift_id: null,
++      }),
++    );
++    await waitFor(() => expect(onClose).toHaveBeenCalled());
++  });
++
++  it("aviso de mais de 3 escalas no mês aparece e também não bloqueia", async () => {
++    serve([{ member_id: "ana", kind: "monthly", detail: "ficará com 4 escalas em novembro (somando todos os departamentos)", total: 4 }]);
++    render(wrap(<ShiftEditor dept={{ id: "d1", name: "Louvor" }} initialDate={nextSunday()} shift={null} schedule={schedule} onClose={() => {}} />));
++    fireEvent.click(await screen.findByRole("checkbox", { name: "Ana Souza" }));
++    // o aviso aparece no resumo do topo e também na linha da pessoa
++    expect((await screen.findAllByText(/ficará com 4 escalas em novembro/, undefined, { timeout: 3000 })).length).toBe(2);
++    expect((screen.getByRole("button", { name: "Criar escala" }) as HTMLButtonElement).disabled).toBe(false);
++  });
++
++  it("culto fora da lista do site: pede o nome e o horário", async () => {
++    serve();
++    const date = nextSunday();
++    render(wrap(<ShiftEditor dept={{ id: "d1", name: "Louvor" }} initialDate={date} shift={null} schedule={schedule} onClose={() => {}} />));
++    fireEvent.change(await screen.findByLabelText("Culto"), { target: { value: "custom" } });
++    fireEvent.change(screen.getByLabelText(/Nome do culto/), { target: { value: "Culto de Jovens" } });
++    fireEvent.change(screen.getByLabelText("Horário"), { target: { value: "19:30" } });
++    fireEvent.click(await screen.findByRole("checkbox", { name: "Bia Lima" }));
++    fireEvent.click(screen.getByRole("button", { name: "Criar escala" }));
++    await waitFor(() =>
++      expect(h.rpc).toHaveBeenCalledWith("save_shift", expect.objectContaining({ _service_name: "Culto de Jovens", _service_time: "19:30", _member_ids: ["bia"] })),
++    );
++  });
++});
++
++describe("calendário da escala do departamento", () => {
++  const date = ahead(6);
++  const row = (o: Partial<ShiftRow>): ShiftRow => ({
++    shift_id: "s1", shift_date: date, service_name: "Culto de Celebração", service_time: "18:00:00", notes: null, member_id: "ana", member_name: "Ana Souza",
++    has_account: true, status: "pending", acknowledged_at: null, change_reason: null, change_requested_at: null, leader_note: null, is_me: false, ...o,
++  });
++  const serve = (rows: ShiftRow[]) => h.rpc.mockImplementation(async (fn: string) => (fn === "dept_schedule" ? { data: rows, error: null } : { data: [], error: null }));
++  const open = async () => fireEvent.click(await screen.findByRole("button", { name: /Culto de Celebração/ }));
++
++  it("líder: vê pedidos de alteração com o motivo e pode escalar, editar e apagar", async () => {
++    serve([row({ status: "change_requested", change_reason: "Estarei viajando" }), row({ member_id: "bia", member_name: "Bia Lima", status: "confirmed" })]);
++    render(wrap(<DeptSchedule dept={{ id: "d1", name: "Louvor", can_manage: true }} />));
++    await screen.findByText(/pedido de alteração aguardando você/);
++    expect(screen.getAllByText(/Estarei viajando/).length).toBeGreaterThan(0);
++    expect(screen.getByRole("button", { name: /Escalar este dia/ })).toBeTruthy();
++    await open();
++    await screen.findByRole("button", { name: /Editar/ });
++    expect(screen.getByRole("button", { name: "Apagar escala" })).toBeTruthy();
++    expect(screen.getByRole("button", { name: /Manter na escala/ })).toBeTruthy();
++    expect(screen.getByText("Ciente")).toBeTruthy();
++  });
++
++  it("líder mantém a pessoa na escala com uma resposta", async () => {
++    serve([row({ status: "change_requested", change_reason: "Estarei viajando" })]);
++    render(wrap(<DeptSchedule dept={{ id: "d1", name: "Louvor", can_manage: true }} />));
++    await open();
++    fireEvent.change(await screen.findByPlaceholderText(/Resposta/), { target: { value: "Preciso de você" } });
++    fireEvent.click(screen.getByRole("button", { name: /Manter na escala/ }));
++    await waitFor(() => expect(h.rpc).toHaveBeenCalledWith("resolve_shift_change", { _shift: "s1", _member: "ana", _note: "Preciso de você" }));
++  });
++
++  it("voluntário: só visualiza (sem criar, editar ou apagar) e responde pela própria escala", async () => {
++    serve([row({ is_me: true, member_name: "Ana Souza" }), row({ member_id: "bia", member_name: "Bia Lima" })]);
++    render(wrap(<DeptSchedule dept={{ id: "d1", name: "Louvor", can_manage: false }} />));
++    await open();
++    await screen.findByText(/Ana Souza \(você\)/);
++    expect(screen.queryByRole("button", { name: /Escalar este dia/ })).toBeNull();
++    expect(screen.queryByRole("button", { name: /Editar/ })).toBeNull();
++    expect(screen.queryByRole("button", { name: "Apagar escala" })).toBeNull();
++    expect(screen.queryByText(/pedido de alteração aguardando/)).toBeNull();
++    fireEvent.click(screen.getByRole("button", { name: /Estou ciente/ }));
++    await waitFor(() => expect(h.rpc).toHaveBeenCalledWith("ack_shift", { _shift: "s1" }));
++  });
++
++  it("líder marca o ciente de quem não tem conta", async () => {
++    serve([row({ has_account: false, member_name: "Dona Maria" })]);
++    render(wrap(<DeptSchedule dept={{ id: "d1", name: "Louvor", can_manage: true }} />));
++    await open();
++    fireEvent.click(await screen.findByRole("button", { name: /Marcar ciente/ }));
++    await waitFor(() => expect(h.rpc).toHaveBeenCalledWith("leader_confirm_shift", { _shift: "s1", _member: "ana" }));
++  });
++});
++
++// garante que o tipo Shift continua exportado para os componentes
++const _typecheck: Shift | null = null;
++void _typecheck;

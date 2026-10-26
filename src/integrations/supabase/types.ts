@@ -1068,6 +1068,67 @@ export type Database = {
         Args: { _delete_member?: boolean; _user: string }
         Returns: undefined
       }
+      ack_shift: { Args: { _shift: string }; Returns: undefined }
+      delete_shift: { Args: { _shift: string }; Returns: undefined }
+      dept_schedule: {
+        Args: { _dept: string; _from: string; _to: string }
+        Returns: {
+          acknowledged_at: string | null
+          change_reason: string | null
+          change_requested_at: string | null
+          has_account: boolean | null
+          is_me: boolean | null
+          leader_note: string | null
+          member_id: string | null
+          member_name: string | null
+          notes: string | null
+          service_name: string
+          service_time: string | null
+          shift_date: string
+          shift_id: string
+          status: string | null
+        }[]
+      }
+      leader_confirm_shift: { Args: { _member: string; _shift: string }; Returns: undefined }
+      my_shifts: {
+        Args: { _limit?: number }
+        Returns: {
+          change_reason: string | null
+          department_id: string
+          department_name: string
+          leader_note: string | null
+          notes: string | null
+          service_name: string
+          service_time: string | null
+          shift_date: string
+          shift_id: string
+          status: string
+          team: string[]
+        }[]
+      }
+      request_shift_change: { Args: { _reason: string; _shift: string }; Returns: undefined }
+      resolve_shift_change: { Args: { _member: string; _note?: string; _shift: string }; Returns: undefined }
+      save_shift: {
+        Args: {
+          _date: string
+          _dept: string
+          _member_ids: string[]
+          _notes?: string | null
+          _service_name: string
+          _service_time: string | null
+          _shift_id?: string | null
+        }
+        Returns: string
+      }
+      shift_candidates: {
+        Args: { _date: string; _dept: string; _exclude?: string | null }
+        Returns: { full_name: string; has_account: boolean; member_id: string; month_count: number }[]
+      }
+      shift_departments: { Args: never; Returns: { can_manage: boolean; id: string; name: string }[] }
+      shift_warnings: {
+        Args: { _date: string; _dept: string; _exclude?: string | null; _members: string[]; _time: string | null }
+        Returns: { detail: string; kind: string; member_id: string; total: number | null }[]
+      }
       save_push_subscription: {
         Args: { _auth: string; _endpoint: string; _p256dh: string; _user_agent?: string }
         Returns: undefined
