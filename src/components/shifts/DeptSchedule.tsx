@@ -8,6 +8,7 @@ import { useSiteContent } from "@/lib/site-query";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Calendar } from "@/components/ui/calendar";
+import { ConfirmButton } from "@/components/ConfirmDialog";
 import { Input } from "@/components/ui/input";
 import { ShiftEditor } from "@/components/shifts/ShiftEditor";
 import { MyShiftActions } from "@/components/shifts/MyShifts";
@@ -190,6 +191,18 @@ function ShiftCard({ shift, dept, past, onEdit }: { shift: Shift; dept: Dept; pa
     },
     onError,
   });
+  const removeMember = useMutation({
+    mutationFn: async (memberId: string) => {
+      const { data, error } = await supabase.rpc("remove_shift_member", { _shift: shift.id, _member: memberId });
+      if (error) throw error;
+      return data;
+    },
+    onSuccess: (result) => {
+      toast.success(result === "shift_deleted" ? "Era a última pessoa: a escala deste culto foi apagada." : "Pessoa removida da escala.");
+      refresh();
+    },
+    onError,
+  });
   const confirmFor = useMutation({
     mutationFn: async (memberId: string) => {
       const { error } = await supabase.rpc("leader_confirm_shift", { _shift: shift.id, _member: memberId });
@@ -244,15 +257,16 @@ function ShiftCard({ shift, dept, past, onEdit }: { shift: Shift; dept: Dept; pa
             <Button size="sm" variant="outline" disabled={past} onClick={onEdit}>
               <Pencil className="h-4 w-4" /> Editar
             </Button>
-            <Button
-              size="sm"
-              variant="ghost"
+            <ConfirmButton
+              variant="outline"
               disabled={remove.isPending}
-              aria-label="Apagar escala"
-              onClick={() => confirm(`Apagar a escala de ${shift.name} em ${fmtShiftShort(shift.date)}? Os voluntários serão avisados.`) && remove.mutate()}
+              title="Excluir esta escala?"
+              description={`A escala de ${shift.name} em ${fmtShiftShort(shift.date)} será apagada${past ? "" : " e os voluntários escalados serão avisados"}.`}
+              confirmLabel="Excluir escala"
+              onConfirm={() => remove.mutate()}
             >
-              <Trash2 className="h-4 w-4" />
-            </Button>
+              <Trash2 className="h-4 w-4" /> Excluir escala
+            </ConfirmButton>
           </div>
         )}
       </header>
@@ -268,10 +282,31 @@ function ShiftCard({ shift, dept, past, onEdit }: { shift: Shift; dept: Dept; pa
               </span>
               {statusBadge(m)}
               {dept.can_manage && !m.hasAccount && <span className="text-xs text-muted-foreground">sem conta</span>}
-              {dept.can_manage && !past && m.status !== "confirmed" && !m.hasAccount && (
-                <Button size="sm" variant="outline" className="ml-auto" disabled={confirmFor.isPending} onClick={() => confirmFor.mutate(m.memberId)}>
-                  <Check className="h-4 w-4" /> Marcar ciente
-                </Button>
+              {dept.can_manage && (
+                <span className="ml-auto flex flex-wrap gap-2">
+                  {!past && m.status !== "confirmed" && !m.hasAccount && (
+                    <Button size="sm" variant="outline" disabled={confirmFor.isPending} onClick={() => confirmFor.mutate(m.memberId)}>
+                      <Check className="h-4 w-4" /> Marcar ciente
+                    </Button>
+                  )}
+                  <ConfirmButton
+                    variant="ghost"
+                    disabled={removeMember.isPending}
+                    ariaLabel={`Remover ${m.name} da escala`}
+                    title={`Remover ${m.name} da escala?`}
+                    description={
+                      shift.members.length === 1
+                        ? "Esta é a última pessoa escalada: ao remover, a escala deste culto será apagada."
+                        : past
+                          ? "Ela sai da lista desta escala."
+                          : "Ela sai da escala e é avisada no celular."
+                    }
+                    confirmLabel="Remover"
+                    onConfirm={() => removeMember.mutate(m.memberId)}
+                  >
+                    <Trash2 className="h-4 w-4" /> Remover
+                  </ConfirmButton>
+                </span>
               )}
             </div>
             {dept.can_manage && m.status === "change_requested" && (

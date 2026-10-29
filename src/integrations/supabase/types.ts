@@ -1069,6 +1069,9 @@ export type Database = {
         Returns: undefined
       }
       ack_shift: { Args: { _shift: string }; Returns: undefined }
+      clear_push_history: { Args: { _older_than_days?: number }; Returns: number }
+      delete_push_history: { Args: { _ids: string[] }; Returns: number }
+      remove_shift_member: { Args: { _member: string; _shift: string }; Returns: string }
       delete_shift: { Args: { _shift: string }; Returns: undefined }
       dept_schedule: {
         Args: { _dept: string; _from: string; _to: string }

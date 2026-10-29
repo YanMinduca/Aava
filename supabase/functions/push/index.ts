@@ -71,7 +71,9 @@ export async function deliver(cfg: Config, n: Notice) {
     while (next < subs.length) {
       const s = subs[next++]!;
       try {
-        await webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, payload, { TTL: 60 * 60 * 24, urgency: "normal" });
+        // urgency "high": o Android entrega na hora, mesmo com o celular parado e o app fechado.
+        // Com "normal", o Google segura a mensagem até a pessoa abrir o app (era o problema).
+        await webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, payload, { TTL: 60 * 60 * 24, urgency: "high" });
         sent++;
       } catch (e) {
         failed++;
@@ -90,6 +92,8 @@ export async function deliver(cfg: Config, n: Notice) {
       kind: n.kind, title: n.title, body: n.body, url: n.url, audience: n.audience,
       created_by: n.createdBy ?? null, ...result,
     });
+    // Mantém o histórico enxuto: registros com mais de 90 dias são apagados sozinhos.
+    await admin.from("push_notifications").delete().lt("created_at", new Date(Date.now() - 90 * 86400_000).toISOString());
   }
   return result;
 }
@@ -134,10 +138,23 @@ Deno.serve(async (req) => {
     if (!user) return json({ error: "login_required" }, 401);
 
     if (body.action === "test") {
-      return json(await deliver(cfg, {
+      // delaySeconds (até 60): responde na hora e envia depois, para dar tempo de fechar o app e bloquear a tela.
+      const delay = Math.min(Math.max(Math.floor(Number(body.delaySeconds) || 0), 0), 60);
+      const notice: Notice = {
         audience: { type: "user", id: user.id }, kind: "test", url: "/painel",
-        title: "Notificações ativadas", body: "Tudo certo! Você vai receber os avisos da Aava neste aparelho.",
-      }));
+        title: delay > 0 ? "Teste com o app fechado" : "Notificações ativadas",
+        body: delay > 0 ? "Chegou! Os avisos da Aava funcionam mesmo com o app fechado." : "Tudo certo! Você vai receber os avisos da Aava neste aparelho.",
+      };
+      const bg = (globalThis as { EdgeRuntime?: { waitUntil(p: Promise<unknown>): void } }).EdgeRuntime;
+      if (delay > 0 && bg) {
+        bg.waitUntil(
+          new Promise((r) => setTimeout(r, delay * 1000))
+            .then(() => deliver(cfg, notice))
+            .catch((e) => console.error("teste atrasado falhou", e)),
+        );
+        return json({ scheduled: true, delaySeconds: delay });
+      }
+      return json(await deliver(cfg, notice));
     }
 
     if (body.action === "send") {

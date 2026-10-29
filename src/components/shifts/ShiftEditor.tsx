@@ -223,6 +223,10 @@ export function ShiftEditor({
             </ul>
           </div>
 
+          {shift && selected.size === 0 && (
+            <p className="mt-2 text-sm text-muted-foreground">Para tirar todo mundo, feche esta janela e use “Excluir escala” no cartão do culto.</p>
+          )}
+
           <div className="mt-4 space-y-2">
             <Label htmlFor="shift-notes">Observação (opcional)</Label>
             <Textarea id="shift-notes" rows={2} maxLength={300} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Ex.: chegar às 17h para a passagem de som." />

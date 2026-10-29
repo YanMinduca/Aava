@@ -1,0 +1,748 @@
+diff --git a/drizzle/migrations/0022_shift_privacy_and_history.sql b/drizzle/migrations/0022_shift_privacy_and_history.sql
+new file mode 100644
+index 0000000..a955bf9
+--- /dev/null
++++ b/drizzle/migrations/0022_shift_privacy_and_history.sql
+@@ -0,0 +1,62 @@
++-- 1) Escalas: quem não é liderança da igreja (CEO / pastor presidente) vê só o(s) departamento(s) onde é líder ou voluntário.
++create or replace function public.can_see_shifts(_user uuid, _dept uuid) returns boolean
++language sql stable security definer set search_path = public as $$
++  select _user is not null and (
++    public.can_manage_shifts(_user, _dept)
++    or exists (
++      select 1 from public.department_members dm join public.members m on m.id = dm.member_id
++      where dm.department_id = _dept and m.user_id = _user)
++  )
++$$;
++
++-- 2) Líder tira uma pessoa da escala (inclusive a última: aí a escala do culto é apagada).
++create or replace function public.remove_shift_member(_shift uuid, _member uuid) returns text
++language plpgsql security definer set search_path = public as $$
++declare s public.dept_shifts%rowtype; dname text; gone int; left_n int;
++begin
++  select * into s from public.dept_shifts x where x.id = _shift;
++  if not found then return 'shift_deleted'; end if;
++  if not public.can_manage_shifts(auth.uid(), s.department_id) then raise exception 'forbidden'; end if;
++  delete from public.dept_shift_members where shift_id = _shift and member_id = _member;
++  get diagnostics gone = row_count;
++  if gone > 0 and s.shift_date >= public.today_br() then
++    select d.name into dname from public.departments d where d.id = s.department_id;
++    perform public.shift_push(_member, 'Escala atualizada',
++      'Você não está mais escalado: ' || dname || ' · ' || public.shift_label(s.service_name, s.shift_date, s.service_time), 'escala-' || _shift);
++  end if;
++  select count(*) into left_n from public.dept_shift_members where shift_id = _shift;
++  if left_n = 0 then
++    delete from public.dept_shifts where id = _shift;
++    return 'shift_deleted';
++  end if;
++  return 'removed';
++end $$;
++
++-- 3) Histórico de avisos (push): quem pode enviar avisos também pode apagar o histórico de todos.
++create or replace function public.delete_push_history(_ids uuid[]) returns int
++language plpgsql security definer set search_path = public as $$
++declare n int;
++begin
++  if not public.has_permission(auth.uid(), 'send_push') then raise exception 'forbidden'; end if;
++  delete from public.push_notifications where id = any(coalesce(_ids, '{}'::uuid[]));
++  get diagnostics n = row_count;
++  return n;
++end $$;
++
++-- Sem número de dias = apaga tudo.
++create or replace function public.clear_push_history(_older_than_days int default null) returns int
++language plpgsql security definer set search_path = public as $$
++declare n int;
++begin
++  if not public.has_permission(auth.uid(), 'send_push') then raise exception 'forbidden'; end if;
++  if _older_than_days is null then
++    delete from public.push_notifications where true;
++  else
++    delete from public.push_notifications where created_at < now() - make_interval(days => greatest(_older_than_days, 0));
++  end if;
++  get diagnostics n = row_count;
++  return n;
++end $$;
++
++revoke all on function public.remove_shift_member(uuid, uuid), public.delete_push_history(uuid[]), public.clear_push_history(int) from public, anon;
++grant execute on function public.remove_shift_member(uuid, uuid), public.delete_push_history(uuid[]), public.clear_push_history(int) to authenticated, service_role;
+diff --git a/public/sw.js b/public/sw.js
+index 65be163..e34b8fe 100644
+--- a/public/sw.js
++++ b/public/sw.js
+@@ -20,6 +20,9 @@ self.addEventListener("push", (event) => {
+       badge: "/badge-96.png",
+       // Mesma "tag" = a notificação nova substitui a anterior do mesmo assunto, sem empilhar repetidas.
+       tag: data.tag || undefined,
++      // Com a mesma "tag" (ex.: escala alterada), a nova notificação substitui a antiga mas avisa de novo.
++      renotify: Boolean(data.tag),
++      vibrate: [200, 100, 200],
+       data: { url: data.url || "/painel" },
+     }),
+   );
+diff --git a/src/components/ConfirmDialog.tsx b/src/components/ConfirmDialog.tsx
+new file mode 100644
+index 0000000..142175c
+--- /dev/null
++++ b/src/components/ConfirmDialog.tsx
+@@ -0,0 +1,69 @@
++import { useState, type ReactNode } from "react";
++import {
++  AlertDialog,
++  AlertDialogCancel,
++  AlertDialogContent,
++  AlertDialogDescription,
++  AlertDialogFooter,
++  AlertDialogHeader,
++  AlertDialogTitle,
++} from "@/components/ui/alert-dialog";
++import { Button } from "@/components/ui/button";
++
++/**
++ * Botão que pede confirmação numa janela do próprio site (funciona no celular e no app instalado,
++ * ao contrário do confirm() do navegador, que pode ser bloqueado).
++ */
++export function ConfirmButton({
++  children,
++  title,
++  description,
++  confirmLabel = "Excluir",
++  onConfirm,
++  disabled,
++  size = "sm",
++  variant = "outline",
++  className,
++  ariaLabel,
++}: {
++  children: ReactNode;
++  title: string;
++  description: ReactNode;
++  confirmLabel?: string;
++  onConfirm: () => void;
++  disabled?: boolean;
++  size?: "sm" | "default" | "icon";
++  variant?: "outline" | "ghost" | "destructive" | "secondary";
++  className?: string;
++  ariaLabel?: string;
++}) {
++  const [open, setOpen] = useState(false);
++  return (
++    <>
++      <Button type="button" size={size} variant={variant} className={className} disabled={disabled} aria-label={ariaLabel} onClick={() => setOpen(true)}>
++        {children}
++      </Button>
++      <AlertDialog open={open} onOpenChange={setOpen}>
++        <AlertDialogContent>
++          <AlertDialogHeader>
++            <AlertDialogTitle>{title}</AlertDialogTitle>
++            <AlertDialogDescription>{description}</AlertDialogDescription>
++          </AlertDialogHeader>
++          <AlertDialogFooter>
++            <AlertDialogCancel>Cancelar</AlertDialogCancel>
++            <Button
++              type="button"
++              variant="destructive"
++              onClick={() => {
++                setOpen(false);
++                onConfirm();
++              }}
++            >
++              {confirmLabel}
++            </Button>
++          </AlertDialogFooter>
++        </AlertDialogContent>
++      </AlertDialog>
++    </>
++  );
++}
+diff --git a/src/components/push/PushToggle.tsx b/src/components/push/PushToggle.tsx
+index 417f342..989c037 100644
+--- a/src/components/push/PushToggle.tsx
++++ b/src/components/push/PushToggle.tsx
+@@ -42,6 +42,14 @@ export function PushToggle() {
+       else toast.success("Teste enviado. Deve chegar em instantes.");
+     });
+ 
++  const testClosed = () =>
++    run(async () => {
++      const r = await sendTestPush(20);
++      if (r.scheduled) toast.success("Agora feche o app e bloqueie a tela. Em cerca de 20 segundos chega uma notificação.", { duration: 8000 });
++      else if (r.sent === 0) toast.error("Nenhum aparelho respondeu ao teste. Desative e ative de novo.");
++      else toast.success("Teste enviado. Deve chegar em instantes.");
++    });
++
+   if (!state) return null;
+ 
+   return (
+@@ -94,10 +102,35 @@ export function PushToggle() {
+             <Button variant="outline" disabled={busy} onClick={test}>
+               Enviar um teste
+             </Button>
++            <Button variant="outline" disabled={busy} onClick={testClosed}>
++              Testar com o app fechado
++            </Button>
+             <Button variant="ghost" disabled={busy} onClick={turnOff}>
+               Desativar neste aparelho
+             </Button>
+           </div>
++          <details className="mt-4 rounded-lg border bg-muted/30 p-3 text-muted-foreground">
++            <summary className="cursor-pointer font-medium text-foreground">A notificação não chega com o app fechado?</summary>
++            <div className="mt-2 space-y-2">
++              <p>Alguns celulares Android economizam bateria parando os apps em segundo plano. Libere o navegador (e o app da Aava, se instalado):</p>
++              <ol className="list-decimal space-y-1 pl-5">
++                <li>
++                  Abra <strong>Configurações → Apps</strong> e toque em <strong>Chrome</strong> (e em <strong>Aava</strong>, se estiver instalado).
++                </li>
++                <li>
++                  Em <strong>Bateria</strong>, escolha <strong>Sem restrições</strong> (ou “Irrestrito”).
++                </li>
++                <li>
++                  Desative <strong>“Pausar atividade do app se não for usado”</strong> / “Remover permissões se o app não for usado”.
++                </li>
++                <li>
++                  <strong>Samsung:</strong> Bateria → Limites de uso em segundo plano → tire o Chrome de “Apps em suspensão”. <strong>Xiaomi/Redmi:</strong> ative “Início automático” para o Chrome.
++                </li>
++                <li>Desligue a economia de bateria e a economia de dados enquanto testa.</li>
++              </ol>
++              <p>Depois toque em “Testar com o app fechado”, feche o app e bloqueie a tela.</p>
++            </div>
++          </details>
+         </>
+       )}
+     </section>
+diff --git a/src/components/shifts/DeptSchedule.tsx b/src/components/shifts/DeptSchedule.tsx
+index 3d9034f..266b083 100644
+--- a/src/components/shifts/DeptSchedule.tsx
++++ b/src/components/shifts/DeptSchedule.tsx
+@@ -8,6 +8,7 @@ import { useSiteContent } from "@/lib/site-query";
+ import { Badge } from "@/components/ui/badge";
+ import { Button } from "@/components/ui/button";
+ import { Calendar } from "@/components/ui/calendar";
++import { ConfirmButton } from "@/components/ConfirmDialog";
+ import { Input } from "@/components/ui/input";
+ import { ShiftEditor } from "@/components/shifts/ShiftEditor";
+ import { MyShiftActions } from "@/components/shifts/MyShifts";
+@@ -190,6 +191,18 @@ function ShiftCard({ shift, dept, past, onEdit }: { shift: Shift; dept: Dept; pa
+     },
+     onError,
+   });
++  const removeMember = useMutation({
++    mutationFn: async (memberId: string) => {
++      const { data, error } = await supabase.rpc("remove_shift_member", { _shift: shift.id, _member: memberId });
++      if (error) throw error;
++      return data;
++    },
++    onSuccess: (result) => {
++      toast.success(result === "shift_deleted" ? "Era a última pessoa: a escala deste culto foi apagada." : "Pessoa removida da escala.");
++      refresh();
++    },
++    onError,
++  });
+   const confirmFor = useMutation({
+     mutationFn: async (memberId: string) => {
+       const { error } = await supabase.rpc("leader_confirm_shift", { _shift: shift.id, _member: memberId });
+@@ -244,15 +257,16 @@ function ShiftCard({ shift, dept, past, onEdit }: { shift: Shift; dept: Dept; pa
+             <Button size="sm" variant="outline" disabled={past} onClick={onEdit}>
+               <Pencil className="h-4 w-4" /> Editar
+             </Button>
+-            <Button
+-              size="sm"
+-              variant="ghost"
++            <ConfirmButton
++              variant="outline"
+               disabled={remove.isPending}
+-              aria-label="Apagar escala"
+-              onClick={() => confirm(`Apagar a escala de ${shift.name} em ${fmtShiftShort(shift.date)}? Os voluntários serão avisados.`) && remove.mutate()}
++              title="Excluir esta escala?"
++              description={`A escala de ${shift.name} em ${fmtShiftShort(shift.date)} será apagada${past ? "" : " e os voluntários escalados serão avisados"}.`}
++              confirmLabel="Excluir escala"
++              onConfirm={() => remove.mutate()}
+             >
+-              <Trash2 className="h-4 w-4" />
+-            </Button>
++              <Trash2 className="h-4 w-4" /> Excluir escala
++            </ConfirmButton>
+           </div>
+         )}
+       </header>
+@@ -268,10 +282,31 @@ function ShiftCard({ shift, dept, past, onEdit }: { shift: Shift; dept: Dept; pa
+               </span>
+               {statusBadge(m)}
+               {dept.can_manage && !m.hasAccount && <span className="text-xs text-muted-foreground">sem conta</span>}
+-              {dept.can_manage && !past && m.status !== "confirmed" && !m.hasAccount && (
+-                <Button size="sm" variant="outline" className="ml-auto" disabled={confirmFor.isPending} onClick={() => confirmFor.mutate(m.memberId)}>
+-                  <Check className="h-4 w-4" /> Marcar ciente
+-                </Button>
++              {dept.can_manage && (
++                <span className="ml-auto flex flex-wrap gap-2">
++                  {!past && m.status !== "confirmed" && !m.hasAccount && (
++                    <Button size="sm" variant="outline" disabled={confirmFor.isPending} onClick={() => confirmFor.mutate(m.memberId)}>
++                      <Check className="h-4 w-4" /> Marcar ciente
++                    </Button>
++                  )}
++                  <ConfirmButton
++                    variant="ghost"
++                    disabled={removeMember.isPending}
++                    ariaLabel={`Remover ${m.name} da escala`}
++                    title={`Remover ${m.name} da escala?`}
++                    description={
++                      shift.members.length === 1
++                        ? "Esta é a última pessoa escalada: ao remover, a escala deste culto será apagada."
++                        : past
++                          ? "Ela sai da lista desta escala."
++                          : "Ela sai da escala e é avisada no celular."
++                    }
++                    confirmLabel="Remover"
++                    onConfirm={() => removeMember.mutate(m.memberId)}
++                  >
++                    <Trash2 className="h-4 w-4" /> Remover
++                  </ConfirmButton>
++                </span>
+               )}
+             </div>
+             {dept.can_manage && m.status === "change_requested" && (
+diff --git a/src/components/shifts/ShiftEditor.tsx b/src/components/shifts/ShiftEditor.tsx
+index 8afb879..1e5c806 100644
+--- a/src/components/shifts/ShiftEditor.tsx
++++ b/src/components/shifts/ShiftEditor.tsx
+@@ -223,6 +223,10 @@ export function ShiftEditor({
+             </ul>
+           </div>
+ 
++          {shift && selected.size === 0 && (
++            <p className="mt-2 text-sm text-muted-foreground">Para tirar todo mundo, feche esta janela e use “Excluir escala” no cartão do culto.</p>
++          )}
++
+           <div className="mt-4 space-y-2">
+             <Label htmlFor="shift-notes">Observação (opcional)</Label>
+             <Textarea id="shift-notes" rows={2} maxLength={300} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Ex.: chegar às 17h para a passagem de som." />
+diff --git a/src/integrations/supabase/types.ts b/src/integrations/supabase/types.ts
+index 483d712..de75ed8 100644
+--- a/src/integrations/supabase/types.ts
++++ b/src/integrations/supabase/types.ts
+@@ -1069,6 +1069,9 @@ export type Database = {
+         Returns: undefined
+       }
+       ack_shift: { Args: { _shift: string }; Returns: undefined }
++      clear_push_history: { Args: { _older_than_days?: number }; Returns: number }
++      delete_push_history: { Args: { _ids: string[] }; Returns: number }
++      remove_shift_member: { Args: { _member: string; _shift: string }; Returns: string }
+       delete_shift: { Args: { _shift: string }; Returns: undefined }
+       dept_schedule: {
+         Args: { _dept: string; _from: string; _to: string }
+diff --git a/src/lib/push.ts b/src/lib/push.ts
+index 8b56e87..608c9e8 100644
+--- a/src/lib/push.ts
++++ b/src/lib/push.ts
+@@ -111,10 +111,13 @@ export async function forgetPushDevice() {
+   if (sub) await supabase.rpc("delete_push_subscription", { _endpoint: sub.endpoint });
+ }
+ 
+-export async function sendTestPush() {
+-  const { data, error } = await supabase.functions.invoke<{ devices: number; sent: number }>("push", { body: { action: "test" } });
++/** Teste imediato; com `delaySeconds` o servidor envia depois (dá tempo de fechar o app e bloquear a tela). */
++export async function sendTestPush(delaySeconds = 0) {
++  const { data, error } = await supabase.functions.invoke<{ devices?: number; sent?: number; scheduled?: boolean }>("push", {
++    body: delaySeconds > 0 ? { action: "test", delaySeconds } : { action: "test" },
++  });
+   if (error) throw error;
+-  return data ?? { devices: 0, sent: 0 };
++  return { devices: data?.devices ?? 0, sent: data?.sent ?? 0, scheduled: data?.scheduled === true };
+ }
+ 
+ export function pushErrorMessage(e: unknown): string {
+diff --git a/src/routes/_authenticated/painel.escalas.tsx b/src/routes/_authenticated/painel.escalas.tsx
+index 3bf866a..2e87828 100644
+--- a/src/routes/_authenticated/painel.escalas.tsx
++++ b/src/routes/_authenticated/painel.escalas.tsx
+@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
+ import { Button } from "@/components/ui/button";
+ import { DeptSchedule } from "@/components/shifts/DeptSchedule";
+ import { MyShiftActions, useMyShifts } from "@/components/shifts/MyShifts";
++import { useAccess } from "@/hooks/use-access";
+ import { fmtShiftLong, fmtShiftTime } from "@/lib/shifts";
+ 
+ export const Route = createFileRoute("/_authenticated/painel/escalas")({
+@@ -31,6 +32,7 @@ function ShiftsPage() {
+   const navigate = Route.useNavigate();
+   const depts = useShiftDepartments();
+   const mine = useMyShifts(20);
++  const { isFullAccess } = useAccess();
+ 
+   if (depts.isLoading) return <p className="text-muted-foreground">Carregando...</p>;
+   const list = depts.data ?? [];
+@@ -49,7 +51,7 @@ function ShiftsPage() {
+       <h1 className="text-3xl text-foreground">Escalas</h1>
+       <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
+         {current.can_manage
+-          ? "Você é líder: escolha o dia no calendário e marque os voluntários. Os voluntários só veem a escala, dão ciente ou pedem alteração."
++          ? `Você é líder: escolha o dia no calendário e marque os voluntários. Os voluntários só veem a escala, dão ciente ou pedem alteração.${isFullAccess ? "" : " Você vê apenas o seu departamento."}`
+           : "Veja quando você está escalado, dê o seu ciente ou peça alteração informando o motivo."}
+       </p>
+ 
+diff --git a/src/routes/_authenticated/painel.notificacoes.tsx b/src/routes/_authenticated/painel.notificacoes.tsx
+index 792af1d..5bff9cc 100644
+--- a/src/routes/_authenticated/painel.notificacoes.tsx
++++ b/src/routes/_authenticated/painel.notificacoes.tsx
+@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
+ import { useState } from "react";
+ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+ import { toast } from "sonner";
+-import { Send } from "lucide-react";
++import { Send, Trash2 } from "lucide-react";
+ import { supabase } from "@/integrations/supabase/client";
+ import { siteMeta } from "@/lib/site-query";
+ import { useAccess } from "@/hooks/use-access";
+@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
+ import { Input } from "@/components/ui/input";
+ import { Textarea } from "@/components/ui/textarea";
+ import { Label } from "@/components/ui/label";
++import { ConfirmButton } from "@/components/ConfirmDialog";
+ 
+ export const Route = createFileRoute("/_authenticated/painel/notificacoes")({
+   head: () => siteMeta("Avisos por notificação — Área de membros Aava", "Envie avisos por notificação push para os membros."),
+@@ -143,39 +144,111 @@ function Composer() {
+ }
+ 
+ function History() {
++  const qc = useQueryClient();
++  const [limit, setLimit] = useState(30);
+   const q = useQuery({
+-    queryKey: ["push-history"],
++    queryKey: ["push-history", limit],
+     queryFn: async () => {
+       const { data, error } = await supabase
+         .from("push_notifications")
+         .select("id, kind, title, body, audience, devices, sent, failed, created_at")
+         .order("created_at", { ascending: false })
+-        .limit(30);
++        .limit(limit);
+       if (error) throw error;
+       return data ?? [];
+     },
+   });
++
++  const refresh = () => void qc.invalidateQueries({ queryKey: ["push-history"] });
++  const removeOne = useMutation({
++    mutationFn: async (id: string) => {
++      const { error } = await supabase.rpc("delete_push_history", { _ids: [id] });
++      if (error) throw error;
++    },
++    onSuccess: () => {
++      toast.success("Aviso apagado do histórico.");
++      refresh();
++    },
++    onError: () => toast.error("Não foi possível apagar agora."),
++  });
++  const clear = useMutation({
++    mutationFn: async (olderThanDays: number | null) => {
++      const { data, error } = await supabase.rpc("clear_push_history", olderThanDays === null ? {} : { _older_than_days: olderThanDays });
++      if (error) throw error;
++      return data ?? 0;
++    },
++    onSuccess: (n) => {
++      toast.success(n === 0 ? "Nada para apagar." : `${n} ${n === 1 ? "registro apagado" : "registros apagados"} do histórico.`);
++      refresh();
++    },
++    onError: () => toast.error("Não foi possível apagar agora."),
++  });
++
+   const rows = q.data ?? [];
+   return (
+     <section className="mt-10 max-w-2xl">
+       <h2 className="font-display text-xl text-foreground">Últimos avisos enviados</h2>
++      <p className="mt-1 text-sm text-muted-foreground">
++        Este histórico é de todos que enviam avisos: apagar aqui apaga para todos. Registros com mais de 90 dias são apagados sozinhos.
++      </p>
++      {rows.length > 0 && (
++        <div className="mt-3 flex flex-wrap gap-2">
++          <ConfirmButton
++            disabled={clear.isPending}
++            title="Apagar registros antigos?"
++            description="Apaga do histórico todos os avisos com mais de 30 dias. Isso não cancela nada que já foi enviado."
++            confirmLabel="Apagar antigos"
++            onConfirm={() => clear.mutate(30)}
++          >
++            Apagar com mais de 30 dias
++          </ConfirmButton>
++          <ConfirmButton
++            variant="destructive"
++            disabled={clear.isPending}
++            title="Apagar todo o histórico?"
++            description="Apaga o histórico de avisos de todos. Isso não cancela nada que já foi enviado e não dá para desfazer."
++            confirmLabel="Apagar tudo"
++            onConfirm={() => clear.mutate(null)}
++          >
++            <Trash2 className="h-4 w-4" /> Apagar tudo
++          </ConfirmButton>
++        </div>
++      )}
+       {rows.length === 0 ? (
+-        <p className="mt-3 text-sm text-muted-foreground">Nenhum aviso enviado ainda.</p>
++        <p className="mt-3 text-sm text-muted-foreground">Nenhum aviso no histórico.</p>
+       ) : (
+         <ul className="mt-4 space-y-2">
+           {rows.map((r) => (
+-            <li key={r.id} className="rounded-xl border bg-card p-4 text-sm">
+-              <p className="font-medium text-foreground">{r.title}</p>
+-              {r.body && <p className="text-muted-foreground">{r.body}</p>}
+-              <p className="mt-1 text-xs text-muted-foreground">
+-                {new Date(r.created_at).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" })} · {r.kind === "auto" ? "automático" : "manual"} ·{" "}
+-                {r.sent} de {r.devices} {r.devices === 1 ? "aparelho" : "aparelhos"}
+-                {r.failed > 0 ? ` (${r.failed} falharam)` : ""}
+-              </p>
++            <li key={r.id} className="flex items-start gap-3 rounded-xl border bg-card p-4 text-sm">
++              <div className="min-w-0 flex-1">
++                <p className="font-medium text-foreground">{r.title}</p>
++                {r.body && <p className="text-muted-foreground">{r.body}</p>}
++                <p className="mt-1 text-xs text-muted-foreground">
++                  {new Date(r.created_at).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" })} · {r.kind === "auto" ? "automático" : "manual"} ·{" "}
++                  {r.sent} de {r.devices} {r.devices === 1 ? "aparelho" : "aparelhos"}
++                  {r.failed > 0 ? ` (${r.failed} falharam)` : ""}
++                </p>
++              </div>
++              <ConfirmButton
++                variant="ghost"
++                disabled={removeOne.isPending}
++                ariaLabel={`Apagar o aviso ${r.title} do histórico`}
++                title="Apagar este aviso do histórico?"
++                description={`“${r.title}” sai do histórico de todos. Não cancela o que já foi enviado.`}
++                confirmLabel="Apagar"
++                onConfirm={() => removeOne.mutate(r.id)}
++              >
++                <Trash2 className="h-4 w-4" /> Excluir
++              </ConfirmButton>
+             </li>
+           ))}
+         </ul>
+       )}
++      {rows.length >= limit && (
++        <Button type="button" variant="outline" className="mt-4" onClick={() => setLimit((l) => l + 30)}>
++          Mostrar mais antigos
++        </Button>
++      )}
+     </section>
+   );
+ }
+diff --git a/src/test/push-history.test.tsx b/src/test/push-history.test.tsx
+new file mode 100644
+index 0000000..6eb90d6
+--- /dev/null
++++ b/src/test/push-history.test.tsx
+@@ -0,0 +1,67 @@
++import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
++import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
++import type { ReactNode } from "react";
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++
++const h = vi.hoisted(() => ({ rpc: vi.fn(), toast: { success: vi.fn(), error: vi.fn(), message: vi.fn() } }));
++const rows = [
++  { id: "n1", kind: "manual", title: "Culto mudou", body: "Agora às 19h", audience: { type: "all" }, devices: 3, sent: 3, failed: 0, created_at: "2026-10-20T12:00:00Z" },
++  { id: "n2", kind: "auto", title: "Novo evento: Retiro", body: "", audience: { type: "all" }, devices: 2, sent: 1, failed: 1, created_at: "2026-10-21T12:00:00Z" },
++];
++
++vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
++vi.mock("@/integrations/supabase/client", () => ({
++  supabase: {
++    rpc: (...a: unknown[]) => h.rpc(...a),
++    functions: { invoke: vi.fn() },
++    from: (table: string) =>
++      table === "push_notifications"
++        ? { select: () => ({ order: () => ({ limit: async () => ({ data: rows, error: null }) }) }) }
++        : { select: () => ({ order: async () => ({ data: [], error: null }) }) },
++  },
++}));
++vi.mock("sonner", () => ({ toast: h.toast }));
++vi.mock("@tanstack/react-router", () => ({ createFileRoute: () => (cfg: object) => ({ ...cfg }) }));
++vi.mock("@/hooks/use-access", () => ({ useAccess: () => ({ isLoading: false, can: () => true }) }));
++vi.mock("@/lib/site-query", () => ({ siteMeta: () => ({}) }));
++
++import { Route } from "@/routes/_authenticated/painel.notificacoes";
++
++const Page = (Route as unknown as { component: () => ReactNode }).component;
++const wrap = (ui: ReactNode) => <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>{ui}</QueryClientProvider>;
++
++beforeEach(() => h.rpc.mockResolvedValue({ data: 1, error: null }));
++afterEach(() => {
++  cleanup();
++  vi.clearAllMocks();
++});
++
++describe("histórico de avisos: excluir", () => {
++  it("apaga um aviso só depois de confirmar", async () => {
++    render(wrap(<Page />));
++    await screen.findByText("Culto mudou");
++    fireEvent.click(screen.getByRole("button", { name: /Apagar o aviso Culto mudou do histórico/ }));
++    const dialog = await screen.findByRole("alertdialog");
++    expect(h.rpc).not.toHaveBeenCalledWith("delete_push_history", expect.anything());
++    fireEvent.click(within(dialog).getByRole("button", { name: "Apagar" }));
++    await waitFor(() => expect(h.rpc).toHaveBeenCalledWith("delete_push_history", { _ids: ["n1"] }));
++  });
++
++  it("limpa os registros com mais de 30 dias", async () => {
++    render(wrap(<Page />));
++    await screen.findByText("Culto mudou");
++    fireEvent.click(screen.getByRole("button", { name: "Apagar com mais de 30 dias" }));
++    fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Apagar antigos" }));
++    await waitFor(() => expect(h.rpc).toHaveBeenCalledWith("clear_push_history", { _older_than_days: 30 }));
++  });
++
++  it("apaga todo o histórico (de todos) com confirmação", async () => {
++    render(wrap(<Page />));
++    await screen.findByText("Culto mudou");
++    fireEvent.click(screen.getByRole("button", { name: /Apagar tudo/ }));
++    const dialog = await screen.findByRole("alertdialog");
++    expect(within(dialog).getByText(/de todos/)).toBeTruthy();
++    fireEvent.click(within(dialog).getByRole("button", { name: "Apagar tudo" }));
++    await waitFor(() => expect(h.rpc).toHaveBeenCalledWith("clear_push_history", {}));
++  });
++});
+diff --git a/src/test/push.test.tsx b/src/test/push.test.tsx
+index ce73e35..b0b451d 100644
+--- a/src/test/push.test.tsx
++++ b/src/test/push.test.tsx
+@@ -100,7 +100,7 @@ describe("service worker (public/sw.js)", () => {
+     w.listeners["push"]!({ ...e, data: { json: () => ({ title: "Novo evento: Culto", body: "12/11 às 19h", url: "/eventos/culto", tag: "evento-1" }) } });
+     await e.done();
+     expect(w.shown[0]!.title).toBe("Novo evento: Culto");
+-    expect(w.shown[0]!.opts).toMatchObject({ body: "12/11 às 19h", tag: "evento-1", data: { url: "/eventos/culto" }, icon: "/icon-192.png", badge: "/badge-96.png" });
++    expect(w.shown[0]!.opts).toMatchObject({ body: "12/11 às 19h", tag: "evento-1", data: { url: "/eventos/culto" }, icon: "/icon-192.png", badge: "/badge-96.png", renotify: true, vibrate: [200, 100, 200] });
+   });
+ 
+   it("aviso sem dados ainda mostra algo útil em vez de falhar", async () => {
+@@ -215,6 +215,17 @@ describe("cartão de notificações (Meu cadastro)", () => {
+     await waitFor(() => expect(h.invoke).toHaveBeenCalledWith("push", { body: { action: "test" } }));
+   });
+ 
++  it("ligado: 'Testar com o app fechado' agenda o envio e mostra a ajuda de bateria", async () => {
++    fakeBrowser({ permission: "granted", subscribed: true });
++    h.invoke.mockResolvedValue({ data: { scheduled: true, delaySeconds: 20 }, error: null });
++    render(<PushToggle />);
++    fireEvent.click(await screen.findByText("Testar com o app fechado"));
++    await waitFor(() => expect(h.invoke).toHaveBeenCalledWith("push", { body: { action: "test", delaySeconds: 20 } }));
++    await waitFor(() => expect(h.toast.success).toHaveBeenCalledWith(expect.stringContaining("feche o app"), expect.anything()));
++    expect(screen.getByText(/não chega com o app fechado/)).toBeTruthy();
++    expect(screen.getByText(/Sem restrições/)).toBeTruthy();
++  });
++
+   it("bloqueado no navegador: explica como liberar", async () => {
+     fakeBrowser({ permission: "denied" });
+     render(<PushToggle />);
+diff --git a/src/test/shifts.test.tsx b/src/test/shifts.test.tsx
+index e1cb7c6..1971488 100644
+--- a/src/test/shifts.test.tsx
++++ b/src/test/shifts.test.tsx
+@@ -229,7 +229,8 @@ describe("calendário da escala do departamento", () => {
+     expect(screen.getByRole("button", { name: /Escalar este dia/ })).toBeTruthy();
+     await open();
+     await screen.findByRole("button", { name: /Editar/ });
+-    expect(screen.getByRole("button", { name: "Apagar escala" })).toBeTruthy();
++    expect(screen.getByRole("button", { name: /Excluir escala/ })).toBeTruthy();
++    expect(screen.getByRole("button", { name: "Remover Ana Souza da escala" })).toBeTruthy();
+     expect(screen.getByRole("button", { name: /Manter na escala/ })).toBeTruthy();
+     expect(screen.getByText("Ciente")).toBeTruthy();
+   });
+@@ -250,12 +251,51 @@ describe("calendário da escala do departamento", () => {
+     await screen.findByText(/Ana Souza \(você\)/);
+     expect(screen.queryByRole("button", { name: /Escalar este dia/ })).toBeNull();
+     expect(screen.queryByRole("button", { name: /Editar/ })).toBeNull();
+-    expect(screen.queryByRole("button", { name: "Apagar escala" })).toBeNull();
++    expect(screen.queryByRole("button", { name: /Excluir escala/ })).toBeNull();
++    expect(screen.queryByRole("button", { name: /Remover .* da escala/ })).toBeNull();
+     expect(screen.queryByText(/pedido de alteração aguardando/)).toBeNull();
+     fireEvent.click(screen.getByRole("button", { name: /Estou ciente/ }));
+     await waitFor(() => expect(h.rpc).toHaveBeenCalledWith("ack_shift", { _shift: "s1" }));
+   });
+ 
++  it("líder exclui a escala inteira, com confirmação dentro do app", async () => {
++    serve([row({}), row({ member_id: "bia", member_name: "Bia Lima" })]);
++    render(wrap(<DeptSchedule dept={{ id: "d1", name: "Louvor", can_manage: true }} />));
++    await open();
++    fireEvent.click(await screen.findByRole("button", { name: /Excluir escala/ }));
++    const dialog = await screen.findByRole("alertdialog");
++    expect(within(dialog).getByText(/serão avisados/)).toBeTruthy();
++    expect(h.rpc).not.toHaveBeenCalledWith("delete_shift", expect.anything()); // ainda não apagou
++    fireEvent.click(within(dialog).getByRole("button", { name: "Excluir escala" }));
++    await waitFor(() => expect(h.rpc).toHaveBeenCalledWith("delete_shift", { _shift: "s1" }));
++  });
++
++  it("líder tira uma pessoa da escala; cancelar não apaga nada", async () => {
++    serve([row({}), row({ member_id: "bia", member_name: "Bia Lima" })]);
++    render(wrap(<DeptSchedule dept={{ id: "d1", name: "Louvor", can_manage: true }} />));
++    await open();
++    fireEvent.click(await screen.findByRole("button", { name: "Remover Bia Lima da escala" }));
++    let dialog = await screen.findByRole("alertdialog");
++    fireEvent.click(within(dialog).getByRole("button", { name: "Cancelar" }));
++    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
++    expect(h.rpc).not.toHaveBeenCalledWith("remove_shift_member", expect.anything());
++
++    fireEvent.click(screen.getByRole("button", { name: "Remover Bia Lima da escala" }));
++    dialog = await screen.findByRole("alertdialog");
++    expect(within(dialog).getByText(/é avisada no celular/)).toBeTruthy();
++    fireEvent.click(within(dialog).getByRole("button", { name: "Remover" }));
++    await waitFor(() => expect(h.rpc).toHaveBeenCalledWith("remove_shift_member", { _shift: "s1", _member: "bia" }));
++  });
++
++  it("tirar a última pessoa avisa que a escala do culto será apagada", async () => {
++    serve([row({})]);
++    render(wrap(<DeptSchedule dept={{ id: "d1", name: "Louvor", can_manage: true }} />));
++    await open();
++    fireEvent.click(await screen.findByRole("button", { name: "Remover Ana Souza da escala" }));
++    const dialog = await screen.findByRole("alertdialog");
++    expect(within(dialog).getByText(/última pessoa escalada/)).toBeTruthy();
++  });
++
+   it("líder marca o ciente de quem não tem conta", async () => {
+     serve([row({ has_account: false, member_name: "Dona Maria" })]);
+     render(wrap(<DeptSchedule dept={{ id: "d1", name: "Louvor", can_manage: true }} />));
+diff --git a/supabase/functions/push/index.ts b/supabase/functions/push/index.ts
+index ed9ad46..e0bcc48 100644
+--- a/supabase/functions/push/index.ts
++++ b/supabase/functions/push/index.ts
+@@ -71,7 +71,9 @@ export async function deliver(cfg: Config, n: Notice) {
+     while (next < subs.length) {
+       const s = subs[next++]!;
+       try {
+-        await webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, payload, { TTL: 60 * 60 * 24, urgency: "normal" });
++        // urgency "high": o Android entrega na hora, mesmo com o celular parado e o app fechado.
++        // Com "normal", o Google segura a mensagem até a pessoa abrir o app (era o problema).
++        await webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, payload, { TTL: 60 * 60 * 24, urgency: "high" });
+         sent++;
+       } catch (e) {
+         failed++;
+@@ -90,6 +92,8 @@ export async function deliver(cfg: Config, n: Notice) {
+       kind: n.kind, title: n.title, body: n.body, url: n.url, audience: n.audience,
+       created_by: n.createdBy ?? null, ...result,
+     });
++    // Mantém o histórico enxuto: registros com mais de 90 dias são apagados sozinhos.
++    await admin.from("push_notifications").delete().lt("created_at", new Date(Date.now() - 90 * 86400_000).toISOString());
+   }
+   return result;
+ }
+@@ -134,10 +138,23 @@ Deno.serve(async (req) => {
+     if (!user) return json({ error: "login_required" }, 401);
+ 
+     if (body.action === "test") {
+-      return json(await deliver(cfg, {
++      // delaySeconds (até 60): responde na hora e envia depois, para dar tempo de fechar o app e bloquear a tela.
++      const delay = Math.min(Math.max(Math.floor(Number(body.delaySeconds) || 0), 0), 60);
++      const notice: Notice = {
+         audience: { type: "user", id: user.id }, kind: "test", url: "/painel",
+-        title: "Notificações ativadas", body: "Tudo certo! Você vai receber os avisos da Aava neste aparelho.",
+-      }));
++        title: delay > 0 ? "Teste com o app fechado" : "Notificações ativadas",
++        body: delay > 0 ? "Chegou! Os avisos da Aava funcionam mesmo com o app fechado." : "Tudo certo! Você vai receber os avisos da Aava neste aparelho.",
++      };
++      const bg = (globalThis as { EdgeRuntime?: { waitUntil(p: Promise<unknown>): void } }).EdgeRuntime;
++      if (delay > 0 && bg) {
++        bg.waitUntil(
++          new Promise((r) => setTimeout(r, delay * 1000))
++            .then(() => deliver(cfg, notice))
++            .catch((e) => console.error("teste atrasado falhou", e)),
++        );
++        return json({ scheduled: true, delaySeconds: delay });
++      }
++      return json(await deliver(cfg, notice));
+     }
+ 
+     if (body.action === "send") {

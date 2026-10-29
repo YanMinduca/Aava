@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DeptSchedule } from "@/components/shifts/DeptSchedule";
 import { MyShiftActions, useMyShifts } from "@/components/shifts/MyShifts";
+import { useAccess } from "@/hooks/use-access";
 import { fmtShiftLong, fmtShiftTime } from "@/lib/shifts";
 
 export const Route = createFileRoute("/_authenticated/painel/escalas")({
@@ -31,6 +32,7 @@ function ShiftsPage() {
   const navigate = Route.useNavigate();
   const depts = useShiftDepartments();
   const mine = useMyShifts(20);
+  const { isFullAccess } = useAccess();
 
   if (depts.isLoading) return <p className="text-muted-foreground">Carregando...</p>;
   const list = depts.data ?? [];
@@ -49,7 +51,7 @@ function ShiftsPage() {
       <h1 className="text-3xl text-foreground">Escalas</h1>
       <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
         {current.can_manage
-          ? "Você é líder: escolha o dia no calendário e marque os voluntários. Os voluntários só veem a escala, dão ciente ou pedem alteração."
+          ? `Você é líder: escolha o dia no calendário e marque os voluntários. Os voluntários só veem a escala, dão ciente ou pedem alteração.${isFullAccess ? "" : " Você vê apenas o seu departamento."}`
           : "Veja quando você está escalado, dê o seu ciente ou peça alteração informando o motivo."}
       </p>
 

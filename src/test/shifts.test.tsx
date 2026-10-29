@@ -229,7 +229,8 @@ describe("calendário da escala do departamento", () => {
     expect(screen.getByRole("button", { name: /Escalar este dia/ })).toBeTruthy();
     await open();
     await screen.findByRole("button", { name: /Editar/ });
-    expect(screen.getByRole("button", { name: "Apagar escala" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Excluir escala/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Remover Ana Souza da escala" })).toBeTruthy();
     expect(screen.getByRole("button", { name: /Manter na escala/ })).toBeTruthy();
     expect(screen.getByText("Ciente")).toBeTruthy();
   });
@@ -250,10 +251,49 @@ describe("calendário da escala do departamento", () => {
     await screen.findByText(/Ana Souza \(você\)/);
     expect(screen.queryByRole("button", { name: /Escalar este dia/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /Editar/ })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Apagar escala" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Excluir escala/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Remover .* da escala/ })).toBeNull();
     expect(screen.queryByText(/pedido de alteração aguardando/)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /Estou ciente/ }));
     await waitFor(() => expect(h.rpc).toHaveBeenCalledWith("ack_shift", { _shift: "s1" }));
+  });
+
+  it("líder exclui a escala inteira, com confirmação dentro do app", async () => {
+    serve([row({}), row({ member_id: "bia", member_name: "Bia Lima" })]);
+    render(wrap(<DeptSchedule dept={{ id: "d1", name: "Louvor", can_manage: true }} />));
+    await open();
+    fireEvent.click(await screen.findByRole("button", { name: /Excluir escala/ }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(/serão avisados/)).toBeTruthy();
+    expect(h.rpc).not.toHaveBeenCalledWith("delete_shift", expect.anything()); // ainda não apagou
+    fireEvent.click(within(dialog).getByRole("button", { name: "Excluir escala" }));
+    await waitFor(() => expect(h.rpc).toHaveBeenCalledWith("delete_shift", { _shift: "s1" }));
+  });
+
+  it("líder tira uma pessoa da escala; cancelar não apaga nada", async () => {
+    serve([row({}), row({ member_id: "bia", member_name: "Bia Lima" })]);
+    render(wrap(<DeptSchedule dept={{ id: "d1", name: "Louvor", can_manage: true }} />));
+    await open();
+    fireEvent.click(await screen.findByRole("button", { name: "Remover Bia Lima da escala" }));
+    let dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancelar" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(h.rpc).not.toHaveBeenCalledWith("remove_shift_member", expect.anything());
+
+    fireEvent.click(screen.getByRole("button", { name: "Remover Bia Lima da escala" }));
+    dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(/é avisada no celular/)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Remover" }));
+    await waitFor(() => expect(h.rpc).toHaveBeenCalledWith("remove_shift_member", { _shift: "s1", _member: "bia" }));
+  });
+
+  it("tirar a última pessoa avisa que a escala do culto será apagada", async () => {
+    serve([row({})]);
+    render(wrap(<DeptSchedule dept={{ id: "d1", name: "Louvor", can_manage: true }} />));
+    await open();
+    fireEvent.click(await screen.findByRole("button", { name: "Remover Ana Souza da escala" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(/última pessoa escalada/)).toBeTruthy();
   });
 
   it("líder marca o ciente de quem não tem conta", async () => {

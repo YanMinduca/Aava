@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Send } from "lucide-react";
+import { Send, Trash2 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { siteMeta } from "@/lib/site-query";
 import { useAccess } from "@/hooks/use-access";
@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { ConfirmButton } from "@/components/ConfirmDialog";
 
 export const Route = createFileRoute("/_authenticated/painel/notificacoes")({
   head: () => siteMeta("Avisos por notificação — Área de membros Aava", "Envie avisos por notificação push para os membros."),
@@ -143,38 +144,110 @@ function Composer() {
 }
 
 function History() {
+  const qc = useQueryClient();
+  const [limit, setLimit] = useState(30);
   const q = useQuery({
-    queryKey: ["push-history"],
+    queryKey: ["push-history", limit],
     queryFn: async () => {
       const { data, error } = await supabase
         .from("push_notifications")
         .select("id, kind, title, body, audience, devices, sent, failed, created_at")
         .order("created_at", { ascending: false })
-        .limit(30);
+        .limit(limit);
       if (error) throw error;
       return data ?? [];
     },
   });
+
+  const refresh = () => void qc.invalidateQueries({ queryKey: ["push-history"] });
+  const removeOne = useMutation({
+    mutationFn: async (id: string) => {
+      const { error } = await supabase.rpc("delete_push_history", { _ids: [id] });
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      toast.success("Aviso apagado do histórico.");
+      refresh();
+    },
+    onError: () => toast.error("Não foi possível apagar agora."),
+  });
+  const clear = useMutation({
+    mutationFn: async (olderThanDays: number | null) => {
+      const { data, error } = await supabase.rpc("clear_push_history", olderThanDays === null ? {} : { _older_than_days: olderThanDays });
+      if (error) throw error;
+      return data ?? 0;
+    },
+    onSuccess: (n) => {
+      toast.success(n === 0 ? "Nada para apagar." : `${n} ${n === 1 ? "registro apagado" : "registros apagados"} do histórico.`);
+      refresh();
+    },
+    onError: () => toast.error("Não foi possível apagar agora."),
+  });
+
   const rows = q.data ?? [];
   return (
     <section className="mt-10 max-w-2xl">
       <h2 className="font-display text-xl text-foreground">Últimos avisos enviados</h2>
+      <p className="mt-1 text-sm text-muted-foreground">
+        Este histórico é de todos que enviam avisos: apagar aqui apaga para todos. Registros com mais de 90 dias são apagados sozinhos.
+      </p>
+      {rows.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          <ConfirmButton
+            disabled={clear.isPending}
+            title="Apagar registros antigos?"
+            description="Apaga do histórico todos os avisos com mais de 30 dias. Isso não cancela nada que já foi enviado."
+            confirmLabel="Apagar antigos"
+            onConfirm={() => clear.mutate(30)}
+          >
+            Apagar com mais de 30 dias
+          </ConfirmButton>
+          <ConfirmButton
+            variant="destructive"
+            disabled={clear.isPending}
+            title="Apagar todo o histórico?"
+            description="Apaga o histórico de avisos de todos. Isso não cancela nada que já foi enviado e não dá para desfazer."
+            confirmLabel="Apagar tudo"
+            onConfirm={() => clear.mutate(null)}
+          >
+            <Trash2 className="h-4 w-4" /> Apagar tudo
+          </ConfirmButton>
+        </div>
+      )}
       {rows.length === 0 ? (
-        <p className="mt-3 text-sm text-muted-foreground">Nenhum aviso enviado ainda.</p>
+        <p className="mt-3 text-sm text-muted-foreground">Nenhum aviso no histórico.</p>
       ) : (
         <ul className="mt-4 space-y-2">
           {rows.map((r) => (
-            <li key={r.id} className="rounded-xl border bg-card p-4 text-sm">
-              <p className="font-medium text-foreground">{r.title}</p>
-              {r.body && <p className="text-muted-foreground">{r.body}</p>}
-              <p className="mt-1 text-xs text-muted-foreground">
-                {new Date(r.created_at).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" })} · {r.kind === "auto" ? "automático" : "manual"} ·{" "}
-                {r.sent} de {r.devices} {r.devices === 1 ? "aparelho" : "aparelhos"}
-                {r.failed > 0 ? ` (${r.failed} falharam)` : ""}
-              </p>
+            <li key={r.id} className="flex items-start gap-3 rounded-xl border bg-card p-4 text-sm">
+              <div className="min-w-0 flex-1">
+                <p className="font-medium text-foreground">{r.title}</p>
+                {r.body && <p className="text-muted-foreground">{r.body}</p>}
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {new Date(r.created_at).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" })} · {r.kind === "auto" ? "automático" : "manual"} ·{" "}
+                  {r.sent} de {r.devices} {r.devices === 1 ? "aparelho" : "aparelhos"}
+                  {r.failed > 0 ? ` (${r.failed} falharam)` : ""}
+                </p>
+              </div>
+              <ConfirmButton
+                variant="ghost"
+                disabled={removeOne.isPending}
+                ariaLabel={`Apagar o aviso ${r.title} do histórico`}
+                title="Apagar este aviso do histórico?"
+                description={`“${r.title}” sai do histórico de todos. Não cancela o que já foi enviado.`}
+                confirmLabel="Apagar"
+                onConfirm={() => removeOne.mutate(r.id)}
+              >
+                <Trash2 className="h-4 w-4" /> Excluir
+              </ConfirmButton>
             </li>
           ))}
         </ul>
+      )}
+      {rows.length >= limit && (
+        <Button type="button" variant="outline" className="mt-4" onClick={() => setLimit((l) => l + 30)}>
+          Mostrar mais antigos
+        </Button>
       )}
     </section>
   );

@@ -20,6 +20,9 @@ self.addEventListener("push", (event) => {
       badge: "/badge-96.png",
       // Mesma "tag" = a notificação nova substitui a anterior do mesmo assunto, sem empilhar repetidas.
       tag: data.tag || undefined,
+      // Com a mesma "tag" (ex.: escala alterada), a nova notificação substitui a antiga mas avisa de novo.
+      renotify: Boolean(data.tag),
+      vibrate: [200, 100, 200],
       data: { url: data.url || "/painel" },
     }),
   );

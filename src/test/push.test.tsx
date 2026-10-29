@@ -100,7 +100,7 @@ describe("service worker (public/sw.js)", () => {
     w.listeners["push"]!({ ...e, data: { json: () => ({ title: "Novo evento: Culto", body: "12/11 às 19h", url: "/eventos/culto", tag: "evento-1" }) } });
     await e.done();
     expect(w.shown[0]!.title).toBe("Novo evento: Culto");
-    expect(w.shown[0]!.opts).toMatchObject({ body: "12/11 às 19h", tag: "evento-1", data: { url: "/eventos/culto" }, icon: "/icon-192.png", badge: "/badge-96.png" });
+    expect(w.shown[0]!.opts).toMatchObject({ body: "12/11 às 19h", tag: "evento-1", data: { url: "/eventos/culto" }, icon: "/icon-192.png", badge: "/badge-96.png", renotify: true, vibrate: [200, 100, 200] });
   });
 
   it("aviso sem dados ainda mostra algo útil em vez de falhar", async () => {
@@ -213,6 +213,17 @@ describe("cartão de notificações (Meu cadastro)", () => {
     fireEvent.click(await screen.findByText("Ativar notificações"));
     await waitFor(() => expect(h.rpc).toHaveBeenCalledWith("save_push_subscription", expect.anything()));
     await waitFor(() => expect(h.invoke).toHaveBeenCalledWith("push", { body: { action: "test" } }));
+  });
+
+  it("ligado: 'Testar com o app fechado' agenda o envio e mostra a ajuda de bateria", async () => {
+    fakeBrowser({ permission: "granted", subscribed: true });
+    h.invoke.mockResolvedValue({ data: { scheduled: true, delaySeconds: 20 }, error: null });
+    render(<PushToggle />);
+    fireEvent.click(await screen.findByText("Testar com o app fechado"));
+    await waitFor(() => expect(h.invoke).toHaveBeenCalledWith("push", { body: { action: "test", delaySeconds: 20 } }));
+    await waitFor(() => expect(h.toast.success).toHaveBeenCalledWith(expect.stringContaining("feche o app"), expect.anything()));
+    expect(screen.getByText(/não chega com o app fechado/)).toBeTruthy();
+    expect(screen.getByText(/Sem restrições/)).toBeTruthy();
   });
 
   it("bloqueado no navegador: explica como liberar", async () => {

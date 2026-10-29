@@ -42,6 +42,14 @@ export function PushToggle() {
       else toast.success("Teste enviado. Deve chegar em instantes.");
     });
 
+  const testClosed = () =>
+    run(async () => {
+      const r = await sendTestPush(20);
+      if (r.scheduled) toast.success("Agora feche o app e bloqueie a tela. Em cerca de 20 segundos chega uma notificação.", { duration: 8000 });
+      else if (r.sent === 0) toast.error("Nenhum aparelho respondeu ao teste. Desative e ative de novo.");
+      else toast.success("Teste enviado. Deve chegar em instantes.");
+    });
+
   if (!state) return null;
 
   return (
@@ -94,10 +102,35 @@ export function PushToggle() {
             <Button variant="outline" disabled={busy} onClick={test}>
               Enviar um teste
             </Button>
+            <Button variant="outline" disabled={busy} onClick={testClosed}>
+              Testar com o app fechado
+            </Button>
             <Button variant="ghost" disabled={busy} onClick={turnOff}>
               Desativar neste aparelho
             </Button>
           </div>
+          <details className="mt-4 rounded-lg border bg-muted/30 p-3 text-muted-foreground">
+            <summary className="cursor-pointer font-medium text-foreground">A notificação não chega com o app fechado?</summary>
+            <div className="mt-2 space-y-2">
+              <p>Alguns celulares Android economizam bateria parando os apps em segundo plano. Libere o navegador (e o app da Aava, se instalado):</p>
+              <ol className="list-decimal space-y-1 pl-5">
+                <li>
+                  Abra <strong>Configurações → Apps</strong> e toque em <strong>Chrome</strong> (e em <strong>Aava</strong>, se estiver instalado).
+                </li>
+                <li>
+                  Em <strong>Bateria</strong>, escolha <strong>Sem restrições</strong> (ou “Irrestrito”).
+                </li>
+                <li>
+                  Desative <strong>“Pausar atividade do app se não for usado”</strong> / “Remover permissões se o app não for usado”.
+                </li>
+                <li>
+                  <strong>Samsung:</strong> Bateria → Limites de uso em segundo plano → tire o Chrome de “Apps em suspensão”. <strong>Xiaomi/Redmi:</strong> ative “Início automático” para o Chrome.
+                </li>
+                <li>Desligue a economia de bateria e a economia de dados enquanto testa.</li>
+              </ol>
+              <p>Depois toque em “Testar com o app fechado”, feche o app e bloqueie a tela.</p>
+            </div>
+          </details>
         </>
       )}
     </section>

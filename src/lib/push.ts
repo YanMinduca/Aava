@@ -111,10 +111,13 @@ export async function forgetPushDevice() {
   if (sub) await supabase.rpc("delete_push_subscription", { _endpoint: sub.endpoint });
 }
 
-export async function sendTestPush() {
-  const { data, error } = await supabase.functions.invoke<{ devices: number; sent: number }>("push", { body: { action: "test" } });
+/** Teste imediato; com `delaySeconds` o servidor envia depois (dá tempo de fechar o app e bloquear a tela). */
+export async function sendTestPush(delaySeconds = 0) {
+  const { data, error } = await supabase.functions.invoke<{ devices?: number; sent?: number; scheduled?: boolean }>("push", {
+    body: delaySeconds > 0 ? { action: "test", delaySeconds } : { action: "test" },
+  });
   if (error) throw error;
-  return data ?? { devices: 0, sent: 0 };
+  return { devices: data?.devices ?? 0, sent: data?.sent ?? 0, scheduled: data?.scheduled === true };
 }
 
 export function pushErrorMessage(e: unknown): string {
