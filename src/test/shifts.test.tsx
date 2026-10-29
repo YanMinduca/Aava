@@ -20,6 +20,7 @@ import {
 import { NextShiftCard } from "@/components/shifts/MyShifts";
 import { ShiftEditor } from "@/components/shifts/ShiftEditor";
 import { DeptSchedule } from "@/components/shifts/DeptSchedule";
+import { MonthGrid, gridBounds } from "@/components/shifts/MonthGrid";
 
 // O jsdom não tem ResizeObserver (os navegadores têm); os checkboxes do Radix dentro de formulário precisam dele.
 vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
@@ -213,13 +214,13 @@ describe("editor da escala (líder)", () => {
 });
 
 describe("calendário da escala do departamento", () => {
-  const date = ahead(6);
+  const date = toISODate(new Date()); // hoje já vem selecionado: o cartão do dia aparece sem clicar
   const row = (o: Partial<ShiftRow>): ShiftRow => ({
     shift_id: "s1", shift_date: date, service_name: "Culto de Celebração", service_time: "18:00:00", notes: null, member_id: "ana", member_name: "Ana Souza",
     has_account: true, status: "pending", acknowledged_at: null, change_reason: null, change_requested_at: null, leader_note: null, is_me: false, ...o,
   });
   const serve = (rows: ShiftRow[]) => h.rpc.mockImplementation(async (fn: string) => (fn === "dept_schedule" ? { data: rows, error: null } : { data: [], error: null }));
-  const open = async () => fireEvent.click(await screen.findByRole("button", { name: /Culto de Celebração/ }));
+  const open = async () => void (await screen.findByRole("heading", { name: "Culto de Celebração" }));
 
   it("líder: vê pedidos de alteração com o motivo e pode escalar, editar e apagar", async () => {
     serve([row({ status: "change_requested", change_reason: "Estarei viajando" }), row({ member_id: "bia", member_name: "Bia Lima", status: "confirmed" })]);
@@ -308,3 +309,79 @@ describe("calendário da escala do departamento", () => {
 // garante que o tipo Shift continua exportado para os componentes
 const _typecheck: Shift | null = null;
 void _typecheck;
+
+
+describe("calendário grande (MonthGrid)", () => {
+  const today = toISODate(new Date());
+  const member = (name: string, over: object = {}) => ({ memberId: name, name, hasAccount: true, status: "pending" as const, acknowledgedAt: null, changeReason: null, changeRequestedAt: null, leaderNote: null, isMe: false, ...over });
+  const shift = (names: string[], over: Partial<Shift> = {}): Shift => ({ id: "s1", date: today, name: "Culto de Celebração", time: "18:00:00", notes: null, members: names.map((n) => member(n)), ...over });
+  const cell = (iso: string) => document.querySelector(`[data-day="${iso}"]`) as HTMLElement;
+  const render_ = (shifts: Shift[], fns: { onSelect?: (d: Date) => void; onMonthChange?: (d: Date) => void } = {}) =>
+    render(<MonthGrid month={new Date()} shifts={shifts} selected={new Date()} today={today} onSelect={fns.onSelect ?? (() => {})} onMonthChange={fns.onMonthChange ?? (() => {})} />);
+
+  it("mostra o nome de cada voluntário dentro do dia e o horário do culto", () => {
+    render_([shift(["Ana Souza", "Bia Lima"])]);
+    const c = within(cell(today));
+    expect(c.getAllByText("Ana Souza").length).toBeGreaterThan(0);
+    expect(c.getAllByText("Bia Lima").length).toBeGreaterThan(0);
+    expect(c.getByText(/18h00/)).toBeTruthy();
+    // os outros dias do mês continuam vazios
+    const other = [...document.querySelectorAll("[data-day]")].find((e) => e.getAttribute("data-day") !== today) as HTMLElement;
+    expect(within(other).queryByText("Ana Souza")).toBeNull();
+  });
+
+  it("dias com culto têm outra cor que os dias sem culto; e o meu dia tem uma cor própria", () => {
+    const { rerender } = render_([shift(["Ana Souza"])]);
+    expect(cell(today).getAttribute("data-has-shift")).toBe("true");
+    expect(cell(today).className).toContain("bg-primary-soft");
+    const empty = [...document.querySelectorAll('[data-has-shift="false"]')].find((e) => e.className.includes("bg-muted/30")) as HTMLElement;
+    expect(empty).toBeTruthy();
+    expect(empty.className).not.toContain("bg-primary-soft");
+
+    rerender(<MonthGrid month={new Date()} shifts={[shift([], { members: [member("Eu", { isMe: true })] })]} selected={new Date()} today={today} onSelect={() => {}} onMonthChange={() => {}} />);
+    expect(cell(today).className).toContain("bg-primary/20");
+    expect(within(cell(today)).getAllByText("Eu")[0]!.closest("span[class*='font-bold']")).toBeTruthy();
+  });
+
+  it("muitos voluntários no mesmo culto: mostra os primeiros e '+N pessoas'", () => {
+    render_([shift(["A1 Silva", "A2 Silva", "A3 Silva", "A4 Silva", "A5 Silva", "A6 Silva"])]);
+    expect(within(cell(today)).getByText("+2 pessoas")).toBeTruthy();
+    expect(within(cell(today)).queryByText("A5 Silva")).toBeNull();
+  });
+
+  it("dois cultos no mesmo dia aparecem em ordem de horário", () => {
+    render_([shift(["Ana Souza"], { id: "tarde", time: "18:00:00", name: "Celebração" }), shift(["Caio Alves"], { id: "manha", time: "09:00:00", name: "Escola Bíblica" })]);
+    const text = cell(today).textContent ?? "";
+    expect(text.indexOf("09h00")).toBeGreaterThan(-1);
+    expect(text.indexOf("09h00")).toBeLessThan(text.indexOf("18h00"));
+  });
+
+  it("tem descrição acessível com a quantidade de cultos e voluntários", () => {
+    render_([shift(["Ana Souza", "Bia Lima"])]);
+    expect(screen.getByRole("button", { name: /1 culto escalado, 2 voluntários/ })).toBeTruthy();
+  });
+
+  it("clicar num dia seleciona; as setas e o 'Hoje' trocam o mês", () => {
+    const onSelect = vi.fn();
+    const onMonthChange = vi.fn();
+    render_([], { onSelect, onMonthChange });
+    fireEvent.click(cell(today));
+    expect(toISODate(onSelect.mock.calls[0]![0] as Date)).toBe(today);
+    const now = new Date();
+    fireEvent.click(screen.getByRole("button", { name: "Mês anterior" }));
+    expect(toISODate(onMonthChange.mock.calls[0]![0] as Date)).toBe(toISODate(new Date(now.getFullYear(), now.getMonth() - 1, 1)));
+    fireEvent.click(screen.getByRole("button", { name: "Próximo mês" }));
+    expect(toISODate(onMonthChange.mock.calls[1]![0] as Date)).toBe(toISODate(new Date(now.getFullYear(), now.getMonth() + 1, 1)));
+    fireEvent.click(screen.getByRole("button", { name: "Hoje" }));
+    expect(toISODate(onMonthChange.mock.calls[2]![0] as Date)).toBe(today);
+  });
+
+  it("a grade usa semanas inteiras (domingo a sábado)", () => {
+    const nov = gridBounds(new Date(2026, 10, 1)); // 1º de novembro de 2026 é domingo
+    expect([toISODate(nov.start), toISODate(nov.end), nov.weeks]).toEqual(["2026-11-01", "2026-12-05", 5]);
+    const fev = gridBounds(new Date(2026, 1, 1)); // fevereiro de 2026: 4 semanas exatas
+    expect([toISODate(fev.start), toISODate(fev.end), fev.weeks]).toEqual(["2026-02-01", "2026-02-28", 4]);
+    const dez = gridBounds(new Date(2026, 11, 1)); // começa numa terça: pega o fim de novembro
+    expect(toISODate(dez.start)).toBe("2026-11-29");
+  });
+});

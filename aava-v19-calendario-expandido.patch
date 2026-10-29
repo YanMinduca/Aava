@@ -1,0 +1,426 @@
+diff --git a/src/components/shifts/DeptSchedule.tsx b/src/components/shifts/DeptSchedule.tsx
+index 266b083..e125e73 100644
+--- a/src/components/shifts/DeptSchedule.tsx
++++ b/src/components/shifts/DeptSchedule.tsx
+@@ -1,15 +1,14 @@
+-import { useMemo, useState } from "react";
++import { useState } from "react";
+ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+ import { toast } from "sonner";
+-import { ptBR } from "react-day-picker/locale";
+ import { CalendarPlus, Check, Clock, Pencil, Trash2 } from "lucide-react";
+ import { supabase } from "@/integrations/supabase/client";
+ import { useSiteContent } from "@/lib/site-query";
+ import { Badge } from "@/components/ui/badge";
+ import { Button } from "@/components/ui/button";
+-import { Calendar } from "@/components/ui/calendar";
+ import { ConfirmButton } from "@/components/ConfirmDialog";
+ import { Input } from "@/components/ui/input";
++import { MonthGrid, gridBounds } from "@/components/shifts/MonthGrid";
+ import { ShiftEditor } from "@/components/shifts/ShiftEditor";
+ import { MyShiftActions } from "@/components/shifts/MyShifts";
+ import {
+@@ -18,7 +17,6 @@ import {
+   fmtShiftShort,
+   fmtShiftTime,
+   groupShifts,
+-  monthBounds,
+   parseISODate,
+   shiftError,
+   toISODate,
+@@ -60,7 +58,9 @@ export function DeptSchedule({ dept }: { dept: Dept }) {
+   const [editing, setEditing] = useState<{ shift: Shift | null; date: string } | null>(null);
+   const today = todayBR();
+ 
+-  const { from, to } = monthBounds(month);
++  const grid = gridBounds(month);
++  const from = toISODate(grid.start);
++  const to = toISODate(grid.end);
+   const monthQ = useSchedule(dept, from, to);
+   const horizon = toISODate(new Date(Date.now() + 120 * 86400_000));
+   const upcoming = useSchedule(dept, today, horizon, dept.can_manage, "upcoming");
+@@ -68,8 +68,6 @@ export function DeptSchedule({ dept }: { dept: Dept }) {
+   const shifts = monthQ.data ?? [];
+   const dayIso = toISODate(day);
+   const dayShifts = shifts.filter((s) => s.date === dayIso);
+-  const hasShift = useMemo(() => shifts.map((s) => parseISODate(s.date)), [shifts]);
+-  const mine = useMemo(() => shifts.filter((s) => s.members.some((m) => m.isMe)).map((s) => parseISODate(s.date)), [shifts]);
+   const requests = (upcoming.data ?? []).flatMap((s) => s.members.filter((m) => m.status === "change_requested").map((m) => ({ shift: s, member: m })));
+ 
+   const goTo = (iso: string) => {
+@@ -101,64 +99,41 @@ export function DeptSchedule({ dept }: { dept: Dept }) {
+         </div>
+       )}
+ 
+-      <div className="grid gap-6 lg:grid-cols-[auto_1fr]">
+-        <div>
+-          <Calendar
+-            mode="single"
+-            locale={ptBR}
+-            selected={day}
+-            onSelect={(d) => d && setDay(d)}
+-            month={month}
+-            onMonthChange={setMonth}
+-            modifiers={{ hasShift, mine }}
+-            modifiersClassNames={{ hasShift: "font-bold text-primary", mine: "ring-2 ring-primary rounded-md" }}
+-            className="rounded-xl border"
+-          />
+-          <p className="mt-2 max-w-xs text-xs text-muted-foreground">Dias em azul e negrito têm escala. O contorno marca os dias em que você está escalado.</p>
+-        </div>
+-
+-        <div className="min-w-0 space-y-4">
+-          <div className="flex flex-wrap items-center justify-between gap-2">
+-            <h3 className="font-display text-xl capitalize text-foreground">{fmtShiftLong(dayIso)}</h3>
+-            {dept.can_manage && dayIso >= today && (
+-              <Button size="sm" onClick={() => setEditing({ shift: null, date: dayIso })}>
+-                <CalendarPlus className="h-4 w-4" /> Escalar este dia
+-              </Button>
+-            )}
+-          </div>
++      <MonthGrid
++        month={month}
++        shifts={shifts}
++        selected={day}
++        today={today}
++        onSelect={(d) => {
++          setDay(d);
++          if (d.getMonth() !== month.getMonth()) setMonth(d);
++        }}
++        onMonthChange={setMonth}
++      />
+ 
+-          {monthQ.isLoading && <p className="text-sm text-muted-foreground">Carregando a escala…</p>}
+-          {!monthQ.isLoading && dayShifts.length === 0 && (
+-            <p className="rounded-xl border border-dashed p-6 text-sm text-muted-foreground">
+-              Nenhum culto escalado neste dia.{dept.can_manage && dayIso >= today ? " Use “Escalar este dia” para montar a escala." : ""}
+-            </p>
++      <div className="mt-6 min-w-0 space-y-4" aria-live="polite">
++        <div className="flex flex-wrap items-center justify-between gap-2">
++          <h3 className="font-display text-xl capitalize text-foreground">{fmtShiftLong(dayIso)}</h3>
++          {dept.can_manage && dayIso >= today && (
++            <Button size="sm" onClick={() => setEditing({ shift: null, date: dayIso })}>
++              <CalendarPlus className="h-4 w-4" /> Escalar este dia
++            </Button>
+           )}
++        </div>
++
++        {monthQ.isLoading && <p className="text-sm text-muted-foreground">Carregando a escala…</p>}
++        {!monthQ.isLoading && dayShifts.length === 0 && (
++          <p className="rounded-xl border border-dashed p-6 text-sm text-muted-foreground">
++            Nenhum culto escalado neste dia.{dept.can_manage && dayIso >= today ? " Use “Escalar este dia” para montar a escala." : ""}
++          </p>
++        )}
++        <div className="grid gap-4 xl:grid-cols-2">
+           {dayShifts.map((s) => (
+             <ShiftCard key={s.id} shift={s} dept={dept} past={s.date < today} onEdit={() => setEditing({ shift: s, date: s.date })} />
+           ))}
+         </div>
+       </div>
+ 
+-      {shifts.length > 0 && (
+-        <div className="mt-8">
+-          <h3 className="font-display text-lg text-foreground">Escalas deste mês</h3>
+-          <ul className="mt-3 grid gap-2 sm:grid-cols-2">
+-            {shifts.map((s) => (
+-              <li key={s.id}>
+-                <button type="button" onClick={() => goTo(s.date)} className="w-full rounded-xl border bg-card p-3 text-left text-sm transition-shadow hover:shadow-soft">
+-                  <span className="font-medium capitalize text-foreground">{fmtShiftShort(s.date)}</span>
+-                  <span className="text-muted-foreground">
+-                    {" "}
+-                    · {s.name}
+-                    {fmtShiftTime(s.time) ? ` · ${fmtShiftTime(s.time)}` : ""} · {s.members.length} {s.members.length === 1 ? "voluntário" : "voluntários"}
+-                  </span>
+-                </button>
+-              </li>
+-            ))}
+-          </ul>
+-        </div>
+-      )}
+-
+       {editing && (
+         <ShiftEditor
+           dept={dept}
+diff --git a/src/components/shifts/MonthGrid.tsx b/src/components/shifts/MonthGrid.tsx
+new file mode 100644
+index 0000000..7136fba
+--- /dev/null
++++ b/src/components/shifts/MonthGrid.tsx
+@@ -0,0 +1,170 @@
++import { ChevronLeft, ChevronRight } from "lucide-react";
++import { Button } from "@/components/ui/button";
++import { fmtShiftLong, fmtShiftTime, parseISODate, toISODate, type Shift, type ShiftMember } from "@/lib/shifts";
++
++const WEEKDAYS = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
++const TITLE = new Intl.DateTimeFormat("pt-BR", { month: "long", year: "numeric" });
++const MAX_NAMES = 4;
++
++/** Primeiro e último dia exibidos na grade do mês (semanas inteiras, de domingo a sábado). */
++export function gridBounds(month: Date): { start: Date; end: Date; weeks: number } {
++  const first = new Date(month.getFullYear(), month.getMonth(), 1);
++  const days = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
++  const weeks = Math.ceil((first.getDay() + days) / 7);
++  const start = new Date(first.getFullYear(), first.getMonth(), 1 - first.getDay());
++  const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + weeks * 7 - 1);
++  return { start, end, weeks };
++}
++
++const dot: Record<ShiftMember["status"], string> = {
++  confirmed: "bg-success",
++  pending: "bg-muted-foreground/60",
++  change_requested: "bg-destructive",
++};
++const dotLabel: Record<ShiftMember["status"], string> = { confirmed: "ciente", pending: "aguardando ciente", change_requested: "pediu alteração" };
++
++/**
++ * Calendário grande do mês: cada dia mostra os cultos escalados e o nome de quem está escalado.
++ * Dias com escala ganham outra cor; a bolinha ao lado do nome mostra se a pessoa já deu ciente.
++ */
++export function MonthGrid({
++  month,
++  shifts,
++  selected,
++  today,
++  onSelect,
++  onMonthChange,
++}: {
++  month: Date;
++  shifts: Shift[];
++  selected: Date;
++  /** Hoje, "AAAA-MM-DD" (horário de Brasília). */
++  today: string;
++  onSelect: (d: Date) => void;
++  onMonthChange: (d: Date) => void;
++}) {
++  const { start, weeks } = gridBounds(month);
++  const selectedIso = toISODate(selected);
++  const byDay = new Map<string, Shift[]>();
++  for (const s of shifts) byDay.set(s.date, [...(byDay.get(s.date) ?? []), s]);
++  for (const list of byDay.values()) list.sort((a, b) => (a.time ?? "").localeCompare(b.time ?? ""));
++
++  const cells = Array.from({ length: weeks * 7 }, (_, i) => new Date(start.getFullYear(), start.getMonth(), start.getDate() + i));
++  const title = TITLE.format(month);
++
++  return (
++    <div className="rounded-2xl border bg-card p-3 sm:p-4">
++      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
++        <h3 className="font-display text-xl capitalize text-foreground" aria-live="polite">
++          {title}
++        </h3>
++        <div className="flex gap-2">
++          <Button type="button" size="icon" variant="outline" aria-label="Mês anterior" onClick={() => onMonthChange(new Date(month.getFullYear(), month.getMonth() - 1, 1))}>
++            <ChevronLeft className="h-4 w-4" />
++          </Button>
++          <Button type="button" size="sm" variant="outline" onClick={() => onMonthChange(parseISODate(today))}>
++            Hoje
++          </Button>
++          <Button type="button" size="icon" variant="outline" aria-label="Próximo mês" onClick={() => onMonthChange(new Date(month.getFullYear(), month.getMonth() + 1, 1))}>
++            <ChevronRight className="h-4 w-4" />
++          </Button>
++        </div>
++      </div>
++
++      <div className="grid grid-cols-7 gap-1 text-center text-xs font-medium text-muted-foreground sm:gap-1.5" aria-hidden>
++        {WEEKDAYS.map((w) => (
++          <div key={w} className="py-1">
++            {w}
++          </div>
++        ))}
++      </div>
++
++      <div className="grid grid-cols-7 gap-1 sm:gap-1.5">
++        {cells.map((d) => {
++          const iso = toISODate(d);
++          const inMonth = d.getMonth() === month.getMonth();
++          const list = byDay.get(iso) ?? [];
++          const has = list.length > 0;
++          const isMine = list.some((s) => s.members.some((m) => m.isMe));
++          const isToday = iso === today;
++          const isSelected = iso === selectedIso;
++          const past = iso < today;
++          const people = list.reduce((n, s) => n + s.members.length, 0);
++
++          const tone = has
++            ? isMine
++              ? "border-primary bg-primary/20"
++              : "border-primary/40 bg-primary-soft"
++            : inMonth
++              ? "border-transparent bg-muted/30 hover:bg-muted/60"
++              : "border-transparent bg-transparent text-muted-foreground/60 hover:bg-muted/30";
++
++          return (
++            <button
++              key={iso}
++              type="button"
++              data-has-shift={has ? "true" : "false"}
++              data-day={iso}
++              aria-pressed={isSelected}
++              aria-label={`${fmtShiftLong(iso)}${has ? `: ${list.length} ${list.length === 1 ? "culto escalado" : "cultos escalados"}, ${people} ${people === 1 ? "voluntário" : "voluntários"}` : ""}`}
++              onClick={() => onSelect(d)}
++              className={`flex min-h-20 flex-col rounded-lg border p-1 text-left transition-colors sm:min-h-28 sm:p-2 ${tone} ${has && past ? "opacity-75" : ""} ${isSelected ? "ring-2 ring-primary ring-offset-1 ring-offset-background" : ""}`}
++            >
++              <span
++                className={`mb-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${isToday ? "bg-primary text-primary-foreground" : has ? "text-primary" : "text-foreground"}`}
++              >
++                {d.getDate()}
++              </span>
++
++              <span className="flex min-w-0 flex-col gap-1.5">
++                {list.map((s) => {
++                  const shown = s.members.slice(0, MAX_NAMES);
++                  const extra = s.members.length - shown.length;
++                  const time = fmtShiftTime(s.time);
++                  return (
++                    <span key={s.id} className="min-w-0 text-[10px] leading-tight sm:text-xs">
++                      <span className="block truncate font-semibold text-foreground">
++                        {time}
++                        <span className="hidden sm:inline">
++                          {time ? " · " : ""}
++                          {s.name}
++                        </span>
++                      </span>
++                      {shown.map((m) => (
++                        <span key={m.memberId} className={`flex items-center gap-1 ${m.isMe ? "font-bold text-foreground" : "text-muted-foreground"}`}>
++                          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dot[m.status]}`} title={dotLabel[m.status]} aria-hidden />
++                          <span className="truncate">
++                            <span className="sm:hidden">{m.name.split(" ")[0]}</span>
++                            <span className="hidden sm:inline">{m.name}</span>
++                          </span>
++                        </span>
++                      ))}
++                      {extra > 0 && <span className="block text-muted-foreground">+{extra} {extra === 1 ? "pessoa" : "pessoas"}</span>}
++                    </span>
++                  );
++                })}
++              </span>
++            </button>
++          );
++        })}
++      </div>
++
++      <ul className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-xs text-muted-foreground" aria-label="Legenda do calendário">
++        <li className="flex items-center gap-1.5">
++          <span className="h-3 w-3 rounded border border-primary/40 bg-primary-soft" aria-hidden /> Dia com culto escalado
++        </li>
++        <li className="flex items-center gap-1.5">
++          <span className="h-3 w-3 rounded border border-primary bg-primary/20" aria-hidden /> Você está escalado
++        </li>
++        <li className="flex items-center gap-1.5">
++          <span className="h-3 w-3 rounded-full bg-primary" aria-hidden /> Hoje
++        </li>
++        <li className="flex items-center gap-1.5">
++          <span className="h-1.5 w-1.5 rounded-full bg-success" aria-hidden /> ciente
++          <span className="ml-2 h-1.5 w-1.5 rounded-full bg-muted-foreground/60" aria-hidden /> aguardando
++          <span className="ml-2 h-1.5 w-1.5 rounded-full bg-destructive" aria-hidden /> pediu alteração
++        </li>
++      </ul>
++    </div>
++  );
++}
+diff --git a/src/test/shifts.test.tsx b/src/test/shifts.test.tsx
+index 1971488..399a204 100644
+--- a/src/test/shifts.test.tsx
++++ b/src/test/shifts.test.tsx
+@@ -20,6 +20,7 @@ import {
+ import { NextShiftCard } from "@/components/shifts/MyShifts";
+ import { ShiftEditor } from "@/components/shifts/ShiftEditor";
+ import { DeptSchedule } from "@/components/shifts/DeptSchedule";
++import { MonthGrid, gridBounds } from "@/components/shifts/MonthGrid";
+ 
+ // O jsdom não tem ResizeObserver (os navegadores têm); os checkboxes do Radix dentro de formulário precisam dele.
+ vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
+@@ -213,13 +214,13 @@ describe("editor da escala (líder)", () => {
+ });
+ 
+ describe("calendário da escala do departamento", () => {
+-  const date = ahead(6);
++  const date = toISODate(new Date()); // hoje já vem selecionado: o cartão do dia aparece sem clicar
+   const row = (o: Partial<ShiftRow>): ShiftRow => ({
+     shift_id: "s1", shift_date: date, service_name: "Culto de Celebração", service_time: "18:00:00", notes: null, member_id: "ana", member_name: "Ana Souza",
+     has_account: true, status: "pending", acknowledged_at: null, change_reason: null, change_requested_at: null, leader_note: null, is_me: false, ...o,
+   });
+   const serve = (rows: ShiftRow[]) => h.rpc.mockImplementation(async (fn: string) => (fn === "dept_schedule" ? { data: rows, error: null } : { data: [], error: null }));
+-  const open = async () => fireEvent.click(await screen.findByRole("button", { name: /Culto de Celebração/ }));
++  const open = async () => void (await screen.findByRole("heading", { name: "Culto de Celebração" }));
+ 
+   it("líder: vê pedidos de alteração com o motivo e pode escalar, editar e apagar", async () => {
+     serve([row({ status: "change_requested", change_reason: "Estarei viajando" }), row({ member_id: "bia", member_name: "Bia Lima", status: "confirmed" })]);
+@@ -308,3 +309,79 @@ describe("calendário da escala do departamento", () => {
+ // garante que o tipo Shift continua exportado para os componentes
+ const _typecheck: Shift | null = null;
+ void _typecheck;
++
++
++describe("calendário grande (MonthGrid)", () => {
++  const today = toISODate(new Date());
++  const member = (name: string, over: object = {}) => ({ memberId: name, name, hasAccount: true, status: "pending" as const, acknowledgedAt: null, changeReason: null, changeRequestedAt: null, leaderNote: null, isMe: false, ...over });
++  const shift = (names: string[], over: Partial<Shift> = {}): Shift => ({ id: "s1", date: today, name: "Culto de Celebração", time: "18:00:00", notes: null, members: names.map((n) => member(n)), ...over });
++  const cell = (iso: string) => document.querySelector(`[data-day="${iso}"]`) as HTMLElement;
++  const render_ = (shifts: Shift[], fns: { onSelect?: (d: Date) => void; onMonthChange?: (d: Date) => void } = {}) =>
++    render(<MonthGrid month={new Date()} shifts={shifts} selected={new Date()} today={today} onSelect={fns.onSelect ?? (() => {})} onMonthChange={fns.onMonthChange ?? (() => {})} />);
++
++  it("mostra o nome de cada voluntário dentro do dia e o horário do culto", () => {
++    render_([shift(["Ana Souza", "Bia Lima"])]);
++    const c = within(cell(today));
++    expect(c.getAllByText("Ana Souza").length).toBeGreaterThan(0);
++    expect(c.getAllByText("Bia Lima").length).toBeGreaterThan(0);
++    expect(c.getByText(/18h00/)).toBeTruthy();
++    // os outros dias do mês continuam vazios
++    const other = [...document.querySelectorAll("[data-day]")].find((e) => e.getAttribute("data-day") !== today) as HTMLElement;
++    expect(within(other).queryByText("Ana Souza")).toBeNull();
++  });
++
++  it("dias com culto têm outra cor que os dias sem culto; e o meu dia tem uma cor própria", () => {
++    const { rerender } = render_([shift(["Ana Souza"])]);
++    expect(cell(today).getAttribute("data-has-shift")).toBe("true");
++    expect(cell(today).className).toContain("bg-primary-soft");
++    const empty = [...document.querySelectorAll('[data-has-shift="false"]')].find((e) => e.className.includes("bg-muted/30")) as HTMLElement;
++    expect(empty).toBeTruthy();
++    expect(empty.className).not.toContain("bg-primary-soft");
++
++    rerender(<MonthGrid month={new Date()} shifts={[shift([], { members: [member("Eu", { isMe: true })] })]} selected={new Date()} today={today} onSelect={() => {}} onMonthChange={() => {}} />);
++    expect(cell(today).className).toContain("bg-primary/20");
++    expect(within(cell(today)).getAllByText("Eu")[0]!.closest("span[class*='font-bold']")).toBeTruthy();
++  });
++
++  it("muitos voluntários no mesmo culto: mostra os primeiros e '+N pessoas'", () => {
++    render_([shift(["A1 Silva", "A2 Silva", "A3 Silva", "A4 Silva", "A5 Silva", "A6 Silva"])]);
++    expect(within(cell(today)).getByText("+2 pessoas")).toBeTruthy();
++    expect(within(cell(today)).queryByText("A5 Silva")).toBeNull();
++  });
++
++  it("dois cultos no mesmo dia aparecem em ordem de horário", () => {
++    render_([shift(["Ana Souza"], { id: "tarde", time: "18:00:00", name: "Celebração" }), shift(["Caio Alves"], { id: "manha", time: "09:00:00", name: "Escola Bíblica" })]);
++    const text = cell(today).textContent ?? "";
++    expect(text.indexOf("09h00")).toBeGreaterThan(-1);
++    expect(text.indexOf("09h00")).toBeLessThan(text.indexOf("18h00"));
++  });
++
++  it("tem descrição acessível com a quantidade de cultos e voluntários", () => {
++    render_([shift(["Ana Souza", "Bia Lima"])]);
++    expect(screen.getByRole("button", { name: /1 culto escalado, 2 voluntários/ })).toBeTruthy();
++  });
++
++  it("clicar num dia seleciona; as setas e o 'Hoje' trocam o mês", () => {
++    const onSelect = vi.fn();
++    const onMonthChange = vi.fn();
++    render_([], { onSelect, onMonthChange });
++    fireEvent.click(cell(today));
++    expect(toISODate(onSelect.mock.calls[0]![0] as Date)).toBe(today);
++    const now = new Date();
++    fireEvent.click(screen.getByRole("button", { name: "Mês anterior" }));
++    expect(toISODate(onMonthChange.mock.calls[0]![0] as Date)).toBe(toISODate(new Date(now.getFullYear(), now.getMonth() - 1, 1)));
++    fireEvent.click(screen.getByRole("button", { name: "Próximo mês" }));
++    expect(toISODate(onMonthChange.mock.calls[1]![0] as Date)).toBe(toISODate(new Date(now.getFullYear(), now.getMonth() + 1, 1)));
++    fireEvent.click(screen.getByRole("button", { name: "Hoje" }));
++    expect(toISODate(onMonthChange.mock.calls[2]![0] as Date)).toBe(today);
++  });
++
++  it("a grade usa semanas inteiras (domingo a sábado)", () => {
++    const nov = gridBounds(new Date(2026, 10, 1)); // 1º de novembro de 2026 é domingo
++    expect([toISODate(nov.start), toISODate(nov.end), nov.weeks]).toEqual(["2026-11-01", "2026-12-05", 5]);
++    const fev = gridBounds(new Date(2026, 1, 1)); // fevereiro de 2026: 4 semanas exatas
++    expect([toISODate(fev.start), toISODate(fev.end), fev.weeks]).toEqual(["2026-02-01", "2026-02-28", 4]);
++    const dez = gridBounds(new Date(2026, 11, 1)); // começa numa terça: pega o fim de novembro
++    expect(toISODate(dez.start)).toBe("2026-11-29");
++  });
++});

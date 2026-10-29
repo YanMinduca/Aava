@@ -1,15 +1,14 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ptBR } from "react-day-picker/locale";
 import { CalendarPlus, Check, Clock, Pencil, Trash2 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useSiteContent } from "@/lib/site-query";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Calendar } from "@/components/ui/calendar";
 import { ConfirmButton } from "@/components/ConfirmDialog";
 import { Input } from "@/components/ui/input";
+import { MonthGrid, gridBounds } from "@/components/shifts/MonthGrid";
 import { ShiftEditor } from "@/components/shifts/ShiftEditor";
 import { MyShiftActions } from "@/components/shifts/MyShifts";
 import {
@@ -18,7 +17,6 @@ import {
   fmtShiftShort,
   fmtShiftTime,
   groupShifts,
-  monthBounds,
   parseISODate,
   shiftError,
   toISODate,
@@ -60,7 +58,9 @@ export function DeptSchedule({ dept }: { dept: Dept }) {
   const [editing, setEditing] = useState<{ shift: Shift | null; date: string } | null>(null);
   const today = todayBR();
 
-  const { from, to } = monthBounds(month);
+  const grid = gridBounds(month);
+  const from = toISODate(grid.start);
+  const to = toISODate(grid.end);
   const monthQ = useSchedule(dept, from, to);
   const horizon = toISODate(new Date(Date.now() + 120 * 86400_000));
   const upcoming = useSchedule(dept, today, horizon, dept.can_manage, "upcoming");
@@ -68,8 +68,6 @@ export function DeptSchedule({ dept }: { dept: Dept }) {
   const shifts = monthQ.data ?? [];
   const dayIso = toISODate(day);
   const dayShifts = shifts.filter((s) => s.date === dayIso);
-  const hasShift = useMemo(() => shifts.map((s) => parseISODate(s.date)), [shifts]);
-  const mine = useMemo(() => shifts.filter((s) => s.members.some((m) => m.isMe)).map((s) => parseISODate(s.date)), [shifts]);
   const requests = (upcoming.data ?? []).flatMap((s) => s.members.filter((m) => m.status === "change_requested").map((m) => ({ shift: s, member: m })));
 
   const goTo = (iso: string) => {
@@ -101,63 +99,40 @@ export function DeptSchedule({ dept }: { dept: Dept }) {
         </div>
       )}
 
-      <div className="grid gap-6 lg:grid-cols-[auto_1fr]">
-        <div>
-          <Calendar
-            mode="single"
-            locale={ptBR}
-            selected={day}
-            onSelect={(d) => d && setDay(d)}
-            month={month}
-            onMonthChange={setMonth}
-            modifiers={{ hasShift, mine }}
-            modifiersClassNames={{ hasShift: "font-bold text-primary", mine: "ring-2 ring-primary rounded-md" }}
-            className="rounded-xl border"
-          />
-          <p className="mt-2 max-w-xs text-xs text-muted-foreground">Dias em azul e negrito têm escala. O contorno marca os dias em que você está escalado.</p>
+      <MonthGrid
+        month={month}
+        shifts={shifts}
+        selected={day}
+        today={today}
+        onSelect={(d) => {
+          setDay(d);
+          if (d.getMonth() !== month.getMonth()) setMonth(d);
+        }}
+        onMonthChange={setMonth}
+      />
+
+      <div className="mt-6 min-w-0 space-y-4" aria-live="polite">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="font-display text-xl capitalize text-foreground">{fmtShiftLong(dayIso)}</h3>
+          {dept.can_manage && dayIso >= today && (
+            <Button size="sm" onClick={() => setEditing({ shift: null, date: dayIso })}>
+              <CalendarPlus className="h-4 w-4" /> Escalar este dia
+            </Button>
+          )}
         </div>
 
-        <div className="min-w-0 space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <h3 className="font-display text-xl capitalize text-foreground">{fmtShiftLong(dayIso)}</h3>
-            {dept.can_manage && dayIso >= today && (
-              <Button size="sm" onClick={() => setEditing({ shift: null, date: dayIso })}>
-                <CalendarPlus className="h-4 w-4" /> Escalar este dia
-              </Button>
-            )}
-          </div>
-
-          {monthQ.isLoading && <p className="text-sm text-muted-foreground">Carregando a escala…</p>}
-          {!monthQ.isLoading && dayShifts.length === 0 && (
-            <p className="rounded-xl border border-dashed p-6 text-sm text-muted-foreground">
-              Nenhum culto escalado neste dia.{dept.can_manage && dayIso >= today ? " Use “Escalar este dia” para montar a escala." : ""}
-            </p>
-          )}
+        {monthQ.isLoading && <p className="text-sm text-muted-foreground">Carregando a escala…</p>}
+        {!monthQ.isLoading && dayShifts.length === 0 && (
+          <p className="rounded-xl border border-dashed p-6 text-sm text-muted-foreground">
+            Nenhum culto escalado neste dia.{dept.can_manage && dayIso >= today ? " Use “Escalar este dia” para montar a escala." : ""}
+          </p>
+        )}
+        <div className="grid gap-4 xl:grid-cols-2">
           {dayShifts.map((s) => (
             <ShiftCard key={s.id} shift={s} dept={dept} past={s.date < today} onEdit={() => setEditing({ shift: s, date: s.date })} />
           ))}
         </div>
       </div>
-
-      {shifts.length > 0 && (
-        <div className="mt-8">
-          <h3 className="font-display text-lg text-foreground">Escalas deste mês</h3>
-          <ul className="mt-3 grid gap-2 sm:grid-cols-2">
-            {shifts.map((s) => (
-              <li key={s.id}>
-                <button type="button" onClick={() => goTo(s.date)} className="w-full rounded-xl border bg-card p-3 text-left text-sm transition-shadow hover:shadow-soft">
-                  <span className="font-medium capitalize text-foreground">{fmtShiftShort(s.date)}</span>
-                  <span className="text-muted-foreground">
-                    {" "}
-                    · {s.name}
-                    {fmtShiftTime(s.time) ? ` · ${fmtShiftTime(s.time)}` : ""} · {s.members.length} {s.members.length === 1 ? "voluntário" : "voluntários"}
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
 
       {editing && (
         <ShiftEditor
