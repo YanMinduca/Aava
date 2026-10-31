@@ -2,7 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
-import { Plus, Pencil, Trash2, Search, Check, X, Link2, Copy, Download, Eye } from "lucide-react";
+import { Plus, Pencil, Trash2, Search, Check, X, Link2, Copy, Download, Eye, UserRoundCheck } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAccess } from "@/hooks/use-access";
 import { Switch } from "@/components/ui/switch";
@@ -17,6 +17,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { MemberForm, MemberAvatar, emptyMember, type MemberDraft } from "@/components/members/MemberForm";
 import { APPROVAL_LABELS, MEMBER_STATUS, ageFrom, dateBR } from "@/lib/church";
 import { downloadXls } from "@/lib/export";
+import { AccountBadge, LinkAccountDialog, useAccountLinks } from "@/components/members/MemberAccountLink";
 import { OptimizePhotosButton } from "@/components/members/OptimizePhotosButton";
 import { copyText } from "@/lib/clipboard";
 import { purgeStorageTrash } from "@/lib/storage-trash";
@@ -29,10 +30,14 @@ export const Route = createFileRoute("/_authenticated/painel/membros")({
 });
 
 function MembersPage() {
-  const { can, data: access } = useAccess();
+  const { can, isFullAccess, data: access } = useAccess();
   const qc = useQueryClient();
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("todos");
+  const [accountFilter, setAccountFilter] = useState("todos");
+  const [linking, setLinking] = useState<{ id: string; full_name: string; user_id: string | null } | null>(null);
+  const accountLinks = useAccountLinks(isFullAccess);
+  const accountEmail = (userId: string | null) => (userId ? accountLinks.data?.find((a) => a.account_id === userId)?.account_email ?? null : null);
   const [editing, setEditing] = useState<MemberDraft | null>(null);
   const [notes, setNotes] = useState("");
   const [deptIds, setDeptIds] = useState<string[]>([]);
@@ -133,12 +138,15 @@ function MembersPage() {
   const filtered = approved.filter(
     (m) =>
       (statusFilter === "todos" || m.status === statusFilter) &&
+      (accountFilter === "todos" || (accountFilter === "com_conta" ? !!m.user_id : !m.user_id)) &&
       (m.full_name.toLowerCase().includes(search.toLowerCase()) || (m.cpf ?? "").includes(search) || (m.registration_number ?? "").toLowerCase().includes(search.toLowerCase())),
   );
 
+  const withAccount = approved.filter((m) => !!m.user_id).length;
+
   function exportXls() {
-    const head = ["Matrícula", "Nome", "Nascimento", "Idade", "CPF", "RG", "Telefone", "E-mail", "Endereço", "Bairro", "Cidade", "CEP", "Estado civil", "Filiação", "Batizado", "Data batismo", "Igreja do batismo", "Departamento", "Cargo", "Status"];
-    const rows = filtered.map((m) => [m.registration_number, m.full_name, dateBR(m.birth_date), ageFrom(m.birth_date) ?? "", m.cpf, m.rg, m.phone, m.email, m.address, m.neighborhood, m.city, m.zip_code, m.marital_status, dateBR(m.affiliated_on), m.baptized ? "Sim" : "Não", dateBR(m.baptism_date), m.baptism_church, deptNames(m.id).join(", "), roleName(m.church_role_id), MEMBER_STATUS[m.status] ?? m.status]);
+    const head = ["Matrícula", "Nome", "Nascimento", "Idade", "CPF", "RG", "Telefone", "E-mail", "Endereço", "Bairro", "Cidade", "CEP", "Estado civil", "Filiação", "Batizado", "Data batismo", "Igreja do batismo", "Departamento", "Cargo", "Status", "Conta"];
+    const rows = filtered.map((m) => [m.registration_number, m.full_name, dateBR(m.birth_date), ageFrom(m.birth_date) ?? "", m.cpf, m.rg, m.phone, m.email, m.address, m.neighborhood, m.city, m.zip_code, m.marital_status, dateBR(m.affiliated_on), m.baptized ? "Sim" : "Não", dateBR(m.baptism_date), m.baptism_church, deptNames(m.id).join(", "), roleName(m.church_role_id), MEMBER_STATUS[m.status] ?? m.status, m.user_id ? "Com conta" : "Sem conta"]);
     downloadXls("membros", [head, ...rows], "Membros");
   }
 
@@ -180,7 +188,16 @@ function MembersPage() {
                 {Object.entries(MEMBER_STATUS).map(([k, l]) => <SelectItem key={k} value={k}>{l}</SelectItem>)}
               </SelectContent>
             </Select>
+            <Select value={accountFilter} onValueChange={setAccountFilter}>
+              <SelectTrigger className="w-44"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="todos">Com e sem conta</SelectItem>
+                <SelectItem value="com_conta">Com conta</SelectItem>
+                <SelectItem value="sem_conta">Sem conta</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
+          <p className="mt-3 text-sm text-muted-foreground">{withAccount} com conta · {approved.length - withAccount} sem conta (de {approved.length} cadastrados)</p>
           <div className="mt-4 overflow-x-auto rounded-2xl border bg-card">
             <table className="w-full text-sm">
               <thead className="border-b text-left text-muted-foreground">
@@ -189,12 +206,13 @@ function MembersPage() {
                   <th className="p-4 font-medium">Contato</th>
                   <th className="p-4 font-medium">Outros</th>
                   <th className="p-4 font-medium">Status</th>
+                  <th className="p-4 font-medium">Conta</th>
                   <th className="p-4" />
                 </tr>
               </thead>
               <tbody>
-                {isLoading && <tr><td className="p-4 text-muted-foreground" colSpan={5}>Carregando...</td></tr>}
-                {!isLoading && filtered.length === 0 && <tr><td className="p-6 text-center text-muted-foreground" colSpan={5}>Nenhum membro encontrado.</td></tr>}
+                {isLoading && <tr><td className="p-4 text-muted-foreground" colSpan={6}>Carregando...</td></tr>}
+                {!isLoading && filtered.length === 0 && <tr><td className="p-6 text-center text-muted-foreground" colSpan={6}>Nenhum membro encontrado.</td></tr>}
                 {filtered.map((m) => {
                   const age = ageFrom(m.birth_date);
                   return (
@@ -214,8 +232,10 @@ function MembersPage() {
                         <Badge variant={m.status === "membro_ativo" ? "default" : "secondary"}>{MEMBER_STATUS[m.status] ?? m.status}</Badge>
                         {m.approval_status === "recusado" && <p className="mt-1 text-xs text-destructive">Recusado</p>}
                       </td>
+                      <td className="p-4"><AccountBadge linked={!!m.user_id} email={accountEmail(m.user_id)} /></td>
                       <td className="whitespace-nowrap p-4 text-right">
                         <Button size="icon" variant="ghost" asChild aria-label="Ver perfil"><Link to="/painel/membro/$id" params={{ id: m.id }}><Eye className="h-4 w-4" /></Link></Button>
+                        {isFullAccess && <Button size="icon" variant="ghost" aria-label={m.user_id ? "Ver conta vinculada" : "Vincular conta"} title={m.user_id ? "Ver conta vinculada" : "Vincular conta"} onClick={() => setLinking({ id: m.id, full_name: m.full_name, user_id: m.user_id })}><UserRoundCheck className="h-4 w-4" /></Button>}
                         {can("edit_member") && <Button size="icon" variant="ghost" onClick={() => openEdit({ ...m })}><Pencil className="h-4 w-4" /></Button>}
                         {can("delete_member") && (
                           <Button size="icon" variant="ghost" onClick={() => confirm(`Excluir ${m.full_name}?`) && remove.mutate(m.id)}><Trash2 className="h-4 w-4" /></Button>
@@ -270,6 +290,8 @@ function MembersPage() {
           </TabsContent>
         )}
       </Tabs>
+
+      {isFullAccess && <LinkAccountDialog member={linking} accounts={accountLinks.data ?? []} onClose={() => setLinking(null)} />}
 
       <Dialog open={!!editing} onOpenChange={(o) => !o && setEditing(null)}>
         <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">

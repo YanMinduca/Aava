@@ -1,0 +1,497 @@
+From 2847a0d843e5903c69e11b7536f938740dd07524 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 31 Oct 2026 19:14:13 +0000
+Subject: [PATCH] =?UTF-8?q?feat:=20ver=20quais=20membros=20t=C3=AAm=20cont?=
+ =?UTF-8?q?a=20e=20CEO=20vincular=20conta=20a=20membro?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../migrations/0023_link_member_account.sql   | 107 ++++++++++++++
+ src/components/members/MemberAccountLink.tsx  | 137 ++++++++++++++++++
+ src/integrations/supabase/types.ts            |  17 +++
+ src/routes/_authenticated/painel.membros.tsx  |  34 ++++-
+ src/test/member-account-link.test.tsx         |  76 ++++++++++
+ 5 files changed, 365 insertions(+), 6 deletions(-)
+ create mode 100644 drizzle/migrations/0023_link_member_account.sql
+ create mode 100644 src/components/members/MemberAccountLink.tsx
+ create mode 100644 src/test/member-account-link.test.tsx
+
+diff --git a/drizzle/migrations/0023_link_member_account.sql b/drizzle/migrations/0023_link_member_account.sql
+new file mode 100644
+index 0000000..b1317ef
+--- /dev/null
++++ b/drizzle/migrations/0023_link_member_account.sql
+@@ -0,0 +1,107 @@
++-- Vínculo de conta a membro feito pelo CEO / Pastor Presidente, e lista de quem já tem conta.
++-- Pode rodar mais de uma vez.
++
++-- Contas (perfis) e o cadastro a que cada uma está ligada (member_id nulo = conta sem cadastro).
++create or replace function public.list_accounts_for_linking()
++returns table (account_id uuid, account_name text, account_email text, member_id uuid)
++language plpgsql stable security definer set search_path = public as $$
++begin
++  if not public.is_church_leadership(auth.uid()) then raise exception 'Acesso negado'; end if;
++  return query
++    select p.id, p.full_name, p.email, m.id
++    from public.profiles p
++    left join public.members m on m.user_id = p.id
++    order by lower(coalesce(nullif(p.full_name, ''), p.email, ''));
++end $$;
++
++-- Liga uma conta a um cadastro que ainda não tem conta.
++-- Retorna: ok | member_not_found | member_already_linked | user_not_found | user_already_linked
++create or replace function public.link_member_account(_member uuid, _user uuid)
++returns text
++language plpgsql security definer set search_path = public as $$
++begin
++  if not public.is_church_leadership(auth.uid()) then raise exception 'Acesso negado'; end if;
++  perform 1 from public.members m where m.id = _member for update;
++  if not found then return 'member_not_found'; end if;
++  if exists (select 1 from public.members m where m.id = _member and m.user_id is not null) then return 'member_already_linked'; end if;
++  if not exists (select 1 from public.profiles p where p.id = _user) then return 'user_not_found'; end if;
++  if exists (select 1 from public.members m where m.user_id = _user) then return 'user_already_linked'; end if;
++  perform set_config('app.linking_member', 'on', true);
++  update public.members set user_id = _user where id = _member and user_id is null;
++  perform set_config('app.linking_member', 'off', true);
++  return 'ok';
++end $$;
++
++-- Solta a conta de um cadastro (a conta e o cadastro continuam existindo, só deixam de estar ligados).
++create or replace function public.unlink_member_account(_member uuid)
++returns text
++language plpgsql security definer set search_path = public as $$
++begin
++  if not public.is_church_leadership(auth.uid()) then raise exception 'Acesso negado'; end if;
++  if not exists (select 1 from public.members m where m.id = _member) then return 'member_not_found'; end if;
++  perform set_config('app.unlinking_member', 'on', true);
++  update public.members set user_id = null where id = _member and user_id is not null;
++  perform set_config('app.unlinking_member', 'off', true);
++  return 'ok';
++end $$;
++
++revoke all on function public.list_accounts_for_linking(), public.link_member_account(uuid, uuid), public.unlink_member_account(uuid) from public, anon;
++grant execute on function public.list_accounts_for_linking(), public.link_member_account(uuid, uuid), public.unlink_member_account(uuid) to authenticated;
++
++-- members_guard: mesma regra de antes + libera SOMENTE a troca de user_id feita pelas duas funções acima (só liderança)
++create or replace function public.members_guard()
++returns trigger language plpgsql security definer set search_path = public as $$
++begin
++  if tg_op = 'UPDATE' and current_setting('app.linking_member', true) = 'on'
++     and public.is_church_leadership(auth.uid()) and old.user_id is null and new.user_id is not null then
++    new.updated_at := now();
++    return new;
++  end if;
++  if tg_op = 'UPDATE' and current_setting('app.unlinking_member', true) = 'on'
++     and public.is_church_leadership(auth.uid()) and old.user_id is not null and new.user_id is null then
++    new.updated_at := now();
++    return new;
++  end if;
++  if tg_op = 'UPDATE' and pg_trigger_depth() > 1 and old.user_id is not null and new.user_id is null then
++    new.updated_at := now();
++    return new;
++  end if;
++  if tg_op = 'INSERT' and current_setting('app.event_visitor', true) = 'on'
++     and new.user_id = auth.uid() and new.status = 'visitante' then
++    new.approval_status := 'aprovado'; new.registration_number := null; new.church_role_id := null;
++    new.ministry := null; new.department := null; new.church_role := null; new.affiliated_on := null;
++    new.updated_at := now();
++    return new;
++  end if;
++  if tg_op = 'UPDATE'
++     and current_setting('app.claiming_member', true) = 'on'
++     and old.user_id is null and new.user_id = auth.uid() then
++    new.updated_at := now();
++    return new;
++  end if;
++  new.registration_number := nullif(btrim(new.registration_number), '');
++  if public.has_permission(auth.uid(), 'approve_member') or public.has_permission(auth.uid(), 'edit_member') or public.has_permission(auth.uid(), 'create_member') then
++    if not public.has_permission(auth.uid(), 'manage_departments') then
++      if tg_op = 'INSERT' then new.church_role_id := null;
++      else new.church_role_id := old.church_role_id; end if;
++    end if;
++    new.updated_at := now();
++    return new;
++  end if;
++  if tg_op = 'INSERT' then
++    new.approval_status := 'pendente';
++    new.status := 'membro';
++    new.ministry := null; new.department := null; new.church_role := null; new.church_role_id := null;
++    new.affiliated_on := null;
++    new.registration_number := null;
++  else
++    new.approval_status := case when old.approval_status = 'recusado' then 'pendente' else old.approval_status end;
++    new.status := old.status;
++    new.ministry := old.ministry; new.department := old.department; new.church_role := old.church_role; new.church_role_id := old.church_role_id;
++    new.affiliated_on := old.affiliated_on;
++    new.registration_number := old.registration_number;
++    new.user_id := old.user_id;
++  end if;
++  new.updated_at := now();
++  return new;
++end $$;
+diff --git a/src/components/members/MemberAccountLink.tsx b/src/components/members/MemberAccountLink.tsx
+new file mode 100644
+index 0000000..2cf8385
+--- /dev/null
++++ b/src/components/members/MemberAccountLink.tsx
+@@ -0,0 +1,137 @@
++import { useState } from "react";
++import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
++import { toast } from "sonner";
++import { Link2, Link2Off, Search, UserCheck } from "lucide-react";
++import { supabase } from "@/integrations/supabase/client";
++import { Badge } from "@/components/ui/badge";
++import { Button } from "@/components/ui/button";
++import { Input } from "@/components/ui/input";
++import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
++
++export type AccountRow = { account_id: string; account_name: string | null; account_email: string | null; member_id: string | null };
++
++export const LINK_MESSAGES: Record<string, string> = {
++  member_not_found: "Este cadastro não existe mais.",
++  member_already_linked: "Este cadastro já tem uma conta vinculada.",
++  user_not_found: "Esta conta não existe mais.",
++  user_already_linked: "Esta conta já está vinculada a outro cadastro (por exemplo, um cadastro de visitante de evento).",
++  "Acesso negado": "Somente o CEO e o Pastor Presidente podem vincular contas.",
++};
++
++/** Contas de acesso e a que cadastro cada uma está ligada. Só carrega para quem tem acesso total. */
++export function useAccountLinks(enabled: boolean) {
++  return useQuery({
++    queryKey: ["account-links"],
++    enabled,
++    queryFn: async () => {
++      const { data, error } = await supabase.rpc("list_accounts_for_linking");
++      if (error) throw error;
++      return (data ?? []) as AccountRow[];
++    },
++  });
++}
++
++/** Selo "Com conta" / "Sem conta" para a lista de membros. */
++export function AccountBadge({ linked, email }: { linked: boolean; email?: string | null }) {
++  return linked ? (
++    <div>
++      <Badge variant="outline" className="gap-1 border-primary/40 text-primary"><UserCheck className="h-3 w-3" /> Com conta</Badge>
++      {email && <p className="mt-1 max-w-44 truncate text-xs text-muted-foreground" title={email}>{email}</p>}
++    </div>
++  ) : (
++    <Badge variant="secondary" className="gap-1 text-muted-foreground"><Link2Off className="h-3 w-3" /> Sem conta</Badge>
++  );
++}
++
++/** Janela para o CEO escolher a conta que será ligada a um cadastro já existente (ou soltar a conta atual). */
++export function LinkAccountDialog({
++  member,
++  accounts,
++  onClose,
++}: {
++  member: { id: string; full_name: string; user_id: string | null } | null;
++  accounts: AccountRow[];
++  onClose: () => void;
++}) {
++  const qc = useQueryClient();
++  const [search, setSearch] = useState("");
++  const refresh = () => {
++    for (const key of ["members", "account-links", "users-admin"]) qc.invalidateQueries({ queryKey: [key] });
++  };
++
++  const link = useMutation({
++    mutationFn: async (userId: string) => {
++      const { data, error } = await supabase.rpc("link_member_account", { _member: member!.id, _user: userId });
++      if (error) throw new Error(error.message);
++      if (data !== "ok") throw new Error(data ?? "");
++    },
++    onSuccess: () => { toast.success("Conta vinculada ao cadastro"); refresh(); setSearch(""); onClose(); },
++    onError: (e) => toast.error(LINK_MESSAGES[e instanceof Error ? e.message : ""] ?? "Não foi possível vincular agora."),
++  });
++
++  const unlink = useMutation({
++    mutationFn: async () => {
++      const { data, error } = await supabase.rpc("unlink_member_account", { _member: member!.id });
++      if (error) throw new Error(error.message);
++      if (data !== "ok") throw new Error(data ?? "");
++    },
++    onSuccess: () => { toast.success("Conta desvinculada do cadastro"); refresh(); onClose(); },
++    onError: (e) => toast.error(LINK_MESSAGES[e instanceof Error ? e.message : ""] ?? "Não foi possível desvincular agora."),
++  });
++
++  const current = member?.user_id ? accounts.find((a) => a.account_id === member.user_id) : undefined;
++  const q = search.trim().toLowerCase();
++  const free = accounts
++    .filter((a) => !a.member_id)
++    .filter((a) => !q || (a.account_name ?? "").toLowerCase().includes(q) || (a.account_email ?? "").toLowerCase().includes(q));
++
++  return (
++    <Dialog open={!!member} onOpenChange={(o) => { if (!o) { setSearch(""); onClose(); } }}>
++      <DialogContent className="max-h-[90vh] max-w-lg overflow-y-auto">
++        <DialogHeader>
++          <DialogTitle>{member?.user_id ? "Conta vinculada" : "Vincular conta ao cadastro"}</DialogTitle>
++          <DialogDescription>{member?.full_name}</DialogDescription>
++        </DialogHeader>
++
++        {member?.user_id ? (
++          <div className="space-y-4">
++            <div className="rounded-xl border bg-card p-4 text-sm">
++              <p className="font-medium text-foreground">{current?.account_name || "Conta sem nome"}</p>
++              <p className="text-muted-foreground">{current?.account_email ?? "—"}</p>
++            </div>
++            <p className="text-xs text-muted-foreground">Desvincular não apaga a conta nem o cadastro: eles só deixam de estar ligados. Depois você pode vincular outra conta.</p>
++            <Button variant="outline" disabled={unlink.isPending} onClick={() => confirm(`Desvincular a conta de ${member.full_name}?`) && unlink.mutate()}>
++              <Link2Off className="h-4 w-4" /> Desvincular conta
++            </Button>
++          </div>
++        ) : (
++          <div className="space-y-3">
++            <p className="text-sm text-muted-foreground">Escolha a conta de acesso (login) desta pessoa. Só aparecem contas que ainda não estão ligadas a nenhum cadastro.</p>
++            <div className="relative">
++              <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
++              <Input className="pl-9" placeholder="Buscar conta por nome ou e-mail" value={search} onChange={(e) => setSearch(e.target.value)} />
++            </div>
++            <div className="max-h-72 divide-y overflow-y-auto rounded-xl border">
++              {free.length === 0 && <p className="p-4 text-sm text-muted-foreground">Nenhuma conta disponível para vincular.</p>}
++              {free.map((a) => (
++                <div key={a.account_id} className="flex items-center justify-between gap-3 p-3 text-sm">
++                  <div className="min-w-0">
++                    <p className="truncate font-medium text-foreground">{a.account_name || "Conta sem nome"}</p>
++                    <p className="truncate text-xs text-muted-foreground">{a.account_email ?? "—"}</p>
++                  </div>
++                  <Button
++                    size="sm"
++                    disabled={link.isPending}
++                    onClick={() => confirm(`Vincular a conta ${a.account_email ?? a.account_name} ao cadastro de ${member?.full_name}?`) && link.mutate(a.account_id)}
++                  >
++                    <Link2 className="h-4 w-4" /> Vincular
++                  </Button>
++                </div>
++              ))}
++            </div>
++          </div>
++        )}
++      </DialogContent>
++    </Dialog>
++  );
++}
+diff --git a/src/integrations/supabase/types.ts b/src/integrations/supabase/types.ts
+index de75ed8..e3732fa 100644
+--- a/src/integrations/supabase/types.ts
++++ b/src/integrations/supabase/types.ts
+@@ -1215,6 +1215,23 @@ export type Database = {
+         Args: { _cpf: string; _member: string }
+         Returns: string
+       }
++      link_member_account: {
++        Args: { _member: string; _user: string }
++        Returns: string
++      }
++      unlink_member_account: {
++        Args: { _member: string }
++        Returns: string
++      }
++      list_accounts_for_linking: {
++        Args: Record<PropertyKey, never>
++        Returns: {
++          account_email: string | null
++          account_id: string
++          account_name: string | null
++          member_id: string | null
++        }[]
++      }
+       find_member_duplicates: {
+         Args: { _cpf: string; _exclude?: string; _name: string; _rg: string }
+         Returns: {
+diff --git a/src/routes/_authenticated/painel.membros.tsx b/src/routes/_authenticated/painel.membros.tsx
+index 9040ae9..9a98247 100644
+--- a/src/routes/_authenticated/painel.membros.tsx
++++ b/src/routes/_authenticated/painel.membros.tsx
+@@ -2,7 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
+ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+ import { useState } from "react";
+ import { toast } from "sonner";
+-import { Plus, Pencil, Trash2, Search, Check, X, Link2, Copy, Download, Eye } from "lucide-react";
++import { Plus, Pencil, Trash2, Search, Check, X, Link2, Copy, Download, Eye, UserRoundCheck } from "lucide-react";
+ import { supabase } from "@/integrations/supabase/client";
+ import { useAccess } from "@/hooks/use-access";
+ import { Switch } from "@/components/ui/switch";
+@@ -17,6 +17,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
+ import { MemberForm, MemberAvatar, emptyMember, type MemberDraft } from "@/components/members/MemberForm";
+ import { APPROVAL_LABELS, MEMBER_STATUS, ageFrom, dateBR } from "@/lib/church";
+ import { downloadXls } from "@/lib/export";
++import { AccountBadge, LinkAccountDialog, useAccountLinks } from "@/components/members/MemberAccountLink";
+ import { OptimizePhotosButton } from "@/components/members/OptimizePhotosButton";
+ import { copyText } from "@/lib/clipboard";
+ import { purgeStorageTrash } from "@/lib/storage-trash";
+@@ -29,10 +30,14 @@ export const Route = createFileRoute("/_authenticated/painel/membros")({
+ });
+ 
+ function MembersPage() {
+-  const { can, data: access } = useAccess();
++  const { can, isFullAccess, data: access } = useAccess();
+   const qc = useQueryClient();
+   const [search, setSearch] = useState("");
+   const [statusFilter, setStatusFilter] = useState("todos");
++  const [accountFilter, setAccountFilter] = useState("todos");
++  const [linking, setLinking] = useState<{ id: string; full_name: string; user_id: string | null } | null>(null);
++  const accountLinks = useAccountLinks(isFullAccess);
++  const accountEmail = (userId: string | null) => (userId ? accountLinks.data?.find((a) => a.account_id === userId)?.account_email ?? null : null);
+   const [editing, setEditing] = useState<MemberDraft | null>(null);
+   const [notes, setNotes] = useState("");
+   const [deptIds, setDeptIds] = useState<string[]>([]);
+@@ -133,12 +138,15 @@ function MembersPage() {
+   const filtered = approved.filter(
+     (m) =>
+       (statusFilter === "todos" || m.status === statusFilter) &&
++      (accountFilter === "todos" || (accountFilter === "com_conta" ? !!m.user_id : !m.user_id)) &&
+       (m.full_name.toLowerCase().includes(search.toLowerCase()) || (m.cpf ?? "").includes(search) || (m.registration_number ?? "").toLowerCase().includes(search.toLowerCase())),
+   );
+ 
++  const withAccount = approved.filter((m) => !!m.user_id).length;
++
+   function exportXls() {
+-    const head = ["Matrícula", "Nome", "Nascimento", "Idade", "CPF", "RG", "Telefone", "E-mail", "Endereço", "Bairro", "Cidade", "CEP", "Estado civil", "Filiação", "Batizado", "Data batismo", "Igreja do batismo", "Departamento", "Cargo", "Status"];
+-    const rows = filtered.map((m) => [m.registration_number, m.full_name, dateBR(m.birth_date), ageFrom(m.birth_date) ?? "", m.cpf, m.rg, m.phone, m.email, m.address, m.neighborhood, m.city, m.zip_code, m.marital_status, dateBR(m.affiliated_on), m.baptized ? "Sim" : "Não", dateBR(m.baptism_date), m.baptism_church, deptNames(m.id).join(", "), roleName(m.church_role_id), MEMBER_STATUS[m.status] ?? m.status]);
++    const head = ["Matrícula", "Nome", "Nascimento", "Idade", "CPF", "RG", "Telefone", "E-mail", "Endereço", "Bairro", "Cidade", "CEP", "Estado civil", "Filiação", "Batizado", "Data batismo", "Igreja do batismo", "Departamento", "Cargo", "Status", "Conta"];
++    const rows = filtered.map((m) => [m.registration_number, m.full_name, dateBR(m.birth_date), ageFrom(m.birth_date) ?? "", m.cpf, m.rg, m.phone, m.email, m.address, m.neighborhood, m.city, m.zip_code, m.marital_status, dateBR(m.affiliated_on), m.baptized ? "Sim" : "Não", dateBR(m.baptism_date), m.baptism_church, deptNames(m.id).join(", "), roleName(m.church_role_id), MEMBER_STATUS[m.status] ?? m.status, m.user_id ? "Com conta" : "Sem conta"]);
+     downloadXls("membros", [head, ...rows], "Membros");
+   }
+ 
+@@ -180,7 +188,16 @@ function MembersPage() {
+                 {Object.entries(MEMBER_STATUS).map(([k, l]) => <SelectItem key={k} value={k}>{l}</SelectItem>)}
+               </SelectContent>
+             </Select>
++            <Select value={accountFilter} onValueChange={setAccountFilter}>
++              <SelectTrigger className="w-44"><SelectValue /></SelectTrigger>
++              <SelectContent>
++                <SelectItem value="todos">Com e sem conta</SelectItem>
++                <SelectItem value="com_conta">Com conta</SelectItem>
++                <SelectItem value="sem_conta">Sem conta</SelectItem>
++              </SelectContent>
++            </Select>
+           </div>
++          <p className="mt-3 text-sm text-muted-foreground">{withAccount} com conta · {approved.length - withAccount} sem conta (de {approved.length} cadastrados)</p>
+           <div className="mt-4 overflow-x-auto rounded-2xl border bg-card">
+             <table className="w-full text-sm">
+               <thead className="border-b text-left text-muted-foreground">
+@@ -189,12 +206,13 @@ function MembersPage() {
+                   <th className="p-4 font-medium">Contato</th>
+                   <th className="p-4 font-medium">Outros</th>
+                   <th className="p-4 font-medium">Status</th>
++                  <th className="p-4 font-medium">Conta</th>
+                   <th className="p-4" />
+                 </tr>
+               </thead>
+               <tbody>
+-                {isLoading && <tr><td className="p-4 text-muted-foreground" colSpan={5}>Carregando...</td></tr>}
+-                {!isLoading && filtered.length === 0 && <tr><td className="p-6 text-center text-muted-foreground" colSpan={5}>Nenhum membro encontrado.</td></tr>}
++                {isLoading && <tr><td className="p-4 text-muted-foreground" colSpan={6}>Carregando...</td></tr>}
++                {!isLoading && filtered.length === 0 && <tr><td className="p-6 text-center text-muted-foreground" colSpan={6}>Nenhum membro encontrado.</td></tr>}
+                 {filtered.map((m) => {
+                   const age = ageFrom(m.birth_date);
+                   return (
+@@ -214,8 +232,10 @@ function MembersPage() {
+                         <Badge variant={m.status === "membro_ativo" ? "default" : "secondary"}>{MEMBER_STATUS[m.status] ?? m.status}</Badge>
+                         {m.approval_status === "recusado" && <p className="mt-1 text-xs text-destructive">Recusado</p>}
+                       </td>
++                      <td className="p-4"><AccountBadge linked={!!m.user_id} email={accountEmail(m.user_id)} /></td>
+                       <td className="whitespace-nowrap p-4 text-right">
+                         <Button size="icon" variant="ghost" asChild aria-label="Ver perfil"><Link to="/painel/membro/$id" params={{ id: m.id }}><Eye className="h-4 w-4" /></Link></Button>
++                        {isFullAccess && <Button size="icon" variant="ghost" aria-label={m.user_id ? "Ver conta vinculada" : "Vincular conta"} title={m.user_id ? "Ver conta vinculada" : "Vincular conta"} onClick={() => setLinking({ id: m.id, full_name: m.full_name, user_id: m.user_id })}><UserRoundCheck className="h-4 w-4" /></Button>}
+                         {can("edit_member") && <Button size="icon" variant="ghost" onClick={() => openEdit({ ...m })}><Pencil className="h-4 w-4" /></Button>}
+                         {can("delete_member") && (
+                           <Button size="icon" variant="ghost" onClick={() => confirm(`Excluir ${m.full_name}?`) && remove.mutate(m.id)}><Trash2 className="h-4 w-4" /></Button>
+@@ -271,6 +291,8 @@ function MembersPage() {
+         )}
+       </Tabs>
+ 
++      {isFullAccess && <LinkAccountDialog member={linking} accounts={accountLinks.data ?? []} onClose={() => setLinking(null)} />}
++
+       <Dialog open={!!editing} onOpenChange={(o) => !o && setEditing(null)}>
+         <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
+           <DialogHeader>
+diff --git a/src/test/member-account-link.test.tsx b/src/test/member-account-link.test.tsx
+new file mode 100644
+index 0000000..acbc95b
+--- /dev/null
++++ b/src/test/member-account-link.test.tsx
+@@ -0,0 +1,76 @@
++import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
++import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
++import { afterEach, describe, expect, it, vi } from "vitest";
++
++const rpc = vi.fn();
++vi.mock("@/integrations/supabase/client", () => ({ supabase: { rpc: (...a: unknown[]) => rpc(...a) } }));
++vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
++
++import { AccountBadge, LinkAccountDialog, type AccountRow } from "@/components/members/MemberAccountLink";
++
++const accounts: AccountRow[] = [
++  { account_id: "u1", account_name: "Maria Souza", account_email: "maria@ex.com", member_id: null },
++  { account_id: "u2", account_name: "João Lima", account_email: "joao@ex.com", member_id: "m9" },
++  { account_id: "u3", account_name: "Ana Paula", account_email: "ana@ex.com", member_id: null },
++];
++
++function renderDialog(member: { id: string; full_name: string; user_id: string | null }, onClose = vi.fn()) {
++  const qc = new QueryClient();
++  render(<QueryClientProvider client={qc}><LinkAccountDialog member={member} accounts={accounts} onClose={onClose} /></QueryClientProvider>);
++  return onClose;
++}
++
++afterEach(() => {
++  cleanup();
++  rpc.mockReset();
++  vi.restoreAllMocks();
++});
++
++describe("AccountBadge", () => {
++  it("mostra Com conta (e o e-mail) ou Sem conta", () => {
++    render(<AccountBadge linked email="maria@ex.com" />);
++    expect(screen.getByText("Com conta")).toBeTruthy();
++    expect(screen.getByText("maria@ex.com")).toBeTruthy();
++    cleanup();
++    render(<AccountBadge linked={false} />);
++    expect(screen.getByText("Sem conta")).toBeTruthy();
++  });
++});
++
++describe("LinkAccountDialog", () => {
++  it("lista só contas ainda não vinculadas e filtra pela busca", () => {
++    renderDialog({ id: "m1", full_name: "Maria da Silva", user_id: null });
++    expect(screen.getByText("Maria Souza")).toBeTruthy();
++    expect(screen.getByText("Ana Paula")).toBeTruthy();
++    expect(screen.queryByText("João Lima")).toBeNull();
++    fireEvent.change(screen.getByPlaceholderText(/Buscar conta/), { target: { value: "ana@" } });
++    expect(screen.queryByText("Maria Souza")).toBeNull();
++    expect(screen.getByText("Ana Paula")).toBeTruthy();
++  });
++
++  it("vincula a conta escolhida ao cadastro", async () => {
++    vi.spyOn(window, "confirm").mockReturnValue(true);
++    rpc.mockResolvedValue({ data: "ok", error: null });
++    const onClose = renderDialog({ id: "m1", full_name: "Maria da Silva", user_id: null });
++    fireEvent.click(screen.getAllByText("Vincular")[0]!);
++    await waitFor(() => expect(onClose).toHaveBeenCalled());
++    expect(rpc).toHaveBeenCalledWith("link_member_account", { _member: "m1", _user: "u1" });
++  });
++
++  it("não chama o banco se o CEO cancelar a confirmação", () => {
++    vi.spyOn(window, "confirm").mockReturnValue(false);
++    renderDialog({ id: "m1", full_name: "Maria da Silva", user_id: null });
++    fireEvent.click(screen.getAllByText("Vincular")[0]!);
++    expect(rpc).not.toHaveBeenCalled();
++  });
++
++  it("mostra a conta atual e permite desvincular", async () => {
++    vi.spyOn(window, "confirm").mockReturnValue(true);
++    rpc.mockResolvedValue({ data: "ok", error: null });
++    const onClose = renderDialog({ id: "m9", full_name: "João Lima", user_id: "u2" });
++    expect(screen.getByText("joao@ex.com")).toBeTruthy();
++    fireEvent.click(screen.getByText("Desvincular conta"));
++    await waitFor(() => expect(onClose).toHaveBeenCalled());
++    expect(rpc).toHaveBeenCalledWith("unlink_member_account", { _member: "m9" });
++  });
++});
+-- 
+2.43.0
+

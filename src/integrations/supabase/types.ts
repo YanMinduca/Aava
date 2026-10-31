@@ -1215,6 +1215,23 @@ export type Database = {
         Args: { _cpf: string; _member: string }
         Returns: string
       }
+      link_member_account: {
+        Args: { _member: string; _user: string }
+        Returns: string
+      }
+      unlink_member_account: {
+        Args: { _member: string }
+        Returns: string
+      }
+      list_accounts_for_linking: {
+        Args: Record<PropertyKey, never>
+        Returns: {
+          account_email: string | null
+          account_id: string
+          account_name: string | null
+          member_id: string | null
+        }[]
+      }
       find_member_duplicates: {
         Args: { _cpf: string; _exclude?: string; _name: string; _rg: string }
         Returns: {
