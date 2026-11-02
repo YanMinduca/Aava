@@ -20,6 +20,7 @@ import { playRead, playWarning, unlockAudio } from "@/lib/sounds";
 import { downloadXls } from "@/lib/export";
 import { purgeStorageTrash } from "@/lib/storage-trash";
 import { eventError, fmtDateTime, moneyBR, PAYMENT_STATUS, REGISTRATION_STATUS, TICKET_STATUS } from "@/lib/events";
+import { ageFrom, dateBR } from "@/lib/church";
 import { siteMeta } from "@/lib/site-query";
 import type { Tables } from "@/integrations/supabase/types";
 
@@ -268,9 +269,9 @@ function Registrations({ eventId, title, onChange }: { eventId: string; title: s
   const open = (regs.data ?? []).find((r) => r.id === openId) ?? null;
 
   function exportXls() {
-    const head = ["Nome", "CPF", "Telefone", "E-mail", "Lote", "Quantidade", "Total (R$)", "Parcelas pagas", "Situação", "Uso de imagem", "Inscrito em"];
+    const head = ["Nome", "CPF", "Data de nascimento", "Idade", "Telefone", "E-mail", "Lote", "Quantidade", "Total (R$)", "Parcelas pagas", "Situação", "Uso de imagem", "Inscrito em"];
     const rows = list.map((r) => [
-      r.attendee_name, r.attendee_cpf ?? "", r.attendee_phone ?? "", r.attendee_email ?? "", r.event_lots?.name ?? "", r.quantity, Number(r.total),
+      r.attendee_name, r.attendee_cpf ?? "", dateBR(r.attendee_birth_date), ageFrom(r.attendee_birth_date) ?? "", r.attendee_phone ?? "", r.attendee_email ?? "", r.event_lots?.name ?? "", r.quantity, Number(r.total),
       `${(r.event_payments ?? []).filter((p) => p.status === "paid").length}/${(r.event_payments ?? []).length}`,
       REGISTRATION_STATUS[r.status] ?? r.status, r.image_consent ? `Autorizado em ${fmtDateTime(r.image_consent_at)}` : "Não solicitado/sem aceite", fmtDateTime(r.created_at),
     ]);
@@ -364,6 +365,7 @@ function RegistrationDetail({ reg, onChange }: { reg: RegRow; onChange: () => vo
         <div className="grid gap-1 text-muted-foreground">
           <p>{reg.event_lots?.name} × {reg.quantity} · {reg.total > 0 ? moneyBR(reg.total) : "Gratuito"}</p>
           <p>CPF: {reg.attendee_cpf || "—"} · Tel.: {reg.attendee_phone || "—"}</p>
+          <p>Nascimento: {dateBR(reg.attendee_birth_date)}{ageFrom(reg.attendee_birth_date) !== null ? ` (${ageFrom(reg.attendee_birth_date)} anos)` : ""}</p>
           <p>{reg.attendee_email}</p>
           <p>Uso de imagem: {reg.image_consent ? `autorizado em ${fmtDateTime(reg.image_consent_at)}` : "sem aceite registrado"}</p>
           <p>Inscrito em {fmtDateTime(reg.created_at)}{reg.released_manually ? " · ingresso liberado manualmente" : ""}</p>

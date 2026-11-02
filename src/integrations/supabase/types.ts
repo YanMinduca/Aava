@@ -316,6 +316,7 @@ export type Database = {
       }
       event_registrations: {
         Row: {
+          attendee_birth_date: string | null
           attendee_cpf: string | null
           attendee_email: string | null
           attendee_name: string
@@ -339,6 +340,7 @@ export type Database = {
           user_id: string
         }
         Insert: {
+          attendee_birth_date?: string | null
           attendee_cpf?: string | null
           attendee_email?: string | null
           attendee_name: string
@@ -362,6 +364,7 @@ export type Database = {
           user_id: string
         }
         Update: {
+          attendee_birth_date?: string | null
           attendee_cpf?: string | null
           attendee_email?: string | null
           attendee_name?: string
@@ -1158,9 +1161,10 @@ export type Database = {
         }[]
       }
       ensure_visitor_profile: {
-        Args: { _cpf: string; _name: string; _phone: string }
+        Args: { _birth_date?: string; _cpf: string; _name: string; _phone: string }
         Returns: string
       }
+      set_my_birth_date: { Args: { _birth_date: string }; Returns: undefined }
       event_admin_stats: { Args: { _event: string }; Returns: Json }
       is_valid_cpf: { Args: { _cpf: string }; Returns: boolean }
       public_event: { Args: { _slug: string }; Returns: Json }

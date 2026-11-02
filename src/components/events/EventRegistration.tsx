@@ -13,7 +13,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
-  eventError, fmtDate, formatCpf, isValidCpf, lotIsOpen, moneyBR, registrationIsOpen,
+  eventError, fmtDate, formatCpf, isValidBirthDate, isValidCpf, lotIsOpen, moneyBR, registrationIsOpen,
   type PublicEventDetail, type PublicLot,
 } from "@/lib/events";
 
@@ -33,7 +33,7 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
     queryFn: async () => {
       const { data } = await supabase
         .from("members")
-        .select("id, full_name, cpf, phone, status, approval_status")
+        .select("id, full_name, cpf, phone, birth_date, status, approval_status")
         .eq("user_id", uid!)
         .maybeSingle();
       return data;
@@ -54,7 +54,8 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
   const [cpf, setCpf] = useState("");
   const [installments, setInstallments] = useState(1);
   const [imageConsent, setImageConsent] = useState(false);
-  const [visitor, setVisitor] = useState({ name: "", cpf: "", phone: "" });
+  const [birthDate, setBirthDate] = useState("");
+  const [visitor, setVisitor] = useState({ name: "", cpf: "", phone: "", birthDate: "" });
 
   useEffect(() => {
     if (profile.data?.cpf) setCpf(formatCpf(profile.data.cpf));
@@ -69,7 +70,7 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
 
   const createVisitor = useMutation({
     mutationFn: async () => {
-      const { error } = await supabase.rpc("ensure_visitor_profile", { _name: visitor.name, _cpf: visitor.cpf, _phone: visitor.phone });
+      const { error } = await supabase.rpc("ensure_visitor_profile", { _name: visitor.name, _cpf: visitor.cpf, _phone: visitor.phone, _birth_date: visitor.birthDate });
       if (error) throw error;
     },
     onSuccess: () => {
@@ -108,6 +109,11 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
       if (event.limit_per_person && !isValidCpf(cpf)) throw new Error("invalid_cpf");
       if (cpf && !isValidCpf(cpf)) throw new Error("invalid_cpf");
       if (event.require_image_consent && !imageConsent) throw new Error("image_consent_required");
+      if (!profile.data?.birth_date) {
+        if (!isValidBirthDate(birthDate)) throw new Error("invalid_birth_date");
+        const { error: bErr } = await supabase.rpc("set_my_birth_date", { _birth_date: birthDate });
+        if (bErr) throw bErr;
+      }
       const { error } = await supabase.rpc("register_for_event", {
         _event: event.id, _lot: lotId, _quantity: qty, _cpf: cpf, _installments: installments,
         _image_consent: event.require_image_consent && imageConsent,
@@ -182,12 +188,17 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
               toast.error(eventError(new Error("invalid_cpf")));
               return;
             }
+            if (!isValidBirthDate(visitor.birthDate)) {
+              toast.error(eventError(new Error("invalid_birth_date")));
+              return;
+            }
             createVisitor.mutate();
           }}
         >
           <div className="space-y-1.5"><Label>Nome completo *</Label><Input required value={visitor.name} onChange={(e) => setVisitor({ ...visitor, name: e.target.value })} /></div>
           <div className="space-y-1.5"><Label>CPF *</Label><Input required inputMode="numeric" placeholder="000.000.000-00" value={visitor.cpf} onChange={(e) => setVisitor({ ...visitor, cpf: formatCpf(e.target.value) })} /></div>
           <div className="space-y-1.5"><Label>Telefone / WhatsApp *</Label><Input required inputMode="tel" value={visitor.phone} onChange={(e) => setVisitor({ ...visitor, phone: e.target.value })} /></div>
+          <div className="space-y-1.5"><Label>Data de nascimento *</Label><Input required type="date" max={new Date().toISOString().slice(0, 10)} value={visitor.birthDate} onChange={(e) => setVisitor({ ...visitor, birthDate: e.target.value })} /></div>
           <Button type="submit" className="w-full" disabled={createVisitor.isPending}>Continuar</Button>
         </form>
         <p className="mt-4 text-xs text-muted-foreground">
@@ -287,6 +298,14 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
           </div>
         </div>
 
+        {!profile.data.birth_date && (
+          <div className="space-y-1.5">
+            <Label>Data de nascimento *</Label>
+            <Input required type="date" max={new Date().toISOString().slice(0, 10)} value={birthDate} onChange={(e) => setBirthDate(e.target.value)} />
+            <p className="text-xs text-muted-foreground">Seu cadastro ainda não tem a data de nascimento. Ela será salva para as próximas inscrições.</p>
+          </div>
+        )}
+
         {payRequired && event.allow_installments && event.max_installments > 1 && (
           <div className="space-y-1.5">
             <Label>Forma de pagamento (Pix)</Label>
@@ -324,7 +343,7 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
           <p className="text-sm text-muted-foreground">
             Total: <strong className="text-lg text-foreground">{payRequired ? moneyBR(total) : "Gratuito"}</strong>
           </p>
-          <Button type="submit" size="lg" disabled={register.isPending || !lotId || (event.require_image_consent && !imageConsent)}>Inscrever-se</Button>
+          <Button type="submit" size="lg" disabled={register.isPending || !lotId || (event.require_image_consent && !imageConsent) || (!profile.data.birth_date && !birthDate)}>Inscrever-se</Button>
         </div>
       </form>
     </Box>

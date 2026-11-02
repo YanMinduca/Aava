@@ -37,6 +37,16 @@ export function isValidCpf(v: string) {
   return calc(9) === Number(d[9]) && calc(10) === Number(d[10]);
 }
 
+/** Data de nascimento (yyyy-mm-dd): obrigatória, não pode ser futura nem anterior a 120 anos. */
+export function isValidBirthDate(v: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+  const d = new Date(v + "T00:00:00");
+  if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== v) return false;
+  const now = new Date();
+  const min = new Date(now.getFullYear() - 120, now.getMonth(), now.getDate());
+  return d <= now && d >= min;
+}
+
 export const slugify = (s: string) =>
   s
     .normalize("NFD")
@@ -64,6 +74,7 @@ const ERRORS: Record<string, string> = {
   cpf_belongs_to_member: "Este CPF já consta no cadastro de um membro. Escolha “Sou membro” e entre com a conta de membro.",
   invalid_name: "Digite seu nome completo.",
   invalid_phone: "Informe um telefone para contato.",
+  invalid_birth_date: "Data de nascimento inválida. Confira o dia, mês e ano.",
   cannot_cancel: "Esta inscrição não pode mais ser cancelada por aqui. Fale com a igreja.",
   payment_closed: "Este pagamento não pode mais ser alterado.",
   invalid_proof: "Arquivo de comprovante inválido.",
