@@ -75,6 +75,8 @@ const ERRORS: Record<string, string> = {
   invalid_name: "Digite seu nome completo.",
   invalid_phone: "Informe um telefone para contato.",
   invalid_birth_date: "Data de nascimento inválida. Confira o dia, mês e ano.",
+  invalid_institution: "Informe a instituição da qual você participa (ou escreva \"Nenhuma\").",
+  invalid_religion: "Escolha a sua religião na lista.",
   cannot_cancel: "Esta inscrição não pode mais ser cancelada por aqui. Fale com a igreja.",
   payment_closed: "Este pagamento não pode mais ser alterado.",
   invalid_proof: "Arquivo de comprovante inválido.",

@@ -319,8 +319,10 @@ export type Database = {
           attendee_birth_date: string | null
           attendee_cpf: string | null
           attendee_email: string | null
+          attendee_institution: string | null
           attendee_name: string
           attendee_phone: string | null
+          attendee_religion: string | null
           cancelled_at: string | null
           created_at: string
           event_id: string
@@ -343,8 +345,10 @@ export type Database = {
           attendee_birth_date?: string | null
           attendee_cpf?: string | null
           attendee_email?: string | null
+          attendee_institution?: string | null
           attendee_name: string
           attendee_phone?: string | null
+          attendee_religion?: string | null
           cancelled_at?: string | null
           created_at?: string
           event_id: string
@@ -367,8 +371,10 @@ export type Database = {
           attendee_birth_date?: string | null
           attendee_cpf?: string | null
           attendee_email?: string | null
+          attendee_institution?: string | null
           attendee_name?: string
           attendee_phone?: string | null
+          attendee_religion?: string | null
           cancelled_at?: string | null
           created_at?: string
           event_id?: string
@@ -1193,8 +1199,10 @@ export type Database = {
           _event: string
           _image_consent?: boolean
           _installments?: number
+          _institution?: string
           _lot: string
           _quantity: number
+          _religion?: string
         }
         Returns: string
       }

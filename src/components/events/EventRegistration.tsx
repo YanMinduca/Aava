@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { RELIGIONS } from "@/lib/event-data";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   eventError, fmtDate, formatCpf, isValidBirthDate, isValidCpf, lotIsOpen, moneyBR, registrationIsOpen,
@@ -55,6 +56,8 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
   const [installments, setInstallments] = useState(1);
   const [imageConsent, setImageConsent] = useState(false);
   const [birthDate, setBirthDate] = useState("");
+  const [institution, setInstitution] = useState("");
+  const [religion, setReligion] = useState("");
   const [visitor, setVisitor] = useState({ name: "", cpf: "", phone: "", birthDate: "" });
 
   useEffect(() => {
@@ -109,6 +112,8 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
       if (event.limit_per_person && !isValidCpf(cpf)) throw new Error("invalid_cpf");
       if (cpf && !isValidCpf(cpf)) throw new Error("invalid_cpf");
       if (event.require_image_consent && !imageConsent) throw new Error("image_consent_required");
+      if (!institution.trim()) throw new Error("invalid_institution");
+      if (!religion) throw new Error("invalid_religion");
       if (!profile.data?.birth_date) {
         if (!isValidBirthDate(birthDate)) throw new Error("invalid_birth_date");
         const { error: bErr } = await supabase.rpc("set_my_birth_date", { _birth_date: birthDate });
@@ -117,6 +122,7 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
       const { error } = await supabase.rpc("register_for_event", {
         _event: event.id, _lot: lotId, _quantity: qty, _cpf: cpf, _installments: installments,
         _image_consent: event.require_image_consent && imageConsent,
+        _institution: institution.trim(), _religion: religion,
       });
       if (error) throw error;
     },
@@ -306,6 +312,22 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
           </div>
         )}
 
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="space-y-1.5">
+            <Label>Qual instituição você participa? *</Label>
+            <Input required maxLength={120} placeholder='Ex.: igreja, escola, ONG… ou "Nenhuma"' value={institution} onChange={(e) => setInstitution(e.target.value)} />
+          </div>
+          <div className="space-y-1.5">
+            <Label>Qual religião você é? *</Label>
+            <Select value={religion} onValueChange={setReligion}>
+              <SelectTrigger><SelectValue placeholder="Selecione" /></SelectTrigger>
+              <SelectContent>
+                {RELIGIONS.map((r) => <SelectItem key={r.value} value={r.value}>{r.label}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+
         {payRequired && event.allow_installments && event.max_installments > 1 && (
           <div className="space-y-1.5">
             <Label>Forma de pagamento (Pix)</Label>
@@ -343,7 +365,7 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
           <p className="text-sm text-muted-foreground">
             Total: <strong className="text-lg text-foreground">{payRequired ? moneyBR(total) : "Gratuito"}</strong>
           </p>
-          <Button type="submit" size="lg" disabled={register.isPending || !lotId || (event.require_image_consent && !imageConsent) || (!profile.data.birth_date && !birthDate)}>Inscrever-se</Button>
+          <Button type="submit" size="lg" disabled={register.isPending || !lotId || (event.require_image_consent && !imageConsent) || !institution.trim() || !religion || (!profile.data.birth_date && !birthDate)}>Inscrever-se</Button>
         </div>
       </form>
     </Box>

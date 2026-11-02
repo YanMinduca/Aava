@@ -13,6 +13,8 @@ import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { EventData } from "@/components/events/EventData";
+import { religionLabel } from "@/lib/event-data";
 import { EventForm, draftFrom } from "@/components/events/EventForm";
 import { QrScanner, type ScanFeedbackKind } from "@/components/events/QrScanner";
 import { formatShortCode } from "@/lib/images";
@@ -122,12 +124,14 @@ function EventAdmin() {
         <TabsList className="flex-wrap">
           <TabsTrigger value="resumo">Resumo</TabsTrigger>
           {canVerify && <TabsTrigger value="inscricoes">Inscrições</TabsTrigger>}
+          {canVerify && <TabsTrigger value="dados">Dados</TabsTrigger>}
           {canCheckin && <TabsTrigger value="checkin">Check-in</TabsTrigger>}
           {canManage && <TabsTrigger value="editar">Editar</TabsTrigger>}
         </TabsList>
 
         <TabsContent value="resumo"><Summary stats={stats.data} loading={stats.isLoading} /></TabsContent>
         {canVerify && <TabsContent value="inscricoes"><Registrations eventId={id} title={e.title} onChange={refreshAll} /></TabsContent>}
+        {canVerify && <TabsContent value="dados"><EventData eventId={id} title={e.title} /></TabsContent>}
         {canCheckin && <TabsContent value="checkin"><CheckIn eventId={id} onChange={refreshAll} /></TabsContent>}
         {canManage && (
           <TabsContent value="editar">
@@ -269,9 +273,9 @@ function Registrations({ eventId, title, onChange }: { eventId: string; title: s
   const open = (regs.data ?? []).find((r) => r.id === openId) ?? null;
 
   function exportXls() {
-    const head = ["Nome", "CPF", "Data de nascimento", "Idade", "Telefone", "E-mail", "Lote", "Quantidade", "Total (R$)", "Parcelas pagas", "Situação", "Uso de imagem", "Inscrito em"];
+    const head = ["Nome", "CPF", "Data de nascimento", "Idade", "Religião", "Instituição", "Telefone", "E-mail", "Lote", "Quantidade", "Total (R$)", "Parcelas pagas", "Situação", "Uso de imagem", "Inscrito em"];
     const rows = list.map((r) => [
-      r.attendee_name, r.attendee_cpf ?? "", dateBR(r.attendee_birth_date), ageFrom(r.attendee_birth_date) ?? "", r.attendee_phone ?? "", r.attendee_email ?? "", r.event_lots?.name ?? "", r.quantity, Number(r.total),
+      r.attendee_name, r.attendee_cpf ?? "", dateBR(r.attendee_birth_date), ageFrom(r.attendee_birth_date) ?? "", religionLabel(r.attendee_religion), r.attendee_institution ?? "", r.attendee_phone ?? "", r.attendee_email ?? "", r.event_lots?.name ?? "", r.quantity, Number(r.total),
       `${(r.event_payments ?? []).filter((p) => p.status === "paid").length}/${(r.event_payments ?? []).length}`,
       REGISTRATION_STATUS[r.status] ?? r.status, r.image_consent ? `Autorizado em ${fmtDateTime(r.image_consent_at)}` : "Não solicitado/sem aceite", fmtDateTime(r.created_at),
     ]);
@@ -366,6 +370,7 @@ function RegistrationDetail({ reg, onChange }: { reg: RegRow; onChange: () => vo
           <p>{reg.event_lots?.name} × {reg.quantity} · {reg.total > 0 ? moneyBR(reg.total) : "Gratuito"}</p>
           <p>CPF: {reg.attendee_cpf || "—"} · Tel.: {reg.attendee_phone || "—"}</p>
           <p>Nascimento: {dateBR(reg.attendee_birth_date)}{ageFrom(reg.attendee_birth_date) !== null ? ` (${ageFrom(reg.attendee_birth_date)} anos)` : ""}</p>
+          <p>Religião: {religionLabel(reg.attendee_religion)} · Instituição: {reg.attendee_institution || "—"}</p>
           <p>{reg.attendee_email}</p>
           <p>Uso de imagem: {reg.image_consent ? `autorizado em ${fmtDateTime(reg.image_consent_at)}` : "sem aceite registrado"}</p>
           <p>Inscrito em {fmtDateTime(reg.created_at)}{reg.released_manually ? " · ingresso liberado manualmente" : ""}</p>
