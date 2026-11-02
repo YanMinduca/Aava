@@ -31,11 +31,11 @@ import {
 import { downloadSheets } from "@/lib/export";
 import { ageFrom, dateBR } from "@/lib/church";
 import { fmtDateTime, REGISTRATION_STATUS } from "@/lib/events";
-import { RELIGIONS, religionLabel, summarizePeople } from "@/lib/event-data";
+import { MEMBER_RELIGION, RELIGIONS, religionLabel, summarizePeople } from "@/lib/event-data";
 
 type Row = Tables<"event_registrations"> & { event_lots: { name: string } | null };
 
-const COLORS = ["#2563eb", "#16a34a", "#9333ea", "#ea580c", "#64748b", "#94a3b8"];
+const COLORS = ["#2563eb", "#16a34a", "#9333ea", "#ea580c", "#0d9488", "#64748b", "#94a3b8"];
 const fmtAge = (n: number | null | undefined) => (n == null ? "—" : String(n).replace(".", ","));
 
 /** Aba "Dados": médias, gráficos, relatório em Excel e consulta pessoa a pessoa. */
@@ -287,6 +287,7 @@ export function EventData({ eventId, title }: { eventId: string; title: string }
                     {r.label}
                   </SelectItem>
                 ))}
+                <SelectItem value={MEMBER_RELIGION.value}>{MEMBER_RELIGION.label}</SelectItem>
                 <SelectItem value="nao">Não informado</SelectItem>
               </SelectContent>
             </Select>

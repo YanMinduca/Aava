@@ -51,6 +51,32 @@ describe("summarizePeople", () => {
     expect(e.ageStats.avg).toBeNull();
     expect(e.religions).toEqual([]);
   });
+  it("resume membros como 'Membro da igreja' e só mostra a linha quando existe", () => {
+    expect(s.religions.find((r) => r.value === "membro_igreja")).toBeUndefined();
+    const m = summarizePeople(
+      [
+        {
+          attendee_birth_date: "a",
+          attendee_religion: "membro_igreja",
+          attendee_institution: "Membro da igreja",
+        },
+        {
+          attendee_birth_date: "b",
+          attendee_religion: "membro_igreja",
+          attendee_institution: "Membro da igreja",
+        },
+        { attendee_birth_date: "c", attendee_religion: "catolico", attendee_institution: "Escola" },
+      ],
+      ageOf,
+    );
+    expect(m.religions.find((r) => r.value === "membro_igreja")).toMatchObject({
+      label: "Membro da igreja",
+      count: 2,
+      pct: 66.7,
+    });
+    expect(m.institutions[0]).toEqual({ name: "Membro da igreja", count: 2 });
+    expect(religionLabel("membro_igreja")).toBe("Membro da igreja");
+  });
   it("rotula religiões", () => {
     expect(religionLabel("matriz_africana")).toBe("Matriz africana");
     expect(religionLabel(null)).toBe("Não informado");

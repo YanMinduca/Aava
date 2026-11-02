@@ -8,8 +8,12 @@ export const RELIGIONS = [
   { value: "outros", label: "Outros" },
 ] as const;
 
+/** Membros não respondem o questionário: a inscrição fica registrada como "Membro da igreja". */
+export const MEMBER_RELIGION = { value: "membro_igreja", label: "Membro da igreja" } as const;
+
 export function religionLabel(v?: string | null) {
   if (!v) return "Não informado";
+  if (v === MEMBER_RELIGION.value) return MEMBER_RELIGION.label;
   return RELIGIONS.find((r) => r.value === v)?.label ?? v;
 }
 
@@ -68,9 +72,11 @@ export function summarizePeople(
   const rel = new Map<string, number>();
   for (const p of people)
     rel.set(p.attendee_religion ?? "", (rel.get(p.attendee_religion ?? "") ?? 0) + 1);
-  const religions = [...RELIGIONS.map((r) => r.value as string), ""]
+  const religions = [...RELIGIONS.map((r) => r.value as string), MEMBER_RELIGION.value, ""]
     .map((value) => ({ value, label: religionLabel(value || null), count: rel.get(value) ?? 0 }))
-    .filter((r) => r.count > 0 || (r.value !== "" && total > 0))
+    .filter(
+      (r) => r.count > 0 || (r.value !== "" && r.value !== MEMBER_RELIGION.value && total > 0),
+    )
     .map((r) => ({ ...r, pct: total ? round1((r.count / total) * 100) : 0 }));
 
   const inst = new Map<string, { name: string; count: number }>();
