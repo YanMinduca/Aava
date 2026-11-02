@@ -1,0 +1,278 @@
+diff --git a/drizzle/migrations/0024_event_birth_date.sql b/drizzle/migrations/0024_event_birth_date.sql
+new file mode 100644
+index 0000000..ad2bcef
+--- /dev/null
++++ b/drizzle/migrations/0024_event_birth_date.sql
+@@ -0,0 +1,76 @@
++-- Data de nascimento nas inscrições de eventos.
++-- 1) Visitante informa a data ao criar o cadastro (members.birth_date já existe).
++-- 2) Cada inscrição guarda uma cópia (attendee_birth_date) para o relatório do evento.
++-- 3) Quem já tem cadastro sem data (visitantes antigos) preenche na própria inscrição.
++
++alter table public.event_registrations
++  add column if not exists attendee_birth_date date;
++
++-- Validação reutilizável: obrigatória, não pode ser futura nem anterior a 120 anos.
++create or replace function public.is_valid_birth_date(_d date)
++returns boolean language sql immutable as $$
++  select _d is not null and _d <= current_date and _d >= (current_date - interval '120 years')::date;
++$$;
++
++-- Assinatura muda (novo parâmetro): remove a antiga para não haver sobrecarga ambígua.
++drop function if exists public.ensure_visitor_profile(text, text, text);
++
++create or replace function public.ensure_visitor_profile(_name text, _cpf text, _phone text, _birth_date date default null)
++returns uuid language plpgsql security definer set search_path = public as $$
++declare uid uuid := auth.uid(); mid uuid; d text := regexp_replace(coalesce(_cpf, ''), '\D', '', 'g');
++begin
++  if uid is null then raise exception 'login_required'; end if;
++  select id into mid from public.members where user_id = uid;
++  if mid is not null then return mid; end if;
++  if coalesce(array_length(string_to_array(btrim(coalesce(_name, '')), ' '), 1), 0) < 2 then raise exception 'invalid_name'; end if;
++  if not public.is_valid_cpf(d) then raise exception 'invalid_cpf'; end if;
++  if btrim(coalesce(_phone, '')) = '' then raise exception 'invalid_phone'; end if;
++  if not public.is_valid_birth_date(_birth_date) then raise exception 'invalid_birth_date'; end if;
++  if exists (select 1 from public.members m where regexp_replace(coalesce(m.cpf, ''), '\D', '', 'g') = d and m.user_id is null) then
++    raise exception 'cpf_belongs_to_member';
++  end if;
++  if exists (select 1 from public.members m where regexp_replace(coalesce(m.cpf, ''), '\D', '', 'g') = d) then
++    raise exception 'cpf_in_use';
++  end if;
++  perform set_config('app.event_visitor', 'on', true);
++  insert into public.members (full_name, cpf, phone, email, birth_date, status, approval_status, user_id)
++  values (btrim(_name), substr(d,1,3)||'.'||substr(d,4,3)||'.'||substr(d,7,3)||'-'||substr(d,10,2), btrim(_phone),
++          (select u.email from auth.users u where u.id = uid), _birth_date, 'visitante', 'aprovado', uid)
++  returning id into mid;
++  perform set_config('app.event_visitor', 'off', true);
++  return mid;
++end $$;
++
++revoke all on function public.ensure_visitor_profile(text, text, text, date) from public, anon;
++grant execute on function public.ensure_visitor_profile(text, text, text, date) to authenticated, service_role;
++
++-- Quem já tem cadastro, mas sem data de nascimento, completa pela inscrição (só preenche se estiver vazia).
++create or replace function public.set_my_birth_date(_birth_date date)
++returns void language plpgsql security definer set search_path = public as $$
++begin
++  if auth.uid() is null then raise exception 'login_required'; end if;
++  if not public.is_valid_birth_date(_birth_date) then raise exception 'invalid_birth_date'; end if;
++  update public.members set birth_date = _birth_date where user_id = auth.uid() and birth_date is null;
++end $$;
++
++revoke all on function public.set_my_birth_date(date) from public, anon;
++grant execute on function public.set_my_birth_date(date) to authenticated, service_role;
++
++-- Copia a data do cadastro para a inscrição (evita redefinir register_for_event inteira).
++create or replace function public.event_registration_birth_date()
++returns trigger language plpgsql security definer set search_path = public as $$
++begin
++  if new.attendee_birth_date is null and new.member_id is not null then
++    select m.birth_date into new.attendee_birth_date from public.members m where m.id = new.member_id;
++  end if;
++  return new;
++end $$;
++
++drop trigger if exists trg_event_registration_birth_date on public.event_registrations;
++create trigger trg_event_registration_birth_date
++  before insert on public.event_registrations
++  for each row execute function public.event_registration_birth_date();
++
++-- Inscrições anteriores: aproveita a data que já estiver no cadastro.
++update public.event_registrations r set attendee_birth_date = m.birth_date
++  from public.members m where m.id = r.member_id and r.attendee_birth_date is null;
+diff --git a/src/components/events/EventRegistration.tsx b/src/components/events/EventRegistration.tsx
+index 4e96902..2ea8dd1 100644
+--- a/src/components/events/EventRegistration.tsx
++++ b/src/components/events/EventRegistration.tsx
+@@ -13,7 +13,7 @@ import { Checkbox } from "@/components/ui/checkbox";
+ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+ import {
+-  eventError, fmtDate, formatCpf, isValidCpf, lotIsOpen, moneyBR, registrationIsOpen,
++  eventError, fmtDate, formatCpf, isValidBirthDate, isValidCpf, lotIsOpen, moneyBR, registrationIsOpen,
+   type PublicEventDetail, type PublicLot,
+ } from "@/lib/events";
+ 
+@@ -33,7 +33,7 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
+     queryFn: async () => {
+       const { data } = await supabase
+         .from("members")
+-        .select("id, full_name, cpf, phone, status, approval_status")
++        .select("id, full_name, cpf, phone, birth_date, status, approval_status")
+         .eq("user_id", uid!)
+         .maybeSingle();
+       return data;
+@@ -54,7 +54,8 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
+   const [cpf, setCpf] = useState("");
+   const [installments, setInstallments] = useState(1);
+   const [imageConsent, setImageConsent] = useState(false);
+-  const [visitor, setVisitor] = useState({ name: "", cpf: "", phone: "" });
++  const [birthDate, setBirthDate] = useState("");
++  const [visitor, setVisitor] = useState({ name: "", cpf: "", phone: "", birthDate: "" });
+ 
+   useEffect(() => {
+     if (profile.data?.cpf) setCpf(formatCpf(profile.data.cpf));
+@@ -69,7 +70,7 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
+ 
+   const createVisitor = useMutation({
+     mutationFn: async () => {
+-      const { error } = await supabase.rpc("ensure_visitor_profile", { _name: visitor.name, _cpf: visitor.cpf, _phone: visitor.phone });
++      const { error } = await supabase.rpc("ensure_visitor_profile", { _name: visitor.name, _cpf: visitor.cpf, _phone: visitor.phone, _birth_date: visitor.birthDate });
+       if (error) throw error;
+     },
+     onSuccess: () => {
+@@ -108,6 +109,11 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
+       if (event.limit_per_person && !isValidCpf(cpf)) throw new Error("invalid_cpf");
+       if (cpf && !isValidCpf(cpf)) throw new Error("invalid_cpf");
+       if (event.require_image_consent && !imageConsent) throw new Error("image_consent_required");
++      if (!profile.data?.birth_date) {
++        if (!isValidBirthDate(birthDate)) throw new Error("invalid_birth_date");
++        const { error: bErr } = await supabase.rpc("set_my_birth_date", { _birth_date: birthDate });
++        if (bErr) throw bErr;
++      }
+       const { error } = await supabase.rpc("register_for_event", {
+         _event: event.id, _lot: lotId, _quantity: qty, _cpf: cpf, _installments: installments,
+         _image_consent: event.require_image_consent && imageConsent,
+@@ -182,12 +188,17 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
+               toast.error(eventError(new Error("invalid_cpf")));
+               return;
+             }
++            if (!isValidBirthDate(visitor.birthDate)) {
++              toast.error(eventError(new Error("invalid_birth_date")));
++              return;
++            }
+             createVisitor.mutate();
+           }}
+         >
+           <div className="space-y-1.5"><Label>Nome completo *</Label><Input required value={visitor.name} onChange={(e) => setVisitor({ ...visitor, name: e.target.value })} /></div>
+           <div className="space-y-1.5"><Label>CPF *</Label><Input required inputMode="numeric" placeholder="000.000.000-00" value={visitor.cpf} onChange={(e) => setVisitor({ ...visitor, cpf: formatCpf(e.target.value) })} /></div>
+           <div className="space-y-1.5"><Label>Telefone / WhatsApp *</Label><Input required inputMode="tel" value={visitor.phone} onChange={(e) => setVisitor({ ...visitor, phone: e.target.value })} /></div>
++          <div className="space-y-1.5"><Label>Data de nascimento *</Label><Input required type="date" max={new Date().toISOString().slice(0, 10)} value={visitor.birthDate} onChange={(e) => setVisitor({ ...visitor, birthDate: e.target.value })} /></div>
+           <Button type="submit" className="w-full" disabled={createVisitor.isPending}>Continuar</Button>
+         </form>
+         <p className="mt-4 text-xs text-muted-foreground">
+@@ -287,6 +298,14 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
+           </div>
+         </div>
+ 
++        {!profile.data.birth_date && (
++          <div className="space-y-1.5">
++            <Label>Data de nascimento *</Label>
++            <Input required type="date" max={new Date().toISOString().slice(0, 10)} value={birthDate} onChange={(e) => setBirthDate(e.target.value)} />
++            <p className="text-xs text-muted-foreground">Seu cadastro ainda não tem a data de nascimento. Ela será salva para as próximas inscrições.</p>
++          </div>
++        )}
++
+         {payRequired && event.allow_installments && event.max_installments > 1 && (
+           <div className="space-y-1.5">
+             <Label>Forma de pagamento (Pix)</Label>
+@@ -324,7 +343,7 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
+           <p className="text-sm text-muted-foreground">
+             Total: <strong className="text-lg text-foreground">{payRequired ? moneyBR(total) : "Gratuito"}</strong>
+           </p>
+-          <Button type="submit" size="lg" disabled={register.isPending || !lotId || (event.require_image_consent && !imageConsent)}>Inscrever-se</Button>
++          <Button type="submit" size="lg" disabled={register.isPending || !lotId || (event.require_image_consent && !imageConsent) || (!profile.data.birth_date && !birthDate)}>Inscrever-se</Button>
+         </div>
+       </form>
+     </Box>
+diff --git a/src/integrations/supabase/types.ts b/src/integrations/supabase/types.ts
+index e3732fa..dd18226 100644
+--- a/src/integrations/supabase/types.ts
++++ b/src/integrations/supabase/types.ts
+@@ -316,6 +316,7 @@ export type Database = {
+       }
+       event_registrations: {
+         Row: {
++          attendee_birth_date: string | null
+           attendee_cpf: string | null
+           attendee_email: string | null
+           attendee_name: string
+@@ -339,6 +340,7 @@ export type Database = {
+           user_id: string
+         }
+         Insert: {
++          attendee_birth_date?: string | null
+           attendee_cpf?: string | null
+           attendee_email?: string | null
+           attendee_name: string
+@@ -362,6 +364,7 @@ export type Database = {
+           user_id: string
+         }
+         Update: {
++          attendee_birth_date?: string | null
+           attendee_cpf?: string | null
+           attendee_email?: string | null
+           attendee_name?: string
+@@ -1158,9 +1161,10 @@ export type Database = {
+         }[]
+       }
+       ensure_visitor_profile: {
+-        Args: { _cpf: string; _name: string; _phone: string }
++        Args: { _birth_date?: string; _cpf: string; _name: string; _phone: string }
+         Returns: string
+       }
++      set_my_birth_date: { Args: { _birth_date: string }; Returns: undefined }
+       event_admin_stats: { Args: { _event: string }; Returns: Json }
+       is_valid_cpf: { Args: { _cpf: string }; Returns: boolean }
+       public_event: { Args: { _slug: string }; Returns: Json }
+diff --git a/src/lib/events.ts b/src/lib/events.ts
+index f35f72a..384ec3a 100644
+--- a/src/lib/events.ts
++++ b/src/lib/events.ts
+@@ -37,6 +37,16 @@ export function isValidCpf(v: string) {
+   return calc(9) === Number(d[9]) && calc(10) === Number(d[10]);
+ }
+ 
++/** Data de nascimento (yyyy-mm-dd): obrigatória, não pode ser futura nem anterior a 120 anos. */
++export function isValidBirthDate(v: string) {
++  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
++  const d = new Date(v + "T00:00:00");
++  if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== v) return false;
++  const now = new Date();
++  const min = new Date(now.getFullYear() - 120, now.getMonth(), now.getDate());
++  return d <= now && d >= min;
++}
++
+ export const slugify = (s: string) =>
+   s
+     .normalize("NFD")
+@@ -64,6 +74,7 @@ const ERRORS: Record<string, string> = {
+   cpf_belongs_to_member: "Este CPF já consta no cadastro de um membro. Escolha “Sou membro” e entre com a conta de membro.",
+   invalid_name: "Digite seu nome completo.",
+   invalid_phone: "Informe um telefone para contato.",
++  invalid_birth_date: "Data de nascimento inválida. Confira o dia, mês e ano.",
+   cannot_cancel: "Esta inscrição não pode mais ser cancelada por aqui. Fale com a igreja.",
+   payment_closed: "Este pagamento não pode mais ser alterado.",
+   invalid_proof: "Arquivo de comprovante inválido.",
+diff --git a/src/routes/_authenticated/painel.evento.$id.tsx b/src/routes/_authenticated/painel.evento.$id.tsx
+index 07b3c51..ca4dc83 100644
+--- a/src/routes/_authenticated/painel.evento.$id.tsx
++++ b/src/routes/_authenticated/painel.evento.$id.tsx
+@@ -20,6 +20,7 @@ import { playRead, playWarning, unlockAudio } from "@/lib/sounds";
+ import { downloadXls } from "@/lib/export";
+ import { purgeStorageTrash } from "@/lib/storage-trash";
+ import { eventError, fmtDateTime, moneyBR, PAYMENT_STATUS, REGISTRATION_STATUS, TICKET_STATUS } from "@/lib/events";
++import { ageFrom, dateBR } from "@/lib/church";
+ import { siteMeta } from "@/lib/site-query";
+ import type { Tables } from "@/integrations/supabase/types";
+ 
+@@ -268,9 +269,9 @@ function Registrations({ eventId, title, onChange }: { eventId: string; title: s
+   const open = (regs.data ?? []).find((r) => r.id === openId) ?? null;
+ 
+   function exportXls() {
+-    const head = ["Nome", "CPF", "Telefone", "E-mail", "Lote", "Quantidade", "Total (R$)", "Parcelas pagas", "Situação", "Uso de imagem", "Inscrito em"];
++    const head = ["Nome", "CPF", "Data de nascimento", "Idade", "Telefone", "E-mail", "Lote", "Quantidade", "Total (R$)", "Parcelas pagas", "Situação", "Uso de imagem", "Inscrito em"];
+     const rows = list.map((r) => [
+-      r.attendee_name, r.attendee_cpf ?? "", r.attendee_phone ?? "", r.attendee_email ?? "", r.event_lots?.name ?? "", r.quantity, Number(r.total),
++      r.attendee_name, r.attendee_cpf ?? "", dateBR(r.attendee_birth_date), ageFrom(r.attendee_birth_date) ?? "", r.attendee_phone ?? "", r.attendee_email ?? "", r.event_lots?.name ?? "", r.quantity, Number(r.total),
+       `${(r.event_payments ?? []).filter((p) => p.status === "paid").length}/${(r.event_payments ?? []).length}`,
+       REGISTRATION_STATUS[r.status] ?? r.status, r.image_consent ? `Autorizado em ${fmtDateTime(r.image_consent_at)}` : "Não solicitado/sem aceite", fmtDateTime(r.created_at),
+     ]);
+@@ -364,6 +365,7 @@ function RegistrationDetail({ reg, onChange }: { reg: RegRow; onChange: () => vo
+         <div className="grid gap-1 text-muted-foreground">
+           <p>{reg.event_lots?.name} × {reg.quantity} · {reg.total > 0 ? moneyBR(reg.total) : "Gratuito"}</p>
+           <p>CPF: {reg.attendee_cpf || "—"} · Tel.: {reg.attendee_phone || "—"}</p>
++          <p>Nascimento: {dateBR(reg.attendee_birth_date)}{ageFrom(reg.attendee_birth_date) !== null ? ` (${ageFrom(reg.attendee_birth_date)} anos)` : ""}</p>
+           <p>{reg.attendee_email}</p>
+           <p>Uso de imagem: {reg.image_consent ? `autorizado em ${fmtDateTime(reg.image_consent_at)}` : "sem aceite registrado"}</p>
+           <p>Inscrito em {fmtDateTime(reg.created_at)}{reg.released_manually ? " · ingresso liberado manualmente" : ""}</p>

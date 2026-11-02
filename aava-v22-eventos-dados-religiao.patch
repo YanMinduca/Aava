@@ -1,0 +1,911 @@
+diff --git a/drizzle/migrations/0024_event_birth_date.sql b/drizzle/migrations/0024_event_birth_date.sql
+new file mode 100644
+index 0000000..ad2bcef
+--- /dev/null
++++ b/drizzle/migrations/0024_event_birth_date.sql
+@@ -0,0 +1,76 @@
++-- Data de nascimento nas inscrições de eventos.
++-- 1) Visitante informa a data ao criar o cadastro (members.birth_date já existe).
++-- 2) Cada inscrição guarda uma cópia (attendee_birth_date) para o relatório do evento.
++-- 3) Quem já tem cadastro sem data (visitantes antigos) preenche na própria inscrição.
++
++alter table public.event_registrations
++  add column if not exists attendee_birth_date date;
++
++-- Validação reutilizável: obrigatória, não pode ser futura nem anterior a 120 anos.
++create or replace function public.is_valid_birth_date(_d date)
++returns boolean language sql immutable as $$
++  select _d is not null and _d <= current_date and _d >= (current_date - interval '120 years')::date;
++$$;
++
++-- Assinatura muda (novo parâmetro): remove a antiga para não haver sobrecarga ambígua.
++drop function if exists public.ensure_visitor_profile(text, text, text);
++
++create or replace function public.ensure_visitor_profile(_name text, _cpf text, _phone text, _birth_date date default null)
++returns uuid language plpgsql security definer set search_path = public as $$
++declare uid uuid := auth.uid(); mid uuid; d text := regexp_replace(coalesce(_cpf, ''), '\D', '', 'g');
++begin
++  if uid is null then raise exception 'login_required'; end if;
++  select id into mid from public.members where user_id = uid;
++  if mid is not null then return mid; end if;
++  if coalesce(array_length(string_to_array(btrim(coalesce(_name, '')), ' '), 1), 0) < 2 then raise exception 'invalid_name'; end if;
++  if not public.is_valid_cpf(d) then raise exception 'invalid_cpf'; end if;
++  if btrim(coalesce(_phone, '')) = '' then raise exception 'invalid_phone'; end if;
++  if not public.is_valid_birth_date(_birth_date) then raise exception 'invalid_birth_date'; end if;
++  if exists (select 1 from public.members m where regexp_replace(coalesce(m.cpf, ''), '\D', '', 'g') = d and m.user_id is null) then
++    raise exception 'cpf_belongs_to_member';
++  end if;
++  if exists (select 1 from public.members m where regexp_replace(coalesce(m.cpf, ''), '\D', '', 'g') = d) then
++    raise exception 'cpf_in_use';
++  end if;
++  perform set_config('app.event_visitor', 'on', true);
++  insert into public.members (full_name, cpf, phone, email, birth_date, status, approval_status, user_id)
++  values (btrim(_name), substr(d,1,3)||'.'||substr(d,4,3)||'.'||substr(d,7,3)||'-'||substr(d,10,2), btrim(_phone),
++          (select u.email from auth.users u where u.id = uid), _birth_date, 'visitante', 'aprovado', uid)
++  returning id into mid;
++  perform set_config('app.event_visitor', 'off', true);
++  return mid;
++end $$;
++
++revoke all on function public.ensure_visitor_profile(text, text, text, date) from public, anon;
++grant execute on function public.ensure_visitor_profile(text, text, text, date) to authenticated, service_role;
++
++-- Quem já tem cadastro, mas sem data de nascimento, completa pela inscrição (só preenche se estiver vazia).
++create or replace function public.set_my_birth_date(_birth_date date)
++returns void language plpgsql security definer set search_path = public as $$
++begin
++  if auth.uid() is null then raise exception 'login_required'; end if;
++  if not public.is_valid_birth_date(_birth_date) then raise exception 'invalid_birth_date'; end if;
++  update public.members set birth_date = _birth_date where user_id = auth.uid() and birth_date is null;
++end $$;
++
++revoke all on function public.set_my_birth_date(date) from public, anon;
++grant execute on function public.set_my_birth_date(date) to authenticated, service_role;
++
++-- Copia a data do cadastro para a inscrição (evita redefinir register_for_event inteira).
++create or replace function public.event_registration_birth_date()
++returns trigger language plpgsql security definer set search_path = public as $$
++begin
++  if new.attendee_birth_date is null and new.member_id is not null then
++    select m.birth_date into new.attendee_birth_date from public.members m where m.id = new.member_id;
++  end if;
++  return new;
++end $$;
++
++drop trigger if exists trg_event_registration_birth_date on public.event_registrations;
++create trigger trg_event_registration_birth_date
++  before insert on public.event_registrations
++  for each row execute function public.event_registration_birth_date();
++
++-- Inscrições anteriores: aproveita a data que já estiver no cadastro.
++update public.event_registrations r set attendee_birth_date = m.birth_date
++  from public.members m where m.id = r.member_id and r.attendee_birth_date is null;
+diff --git a/drizzle/migrations/0025_event_institution_religion.sql b/drizzle/migrations/0025_event_institution_religion.sql
+new file mode 100644
+index 0000000..a511422
+--- /dev/null
++++ b/drizzle/migrations/0025_event_institution_religion.sql
+@@ -0,0 +1,94 @@
++-- Instituição e religião nas inscrições de eventos (preenchidas por quem se inscreve).
++-- Religião: evangelico | catolico | espirita | matriz_africana | outros.
++-- Inscrições anteriores ficam com os dois campos vazios ("Não informado" nos relatórios).
++
++alter table public.event_registrations
++  add column if not exists attendee_institution text,
++  add column if not exists attendee_religion text;
++
++alter table public.event_registrations drop constraint if exists event_registrations_religion_check;
++alter table public.event_registrations add constraint event_registrations_religion_check
++  check (attendee_religion is null or attendee_religion in ('evangelico', 'catolico', 'espirita', 'matriz_africana', 'outros'));
++
++-- A assinatura muda (novos parâmetros): remove a versão antiga para não haver sobrecarga ambígua.
++drop function if exists public.register_for_event(uuid, uuid, integer, text, integer, boolean);
++
++create or replace function public.register_for_event(
++  _event uuid, _lot uuid, _quantity integer, _cpf text,
++  _installments integer default 1, _image_consent boolean default false,
++  _institution text default null, _religion text default null
++)
++returns uuid
++language plpgsql
++security definer
++set search_path to 'public'
++as $function$
++declare
++  uid uuid := auth.uid();
++  ev public.events%rowtype; lt public.event_lots%rowtype; m public.members%rowtype;
++  is_member boolean; d text; used int; total numeric; reg uuid; pay_required boolean; n int; base numeric; i int;
++  consent boolean;
++begin
++  if uid is null then raise exception 'login_required'; end if;
++  select * into ev from public.events where id = _event and published;
++  if not found then raise exception 'event_not_found'; end if;
++  if now() < coalesce(ev.registration_opens_at, '-infinity') or now() > coalesce(ev.registration_closes_at, 'infinity') then
++    raise exception 'registration_closed';
++  end if;
++  -- Autorização de uso de imagem: obrigatória quando o evento exige
++  consent := ev.require_image_consent and coalesce(_image_consent, false);
++  if ev.require_image_consent and not consent then raise exception 'image_consent_required'; end if;
++  -- Instituição e religião: obrigatórias na inscrição
++  if nullif(btrim(coalesce(_institution, '')), '') is null or length(btrim(_institution)) > 120 then raise exception 'invalid_institution'; end if;
++  if _religion is null or _religion not in ('evangelico', 'catolico', 'espirita', 'matriz_africana', 'outros') then raise exception 'invalid_religion'; end if;
++
++  select * into lt from public.event_lots where id = _lot and event_id = _event for update;
++  if not found then raise exception 'lot_not_found'; end if;
++  if (lt.opens_at is not null and now() < lt.opens_at) or (lt.closes_at is not null and now() > lt.closes_at) then
++    raise exception 'lot_closed';
++  end if;
++  select * into m from public.members where user_id = uid;
++  if not found then raise exception 'profile_required'; end if;
++  is_member := m.approval_status = 'aprovado' and m.status <> 'visitante';
++  if ev.audience = 'members' and not is_member and not lt.public_access then raise exception 'members_only'; end if;
++  if _quantity is null or _quantity < 1 or _quantity > 10 then raise exception 'invalid_quantity'; end if;
++
++  d := regexp_replace(coalesce(nullif(btrim(_cpf), ''), m.cpf, ''), '\D', '', 'g');
++  if ev.limit_per_person then
++    if not public.is_valid_cpf(d) then raise exception 'invalid_cpf'; end if;
++    select coalesce(sum(r.quantity), 0) into used from public.event_registrations r
++      where r.event_id = _event and r.status <> 'cancelled'
++        and (r.user_id = uid or regexp_replace(coalesce(r.attendee_cpf, ''), '\D', '', 'g') = d);
++    if used + _quantity > coalesce(ev.max_per_person, 1) then raise exception 'limit_exceeded'; end if;
++  elsif d <> '' and not public.is_valid_cpf(d) then
++    raise exception 'invalid_cpf';
++  end if;
++
++  if lt.capacity is not null and public.lot_taken(lt.id) + _quantity > lt.capacity then raise exception 'sold_out'; end if;
++
++  pay_required := ev.payment_enabled and lt.price > 0;
++  total := lt.price * _quantity;
++  n := case when pay_required and coalesce(_installments, 1) > 1 then _installments else 1 end;
++  if n > 1 and (not ev.allow_installments or n > ev.max_installments) then raise exception 'invalid_installments'; end if;
++
++  insert into public.event_registrations (event_id, lot_id, user_id, member_id, attendee_name, attendee_cpf, attendee_phone, attendee_email,
++                                          attendee_institution, attendee_religion, quantity, unit_price, total, installments, status, image_consent, image_consent_at)
++  values (_event, _lot, uid, m.id, m.full_name, nullif(d, ''), m.phone, coalesce(m.email, (select u.email from auth.users u where u.id = uid)),
++          btrim(_institution), _religion, _quantity, lt.price, total, n, case when pay_required then 'pending' else 'confirmed' end,
++          consent, case when consent then now() end)
++  returning id into reg;
++
++  if pay_required then
++    base := round(total / n, 2);
++    for i in 1..n loop
++      insert into public.event_payments (registration_id, installment_no, amount)
++      values (reg, i, case when i = n then total - base * (n - 1) else base end);
++    end loop;
++  else
++    perform public.issue_event_tickets(reg);
++  end if;
++  return reg;
++end $function$;
++
++revoke all on function public.register_for_event(uuid, uuid, integer, text, integer, boolean, text, text) from public, anon;
++grant execute on function public.register_for_event(uuid, uuid, integer, text, integer, boolean, text, text) to authenticated, service_role;
+diff --git a/src/components/events/EventData.tsx b/src/components/events/EventData.tsx
+new file mode 100644
+index 0000000..e57b4e8
+--- /dev/null
++++ b/src/components/events/EventData.tsx
+@@ -0,0 +1,384 @@
++import { useMemo, useState } from "react";
++import { useQuery } from "@tanstack/react-query";
++import { Download } from "lucide-react";
++import {
++  Bar,
++  BarChart,
++  CartesianGrid,
++  Cell,
++  Legend,
++  Pie,
++  PieChart,
++  ResponsiveContainer,
++  Tooltip,
++  XAxis,
++  YAxis,
++} from "recharts";
++import { supabase } from "@/integrations/supabase/client";
++import type { Tables } from "@/integrations/supabase/types";
++import { Badge } from "@/components/ui/badge";
++import { Button } from "@/components/ui/button";
++import { Input } from "@/components/ui/input";
++import { Label } from "@/components/ui/label";
++import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
++import {
++  Select,
++  SelectContent,
++  SelectItem,
++  SelectTrigger,
++  SelectValue,
++} from "@/components/ui/select";
++import { downloadSheets } from "@/lib/export";
++import { ageFrom, dateBR } from "@/lib/church";
++import { fmtDateTime, REGISTRATION_STATUS } from "@/lib/events";
++import { RELIGIONS, religionLabel, summarizePeople } from "@/lib/event-data";
++
++type Row = Tables<"event_registrations"> & { event_lots: { name: string } | null };
++
++const COLORS = ["#2563eb", "#16a34a", "#9333ea", "#ea580c", "#64748b", "#94a3b8"];
++const fmtAge = (n: number | null | undefined) => (n == null ? "—" : String(n).replace(".", ","));
++
++/** Aba "Dados": médias, gráficos, relatório em Excel e consulta pessoa a pessoa. */
++export function EventData({ eventId, title }: { eventId: string; title: string }) {
++  const [search, setSearch] = useState("");
++  const [religionFilter, setReligionFilter] = useState("todas");
++  const [openId, setOpenId] = useState<string | null>(null);
++
++  const regs = useQuery({
++    queryKey: ["admin-event-data", eventId],
++    queryFn: async () => {
++      const { data, error } = await supabase
++        .from("event_registrations")
++        .select("*, event_lots(name)")
++        .eq("event_id", eventId)
++        .neq("status", "cancelled")
++        .order("attendee_name", { ascending: true });
++      if (error) throw error;
++      return (data ?? []) as Row[];
++    },
++  });
++
++  const people = useMemo(() => regs.data ?? [], [regs.data]);
++  const sum = useMemo(() => summarizePeople(people), [people]);
++  const list = people.filter((r) => {
++    if (
++      religionFilter === "nao"
++        ? !!r.attendee_religion
++        : religionFilter !== "todas" && r.attendee_religion !== religionFilter
++    )
++      return false;
++    const q = search.trim().toLowerCase();
++    return (
++      !q ||
++      r.attendee_name.toLowerCase().includes(q) ||
++      (r.attendee_institution ?? "").toLowerCase().includes(q) ||
++      (r.attendee_phone ?? "").includes(q)
++    );
++  });
++  const open = people.find((r) => r.id === openId) ?? null;
++
++  function exportReport() {
++    const a = sum.ageStats;
++    downloadSheets(`dados-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`, [
++      {
++        name: "Resumo",
++        rows: [
++          ["Relatório de dados do evento", title],
++          ["Gerado em", fmtDateTime(new Date().toISOString())],
++          ["Inscrições consideradas (sem canceladas)", sum.total],
++          [],
++          ["Idade", ""],
++          ["Média de idade", a.avg ?? "—"],
++          ["Mediana", a.median ?? "—"],
++          ["Mais novo(a)", a.min ?? "—"],
++          ["Mais velho(a)", a.max ?? "—"],
++          ["Inscrições com data de nascimento", a.count],
++        ],
++      },
++      {
++        name: "Religiões",
++        rows: [
++          ["Religião", "Inscritos", "% do total"],
++          ...sum.religions.map((r) => [r.label, r.count, r.pct]),
++        ],
++      },
++      {
++        name: "Faixas etárias",
++        rows: [["Faixa (anos)", "Inscritos"], ...sum.bands.map((b) => [b.label, b.count])],
++      },
++      {
++        name: "Instituições",
++        rows: [["Instituição", "Inscritos"], ...sum.institutions.map((i) => [i.name, i.count])],
++      },
++      {
++        name: "Inscritos",
++        rows: [
++          [
++            "Nome",
++            "CPF",
++            "Telefone",
++            "E-mail",
++            "Data de nascimento",
++            "Idade",
++            "Religião",
++            "Instituição",
++            "Lote",
++            "Situação",
++            "Inscrito em",
++          ],
++          ...people.map((r) => [
++            r.attendee_name,
++            r.attendee_cpf ?? "",
++            r.attendee_phone ?? "",
++            r.attendee_email ?? "",
++            dateBR(r.attendee_birth_date),
++            ageFrom(r.attendee_birth_date) ?? "",
++            religionLabel(r.attendee_religion),
++            r.attendee_institution ?? "",
++            r.event_lots?.name ?? "",
++            REGISTRATION_STATUS[r.status] ?? r.status,
++            fmtDateTime(r.created_at),
++          ]),
++        ],
++      },
++    ]);
++  }
++
++  if (regs.isLoading) return <p className="mt-4 text-muted-foreground">Carregando...</p>;
++  const relData = sum.religions.filter((r) => r.count > 0);
++
++  return (
++    <div className="mt-4 space-y-6">
++      <div className="flex flex-wrap items-center justify-between gap-3">
++        <p className="text-sm text-muted-foreground">
++          Considera as inscrições não canceladas. Idade calculada na data de hoje.
++        </p>
++        <Button variant="outline" onClick={exportReport} disabled={sum.total === 0}>
++          <Download className="h-4 w-4" /> Gerar relatório (Excel)
++        </Button>
++      </div>
++
++      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
++        {[
++          ["Inscritos", String(sum.total)],
++          ["Média de idade", sum.ageStats.avg === null ? "—" : `${fmtAge(sum.ageStats.avg)} anos`],
++          ["Mediana", sum.ageStats.median === null ? "—" : `${fmtAge(sum.ageStats.median)} anos`],
++          [
++            "Mais novo – mais velho",
++            sum.ageStats.min === null ? "—" : `${sum.ageStats.min} – ${sum.ageStats.max}`,
++          ],
++        ].map(([l, v]) => (
++          <div key={l} className="rounded-2xl border bg-card p-5">
++            <p className="text-xs text-muted-foreground">{l}</p>
++            <p className="mt-1 text-3xl font-semibold text-foreground">{v}</p>
++          </div>
++        ))}
++      </div>
++      {sum.ageStats.count < sum.total && (
++        <p className="-mt-3 text-xs text-muted-foreground">
++          A idade considera {sum.ageStats.count} de {sum.total} inscritos (os demais não têm data de
++          nascimento).
++        </p>
++      )}
++
++      <div className="grid gap-6 lg:grid-cols-2">
++        <div className="rounded-2xl border bg-card p-5">
++          <p className="font-semibold text-foreground">Religiões</p>
++          <div className="mt-2 h-64">
++            {sum.total === 0 ? (
++              <p className="grid h-full place-items-center text-sm text-muted-foreground">
++                Ainda não há inscrições.
++              </p>
++            ) : (
++              <ResponsiveContainer>
++                <PieChart>
++                  <Pie
++                    data={relData}
++                    dataKey="count"
++                    nameKey="label"
++                    innerRadius={50}
++                    outerRadius={85}
++                    paddingAngle={2}
++                  >
++                    {relData.map((r, i) => (
++                      <Cell key={r.value} fill={COLORS[i % COLORS.length]} />
++                    ))}
++                  </Pie>
++                  <Tooltip />
++                  <Legend />
++                </PieChart>
++              </ResponsiveContainer>
++            )}
++          </div>
++          <ul className="mt-3 space-y-1 text-sm">
++            {sum.religions.map((r) => (
++              <li key={r.value} className="flex justify-between">
++                <span className="text-muted-foreground">{r.label}</span>
++                <span className="text-foreground">
++                  {r.count} · {String(r.pct).replace(".", ",")}%
++                </span>
++              </li>
++            ))}
++          </ul>
++        </div>
++
++        <div className="rounded-2xl border bg-card p-5">
++          <p className="font-semibold text-foreground">Faixas etárias</p>
++          <div className="mt-2 h-64">
++            {sum.ageStats.count === 0 ? (
++              <p className="grid h-full place-items-center text-sm text-muted-foreground">
++                Sem datas de nascimento ainda.
++              </p>
++            ) : (
++              <ResponsiveContainer>
++                <BarChart data={sum.bands}>
++                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
++                  <XAxis dataKey="label" />
++                  <YAxis allowDecimals={false} />
++                  <Tooltip />
++                  <Bar
++                    dataKey="count"
++                    name="Inscritos"
++                    fill="var(--primary)"
++                    radius={[6, 6, 0, 0]}
++                  />
++                </BarChart>
++              </ResponsiveContainer>
++            )}
++          </div>
++          <p className="mt-3 font-semibold text-foreground">Instituições</p>
++          {sum.institutions.length === 0 ? (
++            <p className="mt-1 text-sm text-muted-foreground">Nenhuma informada.</p>
++          ) : (
++            <ul className="mt-1 max-h-40 space-y-1 overflow-y-auto text-sm">
++              {sum.institutions.map((i) => (
++                <li key={i.name} className="flex justify-between">
++                  <span className="text-muted-foreground">{i.name}</span>
++                  <span className="text-foreground">{i.count}</span>
++                </li>
++              ))}
++            </ul>
++          )}
++        </div>
++      </div>
++
++      <div>
++        <p className="font-semibold text-foreground">Pessoa a pessoa</p>
++        <div className="mt-2 flex flex-wrap items-end gap-3">
++          <div className="space-y-1.5">
++            <Label>Buscar</Label>
++            <Input
++              placeholder="Nome, telefone ou instituição"
++              value={search}
++              onChange={(e) => setSearch(e.target.value)}
++              className="w-64"
++            />
++          </div>
++          <div className="space-y-1.5">
++            <Label>Religião</Label>
++            <Select value={religionFilter} onValueChange={setReligionFilter}>
++              <SelectTrigger className="w-48">
++                <SelectValue />
++              </SelectTrigger>
++              <SelectContent>
++                <SelectItem value="todas">Todas</SelectItem>
++                {RELIGIONS.map((r) => (
++                  <SelectItem key={r.value} value={r.value}>
++                    {r.label}
++                  </SelectItem>
++                ))}
++                <SelectItem value="nao">Não informado</SelectItem>
++              </SelectContent>
++            </Select>
++          </div>
++        </div>
++        <div className="mt-3 overflow-x-auto rounded-2xl border bg-card">
++          <table className="w-full text-sm">
++            <thead className="border-b text-left text-muted-foreground">
++              <tr>
++                {["Nome", "Idade", "Religião", "Instituição", "Telefone"].map((h) => (
++                  <th key={h} className="p-4 font-medium">
++                    {h}
++                  </th>
++                ))}
++                <th className="p-4" />
++              </tr>
++            </thead>
++            <tbody>
++              {list.length === 0 && (
++                <tr>
++                  <td className="p-6 text-center text-muted-foreground" colSpan={6}>
++                    Nenhuma pessoa encontrada.
++                  </td>
++                </tr>
++              )}
++              {list.map((r) => (
++                <tr key={r.id} className="border-b last:border-0">
++                  <td className="p-4 font-medium text-foreground">{r.attendee_name}</td>
++                  <td className="p-4 text-muted-foreground">
++                    {ageFrom(r.attendee_birth_date) ?? "—"}
++                  </td>
++                  <td className="p-4 text-muted-foreground">
++                    {religionLabel(r.attendee_religion)}
++                  </td>
++                  <td className="p-4 text-muted-foreground">{r.attendee_institution || "—"}</td>
++                  <td className="p-4 text-muted-foreground">{r.attendee_phone || "—"}</td>
++                  <td className="p-4 text-right">
++                    <Button size="sm" variant="outline" onClick={() => setOpenId(r.id)}>
++                      Ver dados
++                    </Button>
++                  </td>
++                </tr>
++              ))}
++            </tbody>
++          </table>
++        </div>
++      </div>
++
++      <Dialog open={!!open} onOpenChange={(o) => !o && setOpenId(null)}>
++        <DialogContent className="max-h-[90vh] max-w-lg overflow-y-auto">
++          {open && (
++            <>
++              <DialogHeader>
++                <DialogTitle>{open.attendee_name}</DialogTitle>
++              </DialogHeader>
++              <dl className="grid grid-cols-[9rem_1fr] gap-x-3 gap-y-2 text-sm">
++                {(
++                  [
++                    ["Situação", REGISTRATION_STATUS[open.status] ?? open.status],
++                    ["Telefone", open.attendee_phone || "—"],
++                    ["E-mail", open.attendee_email || "—"],
++                    ["CPF", open.attendee_cpf || "—"],
++                    [
++                      "Data de nascimento",
++                      open.attendee_birth_date
++                        ? `${dateBR(open.attendee_birth_date)} (${ageFrom(open.attendee_birth_date)} anos)`
++                        : "—",
++                    ],
++                    ["Religião", religionLabel(open.attendee_religion)],
++                    ["Instituição", open.attendee_institution || "—"],
++                    ["Lote", `${open.event_lots?.name ?? "—"} × ${open.quantity}`],
++                    ["Inscrito em", fmtDateTime(open.created_at)],
++                  ] as const
++                ).map(([k, v]) => (
++                  <div key={k} className="contents">
++                    <dt className="text-muted-foreground">{k}</dt>
++                    <dd className="text-foreground">
++                      {k === "Situação" ? (
++                        <Badge variant={open.status === "confirmed" ? "default" : "secondary"}>
++                          {v}
++                        </Badge>
++                      ) : (
++                        v
++                      )}
++                    </dd>
++                  </div>
++                ))}
++              </dl>
++            </>
++          )}
++        </DialogContent>
++      </Dialog>
++    </div>
++  );
++}
+diff --git a/src/components/events/EventRegistration.tsx b/src/components/events/EventRegistration.tsx
+index 2ea8dd1..c424a72 100644
+--- a/src/components/events/EventRegistration.tsx
++++ b/src/components/events/EventRegistration.tsx
+@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
+ import { Badge } from "@/components/ui/badge";
+ import { Checkbox } from "@/components/ui/checkbox";
+ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
++import { RELIGIONS } from "@/lib/event-data";
+ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+ import {
+   eventError, fmtDate, formatCpf, isValidBirthDate, isValidCpf, lotIsOpen, moneyBR, registrationIsOpen,
+@@ -55,6 +56,8 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
+   const [installments, setInstallments] = useState(1);
+   const [imageConsent, setImageConsent] = useState(false);
+   const [birthDate, setBirthDate] = useState("");
++  const [institution, setInstitution] = useState("");
++  const [religion, setReligion] = useState("");
+   const [visitor, setVisitor] = useState({ name: "", cpf: "", phone: "", birthDate: "" });
+ 
+   useEffect(() => {
+@@ -109,6 +112,8 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
+       if (event.limit_per_person && !isValidCpf(cpf)) throw new Error("invalid_cpf");
+       if (cpf && !isValidCpf(cpf)) throw new Error("invalid_cpf");
+       if (event.require_image_consent && !imageConsent) throw new Error("image_consent_required");
++      if (!institution.trim()) throw new Error("invalid_institution");
++      if (!religion) throw new Error("invalid_religion");
+       if (!profile.data?.birth_date) {
+         if (!isValidBirthDate(birthDate)) throw new Error("invalid_birth_date");
+         const { error: bErr } = await supabase.rpc("set_my_birth_date", { _birth_date: birthDate });
+@@ -117,6 +122,7 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
+       const { error } = await supabase.rpc("register_for_event", {
+         _event: event.id, _lot: lotId, _quantity: qty, _cpf: cpf, _installments: installments,
+         _image_consent: event.require_image_consent && imageConsent,
++        _institution: institution.trim(), _religion: religion,
+       });
+       if (error) throw error;
+     },
+@@ -306,6 +312,22 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
+           </div>
+         )}
+ 
++        <div className="grid gap-4 sm:grid-cols-2">
++          <div className="space-y-1.5">
++            <Label>Qual instituição você participa? *</Label>
++            <Input required maxLength={120} placeholder='Ex.: igreja, escola, ONG… ou "Nenhuma"' value={institution} onChange={(e) => setInstitution(e.target.value)} />
++          </div>
++          <div className="space-y-1.5">
++            <Label>Qual religião você é? *</Label>
++            <Select value={religion} onValueChange={setReligion}>
++              <SelectTrigger><SelectValue placeholder="Selecione" /></SelectTrigger>
++              <SelectContent>
++                {RELIGIONS.map((r) => <SelectItem key={r.value} value={r.value}>{r.label}</SelectItem>)}
++              </SelectContent>
++            </Select>
++          </div>
++        </div>
++
+         {payRequired && event.allow_installments && event.max_installments > 1 && (
+           <div className="space-y-1.5">
+             <Label>Forma de pagamento (Pix)</Label>
+@@ -343,7 +365,7 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
+           <p className="text-sm text-muted-foreground">
+             Total: <strong className="text-lg text-foreground">{payRequired ? moneyBR(total) : "Gratuito"}</strong>
+           </p>
+-          <Button type="submit" size="lg" disabled={register.isPending || !lotId || (event.require_image_consent && !imageConsent) || (!profile.data.birth_date && !birthDate)}>Inscrever-se</Button>
++          <Button type="submit" size="lg" disabled={register.isPending || !lotId || (event.require_image_consent && !imageConsent) || !institution.trim() || !religion || (!profile.data.birth_date && !birthDate)}>Inscrever-se</Button>
+         </div>
+       </form>
+     </Box>
+diff --git a/src/integrations/supabase/types.ts b/src/integrations/supabase/types.ts
+index dd18226..6bfa211 100644
+--- a/src/integrations/supabase/types.ts
++++ b/src/integrations/supabase/types.ts
+@@ -319,8 +319,10 @@ export type Database = {
+           attendee_birth_date: string | null
+           attendee_cpf: string | null
+           attendee_email: string | null
++          attendee_institution: string | null
+           attendee_name: string
+           attendee_phone: string | null
++          attendee_religion: string | null
+           cancelled_at: string | null
+           created_at: string
+           event_id: string
+@@ -343,8 +345,10 @@ export type Database = {
+           attendee_birth_date?: string | null
+           attendee_cpf?: string | null
+           attendee_email?: string | null
++          attendee_institution?: string | null
+           attendee_name: string
+           attendee_phone?: string | null
++          attendee_religion?: string | null
+           cancelled_at?: string | null
+           created_at?: string
+           event_id: string
+@@ -367,8 +371,10 @@ export type Database = {
+           attendee_birth_date?: string | null
+           attendee_cpf?: string | null
+           attendee_email?: string | null
++          attendee_institution?: string | null
+           attendee_name?: string
+           attendee_phone?: string | null
++          attendee_religion?: string | null
+           cancelled_at?: string | null
+           created_at?: string
+           event_id?: string
+@@ -1193,8 +1199,10 @@ export type Database = {
+           _event: string
+           _image_consent?: boolean
+           _installments?: number
++          _institution?: string
+           _lot: string
+           _quantity: number
++          _religion?: string
+         }
+         Returns: string
+       }
+diff --git a/src/lib/event-data.ts b/src/lib/event-data.ts
+new file mode 100644
+index 0000000..4daed36
+--- /dev/null
++++ b/src/lib/event-data.ts
+@@ -0,0 +1,90 @@
++import { ageFrom } from "@/lib/church";
++
++export const RELIGIONS = [
++  { value: "evangelico", label: "Evangélico" },
++  { value: "catolico", label: "Católico" },
++  { value: "espirita", label: "Espírita" },
++  { value: "matriz_africana", label: "Matriz africana" },
++  { value: "outros", label: "Outros" },
++] as const;
++
++export function religionLabel(v?: string | null) {
++  if (!v) return "Não informado";
++  return RELIGIONS.find((r) => r.value === v)?.label ?? v;
++}
++
++export const AGE_BANDS = [
++  { label: "0–12", min: 0, max: 12 },
++  { label: "13–17", min: 13, max: 17 },
++  { label: "18–24", min: 18, max: 24 },
++  { label: "25–34", min: 25, max: 34 },
++  { label: "35–44", min: 35, max: 44 },
++  { label: "45–59", min: 45, max: 59 },
++  { label: "60+", min: 60, max: 200 },
++] as const;
++
++export type Person = {
++  attendee_birth_date?: string | null;
++  attendee_religion?: string | null;
++  attendee_institution?: string | null;
++};
++
++const round1 = (n: number) => Math.round(n * 10) / 10;
++const norm = (s: string) =>
++  s
++    .normalize("NFD")
++    .replace(/[\u0300-\u036f]/g, "")
++    .trim()
++    .toLowerCase()
++    .replace(/\s+/g, " ");
++
++/** Números da aba "Dados": médias de idade, distribuição de religiões e instituições. */
++export function summarizePeople(
++  people: Person[],
++  ageOf: (b?: string | null) => number | null = ageFrom,
++) {
++  const total = people.length;
++  const ages = people
++    .map((p) => ageOf(p.attendee_birth_date))
++    .filter((a): a is number => a !== null)
++    .sort((a, b) => a - b);
++  const mid = Math.floor(ages.length / 2);
++  const ageStats = {
++    count: ages.length,
++    avg: ages.length ? round1(ages.reduce((s, a) => s + a, 0) / ages.length) : null,
++    median: ages.length
++      ? ages.length % 2
++        ? ages[mid]!
++        : round1((ages[mid - 1]! + ages[mid]!) / 2)
++      : null,
++    min: ages.length ? ages[0] : null,
++    max: ages.length ? ages[ages.length - 1] : null,
++  };
++  const bands = AGE_BANDS.map((b) => ({
++    label: b.label,
++    count: ages.filter((a) => a >= b.min && a <= b.max).length,
++  }));
++
++  const rel = new Map<string, number>();
++  for (const p of people)
++    rel.set(p.attendee_religion ?? "", (rel.get(p.attendee_religion ?? "") ?? 0) + 1);
++  const religions = [...RELIGIONS.map((r) => r.value as string), ""]
++    .map((value) => ({ value, label: religionLabel(value || null), count: rel.get(value) ?? 0 }))
++    .filter((r) => r.count > 0 || (r.value !== "" && total > 0))
++    .map((r) => ({ ...r, pct: total ? round1((r.count / total) * 100) : 0 }));
++
++  const inst = new Map<string, { name: string; count: number }>();
++  for (const p of people) {
++    const name = (p.attendee_institution ?? "").trim();
++    if (!name) continue;
++    const k = norm(name);
++    const cur = inst.get(k);
++    if (cur) cur.count++;
++    else inst.set(k, { name, count: 1 });
++  }
++  const institutions = [...inst.values()].sort(
++    (a, b) => b.count - a.count || a.name.localeCompare(b.name, "pt-BR"),
++  );
++
++  return { total, ageStats, bands, religions, institutions };
++}
+diff --git a/src/lib/events.ts b/src/lib/events.ts
+index 384ec3a..7fc3fa3 100644
+--- a/src/lib/events.ts
++++ b/src/lib/events.ts
+@@ -75,6 +75,8 @@ const ERRORS: Record<string, string> = {
+   invalid_name: "Digite seu nome completo.",
+   invalid_phone: "Informe um telefone para contato.",
+   invalid_birth_date: "Data de nascimento inválida. Confira o dia, mês e ano.",
++  invalid_institution: "Informe a instituição da qual você participa (ou escreva \"Nenhuma\").",
++  invalid_religion: "Escolha a sua religião na lista.",
+   cannot_cancel: "Esta inscrição não pode mais ser cancelada por aqui. Fale com a igreja.",
+   payment_closed: "Este pagamento não pode mais ser alterado.",
+   invalid_proof: "Arquivo de comprovante inválido.",
+diff --git a/src/routes/_authenticated/painel.evento.$id.tsx b/src/routes/_authenticated/painel.evento.$id.tsx
+index ca4dc83..2277fd4 100644
+--- a/src/routes/_authenticated/painel.evento.$id.tsx
++++ b/src/routes/_authenticated/painel.evento.$id.tsx
+@@ -13,6 +13,8 @@ import { Label } from "@/components/ui/label";
+ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
++import { EventData } from "@/components/events/EventData";
++import { religionLabel } from "@/lib/event-data";
+ import { EventForm, draftFrom } from "@/components/events/EventForm";
+ import { QrScanner, type ScanFeedbackKind } from "@/components/events/QrScanner";
+ import { formatShortCode } from "@/lib/images";
+@@ -122,12 +124,14 @@ function EventAdmin() {
+         <TabsList className="flex-wrap">
+           <TabsTrigger value="resumo">Resumo</TabsTrigger>
+           {canVerify && <TabsTrigger value="inscricoes">Inscrições</TabsTrigger>}
++          {canVerify && <TabsTrigger value="dados">Dados</TabsTrigger>}
+           {canCheckin && <TabsTrigger value="checkin">Check-in</TabsTrigger>}
+           {canManage && <TabsTrigger value="editar">Editar</TabsTrigger>}
+         </TabsList>
+ 
+         <TabsContent value="resumo"><Summary stats={stats.data} loading={stats.isLoading} /></TabsContent>
+         {canVerify && <TabsContent value="inscricoes"><Registrations eventId={id} title={e.title} onChange={refreshAll} /></TabsContent>}
++        {canVerify && <TabsContent value="dados"><EventData eventId={id} title={e.title} /></TabsContent>}
+         {canCheckin && <TabsContent value="checkin"><CheckIn eventId={id} onChange={refreshAll} /></TabsContent>}
+         {canManage && (
+           <TabsContent value="editar">
+@@ -269,9 +273,9 @@ function Registrations({ eventId, title, onChange }: { eventId: string; title: s
+   const open = (regs.data ?? []).find((r) => r.id === openId) ?? null;
+ 
+   function exportXls() {
+-    const head = ["Nome", "CPF", "Data de nascimento", "Idade", "Telefone", "E-mail", "Lote", "Quantidade", "Total (R$)", "Parcelas pagas", "Situação", "Uso de imagem", "Inscrito em"];
++    const head = ["Nome", "CPF", "Data de nascimento", "Idade", "Religião", "Instituição", "Telefone", "E-mail", "Lote", "Quantidade", "Total (R$)", "Parcelas pagas", "Situação", "Uso de imagem", "Inscrito em"];
+     const rows = list.map((r) => [
+-      r.attendee_name, r.attendee_cpf ?? "", dateBR(r.attendee_birth_date), ageFrom(r.attendee_birth_date) ?? "", r.attendee_phone ?? "", r.attendee_email ?? "", r.event_lots?.name ?? "", r.quantity, Number(r.total),
++      r.attendee_name, r.attendee_cpf ?? "", dateBR(r.attendee_birth_date), ageFrom(r.attendee_birth_date) ?? "", religionLabel(r.attendee_religion), r.attendee_institution ?? "", r.attendee_phone ?? "", r.attendee_email ?? "", r.event_lots?.name ?? "", r.quantity, Number(r.total),
+       `${(r.event_payments ?? []).filter((p) => p.status === "paid").length}/${(r.event_payments ?? []).length}`,
+       REGISTRATION_STATUS[r.status] ?? r.status, r.image_consent ? `Autorizado em ${fmtDateTime(r.image_consent_at)}` : "Não solicitado/sem aceite", fmtDateTime(r.created_at),
+     ]);
+@@ -366,6 +370,7 @@ function RegistrationDetail({ reg, onChange }: { reg: RegRow; onChange: () => vo
+           <p>{reg.event_lots?.name} × {reg.quantity} · {reg.total > 0 ? moneyBR(reg.total) : "Gratuito"}</p>
+           <p>CPF: {reg.attendee_cpf || "—"} · Tel.: {reg.attendee_phone || "—"}</p>
+           <p>Nascimento: {dateBR(reg.attendee_birth_date)}{ageFrom(reg.attendee_birth_date) !== null ? ` (${ageFrom(reg.attendee_birth_date)} anos)` : ""}</p>
++          <p>Religião: {religionLabel(reg.attendee_religion)} · Instituição: {reg.attendee_institution || "—"}</p>
+           <p>{reg.attendee_email}</p>
+           <p>Uso de imagem: {reg.image_consent ? `autorizado em ${fmtDateTime(reg.image_consent_at)}` : "sem aceite registrado"}</p>
+           <p>Inscrito em {fmtDateTime(reg.created_at)}{reg.released_manually ? " · ingresso liberado manualmente" : ""}</p>
+diff --git a/src/test/event-data.test.ts b/src/test/event-data.test.ts
+new file mode 100644
+index 0000000..ad29d0c
+--- /dev/null
++++ b/src/test/event-data.test.ts
+@@ -0,0 +1,58 @@
++import { describe, expect, it } from "vitest";
++import { religionLabel, summarizePeople } from "@/lib/event-data";
++
++const ages: Record<string, number> = { a: 20, b: 30, c: 40, d: 17 };
++const ageOf = (b?: string | null) => (b ? (ages[b] ?? null) : null);
++
++describe("summarizePeople", () => {
++  const people = [
++    {
++      attendee_birth_date: "a",
++      attendee_religion: "evangelico",
++      attendee_institution: "Igreja Aava",
++    },
++    {
++      attendee_birth_date: "b",
++      attendee_religion: "evangelico",
++      attendee_institution: " igreja aava ",
++    },
++    {
++      attendee_birth_date: "c",
++      attendee_religion: "catolico",
++      attendee_institution: "Escola Árvore",
++    },
++    { attendee_birth_date: "d", attendee_religion: null, attendee_institution: null },
++    { attendee_birth_date: null, attendee_religion: "outros", attendee_institution: "" },
++  ];
++  const s = summarizePeople(people, ageOf);
++
++  it("calcula média, mediana e extremos só com quem tem data", () => {
++    expect(s.ageStats).toEqual({ count: 4, avg: 26.8, median: 25, min: 17, max: 40 });
++  });
++  it("distribui por faixa etária", () => {
++    expect(s.bands.find((b) => b.label === "13–17")?.count).toBe(1);
++    expect(s.bands.find((b) => b.label === "18–24")?.count).toBe(1);
++    expect(s.bands.find((b) => b.label === "25–34")?.count).toBe(1);
++    expect(s.bands.find((b) => b.label === "35–44")?.count).toBe(1);
++  });
++  it("conta religiões com percentual sobre o total e 'Não informado'", () => {
++    const get = (v: string) => s.religions.find((r) => r.value === v);
++    expect(get("evangelico")).toMatchObject({ count: 2, pct: 40 });
++    expect(get("catolico")?.count).toBe(1);
++    expect(get("espirita")?.count).toBe(0);
++    expect(get("")).toMatchObject({ label: "Não informado", count: 1, pct: 20 });
++  });
++  it("agrupa instituições ignorando maiúsculas, acentos e espaços", () => {
++    expect(s.institutions[0]).toEqual({ name: "Igreja Aava", count: 2 });
++    expect(s.institutions).toHaveLength(2);
++  });
++  it("lida com lista vazia", () => {
++    const e = summarizePeople([], ageOf);
++    expect(e.ageStats.avg).toBeNull();
++    expect(e.religions).toEqual([]);
++  });
++  it("rotula religiões", () => {
++    expect(religionLabel("matriz_africana")).toBe("Matriz africana");
++    expect(religionLabel(null)).toBe("Não informado");
++  });
++});
