@@ -1,0 +1,4 @@
+diff --git a/supabase/migrations/20261105225416_member_activity_feed.sql b/drizzle/migrations/0027_member_activity_feed.sql
+similarity index 100%
+rename from supabase/migrations/20261105225416_member_activity_feed.sql
+rename to drizzle/migrations/0027_member_activity_feed.sql
