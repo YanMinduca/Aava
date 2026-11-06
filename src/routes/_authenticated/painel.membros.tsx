@@ -2,7 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
-import { Plus, Pencil, Trash2, Search, Check, X, Link2, Copy, Download, Eye, UserRoundCheck } from "lucide-react";
+import { Plus, Pencil, Trash2, Search, Check, X, Link2, Copy, Download, Eye, UserRoundCheck, Activity, UserPlus, Mail } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAccess } from "@/hooks/use-access";
 import { Switch } from "@/components/ui/switch";
@@ -49,6 +49,32 @@ function MembersPage() {
   const currentLeaders = () => Object.fromEntries((departments.data ?? []).map((d) => [d.id, d.leader_member_ids ?? []]));
   const memberDepts = useMemberDepartments(can("view_members") || can("view_departments"));
   const deptNames = (id: string) => (memberDepts.data?.get(id) ?? []).map((d) => d.name);
+
+  const recentActivity = useQuery({
+    queryKey: ["member-activity"],
+    enabled: can("view_members"),
+    queryFn: async () => {
+      const { data: events, error } = await supabase
+        .from("member_activity")
+        .select("id, kind, member_id, user_id, created_at, account_name, account_email")
+        .order("created_at", { ascending: false })
+        .limit(12);
+      if (error) throw error;
+
+      const memberIds = [...new Set(events.map((event) => event.member_id).filter((id): id is string => !!id))];
+      const memberNames = new Map<string, string>();
+      if (memberIds.length) {
+        const { data: linkedMembers, error: membersError } = await supabase
+          .from("members")
+          .select("id, full_name")
+          .in("id", memberIds);
+        if (membersError) throw membersError;
+        for (const member of linkedMembers ?? []) memberNames.set(member.id, member.full_name);
+      }
+
+      return events.map((event) => ({ ...event, member_name: event.member_id ? memberNames.get(event.member_id) ?? null : null }));
+    },
+  });
 
   const { data = [], isLoading } = useQuery({
     queryKey: ["members"],
@@ -167,6 +193,53 @@ function MembersPage() {
           )}
         </div>
       </div>
+
+      <section className="mt-6 rounded-2xl border bg-card p-5" aria-labelledby="member-activity-title">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 id="member-activity-title" className="flex items-center gap-2 text-lg font-semibold text-foreground">
+              <Activity className="h-5 w-5 text-primary" /> Atividade recente
+            </h2>
+            <p className="mt-1 text-sm text-muted-foreground">Novos cadastros, criação de contas e vínculos com membros.</p>
+          </div>
+          <Badge variant="secondary">{recentActivity.data?.length ?? 0} atividades</Badge>
+        </div>
+
+        {recentActivity.isLoading ? (
+          <p className="mt-4 text-sm text-muted-foreground">Carregando atividades...</p>
+        ) : recentActivity.isError ? (
+          <p className="mt-4 text-sm text-destructive">Não foi possível carregar as atividades recentes.</p>
+        ) : (recentActivity.data ?? []).length === 0 ? (
+          <p className="mt-4 text-sm text-muted-foreground">Nenhuma atividade registrada ainda.</p>
+        ) : (
+          <ol className="mt-4 divide-y">
+            {(recentActivity.data ?? []).map((event) => {
+              const linkedName = event.member_name ?? event.account_name ?? "Membro";
+              const timestamp = new Intl.DateTimeFormat("pt-BR", { dateStyle: "short", timeStyle: "short" }).format(new Date(event.created_at));
+              const isAccount = event.kind === "account_created";
+              const isLinked = event.kind === "account_linked";
+              const title = isAccount
+                ? `Nova conta criada por ${event.account_name ?? "novo usuário"}`
+                : isLinked
+                  ? `Nova conta vinculada para ${linkedName}`
+                  : `Novo membro cadastrado: ${event.member_name ?? event.account_name ?? "Membro"}`;
+              const Icon = isAccount ? UserPlus : isLinked ? Mail : UserRoundCheck;
+
+              return (
+                <li key={event.id} className="flex items-start gap-3 py-3 first:pt-0 last:pb-0">
+                  <span className="mt-0.5 rounded-full bg-primary/10 p-2 text-primary"><Icon className="h-4 w-4" /></span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium text-foreground">{title}</p>
+                    {event.account_email && <p className="mt-0.5 break-all text-xs text-muted-foreground">{event.account_email}</p>}
+                    <p className="mt-1 text-xs text-muted-foreground">{timestamp}</p>
+                  </div>
+                  <Badge variant="outline">{isAccount ? "Conta" : isLinked ? "Vínculo" : "Cadastro"}</Badge>
+                </li>
+              );
+            })}
+          </ol>
+        )}
+      </section>
 
       <Tabs defaultValue="lista" className="mt-6">
         <TabsList>
