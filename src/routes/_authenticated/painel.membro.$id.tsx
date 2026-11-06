@@ -18,6 +18,7 @@ import {
 import { MemberAvatar, MemberForm, type MemberDraft } from "@/components/members/MemberForm";
 import { APPROVAL_LABELS, MEMBER_STATUS, ageFrom, brl, dateBR } from "@/lib/church";
 import { siteMeta } from "@/lib/site-query";
+import { isVisitor, signupOrigin } from "@/lib/visitors";
 import { memberSaveError, saveMemberDepartmentLinks } from "@/lib/departments";
 import { useChurchRoles, useDepartments, useMemberDepartments } from "@/hooks/use-departments";
 
@@ -146,12 +147,14 @@ function MemberProfile() {
   if (member.isLoading) return <p className="text-muted-foreground">Carregando...</p>;
 
   const m = member.data;
+  // Visitantes têm página própria: o "Voltar" leva para a lista certa.
+  const backToVisitors = !!m && isVisitor(m);
   const back = (
     <Link
-      to="/painel/membros"
+      to={backToVisitors ? "/painel/visitantes" : "/painel/membros"}
       className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"
     >
-      <ArrowLeft className="h-4 w-4" /> Voltar para membros
+      <ArrowLeft className="h-4 w-4" /> {backToVisitors ? "Voltar para visitantes" : "Voltar para membros"}
     </Link>
   );
   if (!m) {
@@ -219,6 +222,8 @@ function MemberProfile() {
         </Block>
 
         <Block title="Vida na igreja">
+          <Field label="Origem do cadastro">{signupOrigin(m)}</Field>
+          <Field label="Cadastrado em">{dateBR(m.created_at)}</Field>
           <Field label="Matrícula">{m.registration_number}</Field>
           <Field label="Filiação">{dateBR(m.affiliated_on)}</Field>
           <Field label="Batizado">

@@ -1,6 +1,6 @@
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { CalendarDays, HandHeart, Minus, Network, Target, TrendingDown, TrendingUp, Users } from "lucide-react";
+import { CalendarDays, HandHeart, Minus, Network, Target, TrendingDown, TrendingUp, UserRoundPlus, Users } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAccess } from "@/hooks/use-access";
 import { Badge } from "@/components/ui/badge";
@@ -13,6 +13,37 @@ const card = "rounded-2xl border bg-card p-6 transition-shadow hover:shadow-soft
 const label = "flex items-center gap-2 text-sm text-muted-foreground";
 const big = "mt-2 font-display text-4xl text-foreground";
 const PRAYER_STATUS: Record<string, string> = { recebido: "Recebido", em_oracao: "Em oração", concluido: "Concluído" };
+
+/** Visitantes cadastrados (status "visitante"), separados dos membros, e quantos chegaram nos últimos 30 dias. */
+export function VisitorsCard() {
+  const { can } = useAccess();
+  const allowed = can("view_members");
+  const stats = useQuery({
+    queryKey: ["dashboard-visitors"],
+    enabled: allowed,
+    queryFn: async () => {
+      const since = new Date(Date.now() - 30 * 86_400_000).toISOString();
+      const [total, recent] = await Promise.all([
+        supabase.from("members").select("id", { count: "exact", head: true }).eq("status", "visitante"),
+        supabase.from("members").select("id", { count: "exact", head: true }).eq("status", "visitante").gte("created_at", since),
+      ]);
+      if (total.error) throw total.error;
+      if (recent.error) throw recent.error;
+      return { total: total.count ?? 0, recent: recent.count ?? 0 };
+    },
+  });
+  if (!allowed) return null;
+  const s = stats.data;
+  return (
+    <Link to="/painel/visitantes" className={card}>
+      <p className={label}><UserRoundPlus className="h-4 w-4" /> Visitantes cadastrados</p>
+      <p className={big}>{s?.total ?? "—"}</p>
+      <p className="mt-1 text-xs text-muted-foreground">
+        {s ? (s.recent === 0 ? "Nenhum novo nos últimos 30 dias" : `${s.recent} ${s.recent === 1 ? "novo" : "novos"} nos últimos 30 dias`) : "Pessoas fora da lista de membros"}
+      </p>
+    </Link>
+  );
+}
 
 /** Voluntários (membros em algum departamento) e departamentos. */
 export function VolunteerCards() {

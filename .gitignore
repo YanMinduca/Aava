@@ -33,3 +33,6 @@ dist-ssr
 .env
 
 
+
+# Estado local do Supabase CLI (não vai para o Git)
+supabase/.temp/
