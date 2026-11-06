@@ -1,0 +1,1630 @@
+From 48258cd22f0dbf6a6f58c737db75d9cfa73339b0 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 6 Nov 2026 22:13:33 +0000
+Subject: [PATCH] =?UTF-8?q?feat:=20visitantes=20separados=20de=20membros,?=
+ =?UTF-8?q?=20origem=20do=20cadastro,=20dashboard=20e=20v=C3=ADnculo=20de?=
+ =?UTF-8?q?=20conta=20em=20permiss=C3=B5es?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Página /painel/visitantes (menu lateral), com busca, filtro por origem e exportação XLS.
+- Quem tem status 'visitante' sai da lista, contagem e exportação de membros.
+- Origem do cadastro (ex.: 'Veio pelo evento X') gravada no banco e mostrada no perfil.
+- Dashboard: card de visitantes cadastrados (+ novos nos últimos 30 dias); card de membros não conta visitantes.
+- Membros: atividade recente minimizável (começa fechada e lembra a escolha).
+- Usuários e permissões: mostra se a conta está vinculada a um cadastro e permite vincular/desvincular ali.
+- Migration 20261106140000_visitor_signup_source (apenas acrescenta colunas e gatilhos).
+- Ignora supabase/.temp (estado local do CLI) e remove do Git.
+
+Ordem de deploy: npx supabase db push --remote ANTES de publicar o código.
+---
+ .gitignore                                    |   3 +
+ src/components/admin/AccountMemberSection.tsx | 157 ++++++++++++++++++
+ src/components/dashboard/DashboardCards.tsx   |  33 +++-
+ src/components/members/RecentActivity.tsx     | 122 ++++++++++++++
+ src/components/members/VisitorsPage.tsx       | 136 +++++++++++++++
+ src/hooks/use-members.ts                      |  15 ++
+ src/integrations/supabase/types.ts            |  16 ++
+ src/lib/account-link.ts                       |  28 ++++
+ src/lib/visitors.ts                           |  49 ++++++
+ src/routeTree.gen.ts                          |  22 +++
+ src/routes/_authenticated/painel.index.tsx    |   6 +-
+ .../_authenticated/painel.membro.$id.tsx      |   9 +-
+ src/routes/_authenticated/painel.membros.tsx  | 101 ++---------
+ .../_authenticated/painel.permissoes.tsx      |   2 +
+ src/routes/_authenticated/painel.tsx          |   2 +
+ .../_authenticated/painel.visitantes.tsx      |   8 +
+ src/test/account-member-section.test.tsx      |  98 +++++++++++
+ src/test/recent-activity.test.tsx             |  62 +++++++
+ src/test/visitors-page.test.tsx               |  75 +++++++++
+ src/test/visitors.test.ts                     |  67 ++++++++
+ supabase/.temp/cli-latest                     |   1 -
+ supabase/.temp/gotrue-version                 |   1 -
+ supabase/.temp/linked-project.json            |   1 -
+ supabase/.temp/pooler-url                     |   1 -
+ supabase/.temp/postgres-version               |   1 -
+ supabase/.temp/project-ref                    |   1 -
+ supabase/.temp/rest-version                   |   1 -
+ supabase/.temp/storage-migration              |   1 -
+ supabase/.temp/storage-version                |   1 -
+ .../20261106140000_visitor_signup_source.sql  | 117 +++++++++++++
+ 30 files changed, 1039 insertions(+), 98 deletions(-)
+ create mode 100644 src/components/admin/AccountMemberSection.tsx
+ create mode 100644 src/components/members/RecentActivity.tsx
+ create mode 100644 src/components/members/VisitorsPage.tsx
+ create mode 100644 src/hooks/use-members.ts
+ create mode 100644 src/lib/account-link.ts
+ create mode 100644 src/lib/visitors.ts
+ create mode 100644 src/routes/_authenticated/painel.visitantes.tsx
+ create mode 100644 src/test/account-member-section.test.tsx
+ create mode 100644 src/test/recent-activity.test.tsx
+ create mode 100644 src/test/visitors-page.test.tsx
+ create mode 100644 src/test/visitors.test.ts
+ delete mode 100644 supabase/.temp/cli-latest
+ delete mode 100644 supabase/.temp/gotrue-version
+ delete mode 100644 supabase/.temp/linked-project.json
+ delete mode 100644 supabase/.temp/pooler-url
+ delete mode 100644 supabase/.temp/postgres-version
+ delete mode 100644 supabase/.temp/project-ref
+ delete mode 100644 supabase/.temp/rest-version
+ delete mode 100644 supabase/.temp/storage-migration
+ delete mode 100644 supabase/.temp/storage-version
+ create mode 100644 supabase/migrations/20261106140000_visitor_signup_source.sql
+
+diff --git a/.gitignore b/.gitignore
+index ebacb3f..5a73df4 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -33,3 +33,6 @@ dist-ssr
+ .env
+ 
+ 
++
++# Estado local do Supabase CLI (não vai para o Git)
++supabase/.temp/
+diff --git a/src/components/admin/AccountMemberSection.tsx b/src/components/admin/AccountMemberSection.tsx
+new file mode 100644
+index 0000000..3441303
+--- /dev/null
++++ b/src/components/admin/AccountMemberSection.tsx
+@@ -0,0 +1,157 @@
++import { useState } from "react";
++import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
++import { Link } from "@tanstack/react-router";
++import { Link2, Link2Off, Search } from "lucide-react";
++import { toast } from "sonner";
++import { supabase } from "@/integrations/supabase/client";
++import { Badge } from "@/components/ui/badge";
++import { Button } from "@/components/ui/button";
++import { Input } from "@/components/ui/input";
++import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
++import { LINK_MESSAGES } from "@/components/members/MemberAccountLink";
++import { MEMBER_STATUS } from "@/lib/church";
++import { rankMembersForAccount } from "@/lib/account-link";
++
++type AccountUser = { id: string; name: string | null; email: string | null };
++
++const REFRESH_KEYS = ["members", "account-links", "users-admin", "account-member", "unlinked-members", "member-activity"];
++
++/**
++ * Em Usuários e permissões: mostra se a conta está ligada a um cadastro de membro (ou visitante)
++ * e, para quem pode, liga ou desliga dali mesmo. `canView` = pode ver cadastros; `canLink` = CEO / Pastor Presidente.
++ */
++export function AccountMemberSection({ user, canView, canLink }: { user: AccountUser; canView: boolean; canLink: boolean }) {
++  const qc = useQueryClient();
++  const [open, setOpen] = useState(false);
++  const [search, setSearch] = useState("");
++
++  const linked = useQuery({
++    queryKey: ["account-member", user.id],
++    enabled: canView,
++    queryFn: async () => {
++      const { data, error } = await supabase.from("members").select("id, full_name, status").eq("user_id", user.id).maybeSingle();
++      if (error) throw error;
++      return data;
++    },
++  });
++
++  const candidates = useQuery({
++    queryKey: ["unlinked-members"],
++    enabled: canView && canLink && open,
++    queryFn: async () => {
++      const { data, error } = await supabase.from("members").select("id, full_name, email, phone, status").is("user_id", null).order("full_name");
++      if (error) throw error;
++      return data;
++    },
++  });
++
++  function refresh() {
++    for (const key of REFRESH_KEYS) qc.invalidateQueries({ queryKey: [key] });
++  }
++
++  const link = useMutation({
++    mutationFn: async (memberId: string) => {
++      const { data, error } = await supabase.rpc("link_member_account", { _member: memberId, _user: user.id });
++      if (error) throw new Error(error.message);
++      if (data !== "ok") throw new Error(data ?? "");
++    },
++    onSuccess: () => {
++      toast.success("Conta vinculada ao cadastro");
++      refresh();
++      setOpen(false);
++      setSearch("");
++    },
++    onError: (e) => toast.error(LINK_MESSAGES[e instanceof Error ? e.message : ""] ?? "Não foi possível vincular agora."),
++  });
++
++  const unlink = useMutation({
++    mutationFn: async (memberId: string) => {
++      const { data, error } = await supabase.rpc("unlink_member_account", { _member: memberId });
++      if (error) throw new Error(error.message);
++      if (data !== "ok") throw new Error(data ?? "");
++    },
++    onSuccess: () => {
++      toast.success("Conta desvinculada do cadastro");
++      refresh();
++    },
++    onError: (e) => toast.error(LINK_MESSAGES[e instanceof Error ? e.message : ""] ?? "Não foi possível desvincular agora."),
++  });
++
++  if (!canView) return null;
++
++  const member = linked.data;
++  const ranked = rankMembersForAccount({ name: user.name, email: user.email }, candidates.data ?? [], search);
++
++  return (
++    <section className="mt-4 rounded-xl border bg-muted/30 p-4" aria-label="Cadastro de membro" data-testid="account-member-section">
++      <p className="text-sm font-medium text-foreground">Cadastro de membro</p>
++
++      {linked.isLoading ? (
++        <p className="mt-2 text-sm text-muted-foreground">Verificando vínculo...</p>
++      ) : linked.isError ? (
++        <p className="mt-2 text-sm text-destructive">Não foi possível verificar o vínculo desta conta.</p>
++      ) : member ? (
++        <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
++          <div className="text-sm text-muted-foreground">
++            Conta <strong className="text-foreground">vinculada</strong> ao cadastro de{" "}
++            <Link to="/painel/membro/$id" params={{ id: member.id }} className="font-medium text-primary hover:underline">{member.full_name}</Link>{" "}
++            <Badge variant="secondary" className="ml-1">{MEMBER_STATUS[member.status] ?? member.status}</Badge>
++          </div>
++          {canLink && (
++            <Button
++              size="sm"
++              variant="outline"
++              disabled={unlink.isPending}
++              onClick={() => {
++                if (window.confirm(`Desvincular esta conta do cadastro de ${member.full_name}? O cadastro e a conta continuam existindo.`)) unlink.mutate(member.id);
++              }}
++            >
++              <Link2Off className="h-4 w-4" /> Desvincular
++            </Button>
++          )}
++        </div>
++      ) : (
++        <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
++          <p className="text-sm text-muted-foreground">
++            Esta conta <strong className="text-foreground">não está vinculada</strong> a nenhum cadastro de membro.
++            {!canLink && " Somente o CEO e o Pastor Presidente podem vincular."}
++          </p>
++          {canLink && (
++            <Button size="sm" onClick={() => setOpen(true)}>
++              <Link2 className="h-4 w-4" /> Vincular a um cadastro
++            </Button>
++          )}
++        </div>
++      )}
++
++      <Dialog open={open} onOpenChange={(next) => { setOpen(next); if (!next) setSearch(""); }}>
++        <DialogContent className="max-w-lg">
++          <DialogHeader>
++            <DialogTitle>Vincular {user.name || user.email || "conta"} a um cadastro</DialogTitle>
++            <DialogDescription>Escolha o cadastro que pertence a esta pessoa. Só aparecem cadastros que ainda não têm conta.</DialogDescription>
++          </DialogHeader>
++          <div className="relative">
++            <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
++            <Input className="pl-9" placeholder="Buscar por nome, e-mail ou telefone" value={search} onChange={(e) => setSearch(e.target.value)} />
++          </div>
++          <div className="max-h-72 divide-y overflow-y-auto rounded-lg border">
++            {candidates.isLoading && <p className="p-4 text-sm text-muted-foreground">Carregando cadastros...</p>}
++            {candidates.isError && <p className="p-4 text-sm text-destructive">Não foi possível carregar os cadastros.</p>}
++            {!candidates.isLoading && !candidates.isError && ranked.length === 0 && <p className="p-4 text-sm text-muted-foreground">Nenhum cadastro sem conta encontrado.</p>}
++            {ranked.map((m) => (
++              <div key={m.id} className="flex items-center justify-between gap-3 p-3">
++                <div className="min-w-0">
++                  <div className="truncate text-sm font-medium text-foreground">
++                    {m.full_name} {m.suggested && <Badge className="ml-1">Sugestão</Badge>}
++                  </div>
++                  <p className="truncate text-xs text-muted-foreground">{[MEMBER_STATUS[m.status] ?? m.status, m.email, m.phone].filter(Boolean).join(" · ")}</p>
++                </div>
++                <Button size="sm" disabled={link.isPending} onClick={() => link.mutate(m.id)}>Vincular</Button>
++              </div>
++            ))}
++          </div>
++        </DialogContent>
++      </Dialog>
++    </section>
++  );
++}
+diff --git a/src/components/dashboard/DashboardCards.tsx b/src/components/dashboard/DashboardCards.tsx
+index f325ca9..2b0c147 100644
+--- a/src/components/dashboard/DashboardCards.tsx
++++ b/src/components/dashboard/DashboardCards.tsx
+@@ -1,6 +1,6 @@
+ import { Link } from "@tanstack/react-router";
+ import { useQuery } from "@tanstack/react-query";
+-import { CalendarDays, HandHeart, Minus, Network, Target, TrendingDown, TrendingUp, Users } from "lucide-react";
++import { CalendarDays, HandHeart, Minus, Network, Target, TrendingDown, TrendingUp, UserRoundPlus, Users } from "lucide-react";
+ import { supabase } from "@/integrations/supabase/client";
+ import { useAccess } from "@/hooks/use-access";
+ import { Badge } from "@/components/ui/badge";
+@@ -14,6 +14,37 @@ const label = "flex items-center gap-2 text-sm text-muted-foreground";
+ const big = "mt-2 font-display text-4xl text-foreground";
+ const PRAYER_STATUS: Record<string, string> = { recebido: "Recebido", em_oracao: "Em oração", concluido: "Concluído" };
+ 
++/** Visitantes cadastrados (status "visitante"), separados dos membros, e quantos chegaram nos últimos 30 dias. */
++export function VisitorsCard() {
++  const { can } = useAccess();
++  const allowed = can("view_members");
++  const stats = useQuery({
++    queryKey: ["dashboard-visitors"],
++    enabled: allowed,
++    queryFn: async () => {
++      const since = new Date(Date.now() - 30 * 86_400_000).toISOString();
++      const [total, recent] = await Promise.all([
++        supabase.from("members").select("id", { count: "exact", head: true }).eq("status", "visitante"),
++        supabase.from("members").select("id", { count: "exact", head: true }).eq("status", "visitante").gte("created_at", since),
++      ]);
++      if (total.error) throw total.error;
++      if (recent.error) throw recent.error;
++      return { total: total.count ?? 0, recent: recent.count ?? 0 };
++    },
++  });
++  if (!allowed) return null;
++  const s = stats.data;
++  return (
++    <Link to="/painel/visitantes" className={card}>
++      <p className={label}><UserRoundPlus className="h-4 w-4" /> Visitantes cadastrados</p>
++      <p className={big}>{s?.total ?? "—"}</p>
++      <p className="mt-1 text-xs text-muted-foreground">
++        {s ? (s.recent === 0 ? "Nenhum novo nos últimos 30 dias" : `${s.recent} ${s.recent === 1 ? "novo" : "novos"} nos últimos 30 dias`) : "Pessoas fora da lista de membros"}
++      </p>
++    </Link>
++  );
++}
++
+ /** Voluntários (membros em algum departamento) e departamentos. */
+ export function VolunteerCards() {
+   // Só para quem recebeu a permissão de departamentos (membro comum não vê estes números)
+diff --git a/src/components/members/RecentActivity.tsx b/src/components/members/RecentActivity.tsx
+new file mode 100644
+index 0000000..5d23b83
+--- /dev/null
++++ b/src/components/members/RecentActivity.tsx
+@@ -0,0 +1,122 @@
++import { useState } from "react";
++import { useQuery } from "@tanstack/react-query";
++import { Activity, ChevronDown, Mail, UserPlus, UserRoundCheck, UserRoundPlus } from "lucide-react";
++import { supabase } from "@/integrations/supabase/client";
++import { Badge } from "@/components/ui/badge";
++import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
++import { isVisitor } from "@/lib/visitors";
++
++const STORAGE_KEY = "aava:membros:atividade-aberta";
++
++/** Lembra se a pessoa deixou a atividade aberta. Começa fechada, para a página de membros ficar limpa. */
++function readOpen(): boolean {
++  try {
++    return window.localStorage.getItem(STORAGE_KEY) === "1";
++  } catch {
++    return false;
++  }
++}
++
++function saveOpen(open: boolean) {
++  try {
++    window.localStorage.setItem(STORAGE_KEY, open ? "1" : "0");
++  } catch {
++    // sem armazenamento (modo privado etc.): só não lembra da escolha
++  }
++}
++
++/** Novos cadastros, contas criadas e vínculos. Fica recolhido até a pessoa abrir. */
++export function RecentActivity({ enabled }: { enabled: boolean }) {
++  const [open, setOpen] = useState(readOpen);
++
++  const activity = useQuery({
++    queryKey: ["member-activity"],
++    enabled,
++    queryFn: async () => {
++      const { data: events, error } = await supabase
++        .from("member_activity")
++        .select("id, kind, member_id, user_id, created_at, account_name, account_email")
++        .order("created_at", { ascending: false })
++        .limit(12);
++      if (error) throw error;
++
++      const memberIds = [...new Set(events.map((event) => event.member_id).filter((id): id is string => !!id))];
++      const people = new Map<string, { name: string; visitor: boolean }>();
++      if (memberIds.length) {
++        const { data: rows, error: membersError } = await supabase.from("members").select("id, full_name, status").in("id", memberIds);
++        if (membersError) throw membersError;
++        for (const m of rows ?? []) people.set(m.id, { name: m.full_name, visitor: isVisitor(m) });
++      }
++
++      return events.map((event) => {
++        const person = event.member_id ? people.get(event.member_id) : undefined;
++        return { ...event, member_name: person?.name ?? null, member_is_visitor: person?.visitor ?? false };
++      });
++    },
++  });
++
++  const list = activity.data ?? [];
++
++  function toggle(next: boolean) {
++    setOpen(next);
++    saveOpen(next);
++  }
++
++  return (
++    <Collapsible open={open} onOpenChange={toggle} className="mt-6 rounded-2xl border bg-card" data-testid="recent-activity">
++      <CollapsibleTrigger className="flex w-full items-center justify-between gap-3 rounded-2xl px-5 py-3 text-left transition-colors hover:bg-accent/40">
++        <span className="flex items-center gap-2 text-base font-semibold text-foreground">
++          <Activity className="h-5 w-5 text-primary" /> Atividade recente
++        </span>
++        <span className="flex items-center gap-3">
++          <span className="rounded-md bg-secondary px-2.5 py-0.5 text-xs font-semibold text-secondary-foreground">
++            {activity.isLoading ? "…" : `${list.length} ${list.length === 1 ? "atividade" : "atividades"}`}
++          </span>
++          <span className="text-xs text-muted-foreground">{open ? "Minimizar" : "Mostrar"}</span>
++          <ChevronDown className={`h-4 w-4 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`} aria-hidden />
++        </span>
++      </CollapsibleTrigger>
++
++      <CollapsibleContent className="border-t px-5 pb-5 pt-4">
++        <p className="text-sm text-muted-foreground">Novos cadastros, criação de contas e vínculos com membros.</p>
++
++        {activity.isLoading ? (
++          <p className="mt-4 text-sm text-muted-foreground">Carregando atividades...</p>
++        ) : activity.isError ? (
++          <p className="mt-4 text-sm text-destructive">Não foi possível carregar as atividades recentes.</p>
++        ) : list.length === 0 ? (
++          <p className="mt-4 text-sm text-muted-foreground">Nenhuma atividade registrada ainda.</p>
++        ) : (
++          <ol className="mt-4 max-h-80 divide-y overflow-y-auto pr-1">
++            {list.map((event) => {
++              const name = event.member_name ?? event.account_name ?? "Membro";
++              const when = new Intl.DateTimeFormat("pt-BR", { dateStyle: "short", timeStyle: "short" }).format(new Date(event.created_at));
++              const isAccount = event.kind === "account_created";
++              const isLinked = event.kind === "account_linked";
++              const visitor = event.member_is_visitor;
++              const title = isAccount
++                ? `Nova conta criada por ${event.account_name ?? "novo usuário"}`
++                : isLinked
++                  ? `Nova conta vinculada para ${name}`
++                  : `${visitor ? "Novo visitante cadastrado" : "Novo membro cadastrado"}: ${name}`;
++              const Icon = isAccount ? UserPlus : isLinked ? Mail : visitor ? UserRoundPlus : UserRoundCheck;
++              const badge = isAccount ? "Conta" : isLinked ? "Vínculo" : visitor ? "Visitante" : "Cadastro";
++
++              return (
++                <li key={event.id} className="flex items-start gap-3 py-3 first:pt-0 last:pb-0">
++                  <span className="mt-0.5 rounded-full bg-primary/10 p-2 text-primary"><Icon className="h-4 w-4" /></span>
++                  <div className="min-w-0 flex-1">
++                    <p className="text-sm font-medium text-foreground">{title}</p>
++                    {event.account_email && <p className="mt-0.5 break-all text-xs text-muted-foreground">{event.account_email}</p>}
++                    <p className="mt-1 text-xs text-muted-foreground">{when}</p>
++                  </div>
++                  <Badge variant="outline">{badge}</Badge>
++                </li>
++              );
++            })}
++          </ol>
++        )}
++      </CollapsibleContent>
++    </Collapsible>
++  );
++}
+diff --git a/src/components/members/VisitorsPage.tsx b/src/components/members/VisitorsPage.tsx
+new file mode 100644
+index 0000000..81be4c2
+--- /dev/null
++++ b/src/components/members/VisitorsPage.tsx
+@@ -0,0 +1,136 @@
++import { Link } from "@tanstack/react-router";
++import { useState } from "react";
++import { Download, Eye, Search, UserRoundCheck } from "lucide-react";
++import { useAccess } from "@/hooks/use-access";
++import { useAllMembers } from "@/hooks/use-members";
++import { Button } from "@/components/ui/button";
++import { Input } from "@/components/ui/input";
++import { Badge } from "@/components/ui/badge";
++import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
++import { MemberAvatar } from "@/components/members/MemberForm";
++import { AccountBadge, LinkAccountDialog, useAccountLinks } from "@/components/members/MemberAccountLink";
++import { APPROVAL_LABELS, dateBR } from "@/lib/church";
++import { downloadXls } from "@/lib/export";
++import { isVisitor, originKey, originKeyLabel, recentCount, signupOrigin } from "@/lib/visitors";
++
++export function VisitorsPage() {
++  const { can, isFullAccess, isLoading: loadingAccess } = useAccess();
++  const [search, setSearch] = useState("");
++  const [origin, setOrigin] = useState("todas");
++  const [linking, setLinking] = useState<{ id: string; full_name: string; user_id: string | null } | null>(null);
++  const members = useAllMembers(can("view_members"));
++  const accountLinks = useAccountLinks(isFullAccess);
++  const accountEmail = (userId: string | null) => (userId ? accountLinks.data?.find((a) => a.account_id === userId)?.account_email ?? null : null);
++
++  if (loadingAccess) return null;
++  if (!can("view_members")) return <p className="text-muted-foreground">Você não tem acesso a esta área.</p>;
++
++  // Mais recentes primeiro
++  const visitors = (members.data ?? []).filter(isVisitor).sort((a, b) => b.created_at.localeCompare(a.created_at));
++  const origins = [...new Set(visitors.map(originKey))].sort((a, b) => originKeyLabel(a).localeCompare(originKeyLabel(b), "pt-BR"));
++  const q = search.trim().toLowerCase();
++  const filtered = visitors.filter(
++    (m) =>
++      (origin === "todas" || originKey(m) === origin) &&
++      (!q ||
++        m.full_name.toLowerCase().includes(q) ||
++        (m.email ?? "").toLowerCase().includes(q) ||
++        (m.phone ?? "").includes(q) ||
++        (m.cpf ?? "").includes(q) ||
++        signupOrigin(m).toLowerCase().includes(q)),
++  );
++  const withAccount = visitors.filter((m) => !!m.user_id).length;
++
++  function exportXls() {
++    const head = ["Nome", "Telefone", "E-mail", "CPF", "Nascimento", "Origem do cadastro", "Cadastrado em", "Conta"];
++    const rows = filtered.map((m) => [m.full_name, m.phone, m.email, m.cpf, dateBR(m.birth_date), signupOrigin(m), dateBR(m.created_at), m.user_id ? "Com conta" : "Sem conta"]);
++    void downloadXls("visitantes", [head, ...rows], "Visitantes");
++  }
++
++  return (
++    <div>
++      <div className="flex flex-wrap items-center justify-between gap-4">
++        <div>
++          <h1 className="text-3xl text-foreground">Visitantes</h1>
++          <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
++            Pessoas que se cadastraram como visitantes (por exemplo, ao se inscrever em um evento). Ficam separadas dos membros; para virar membro, edite o status no perfil.
++          </p>
++        </div>
++        <Button variant="outline" onClick={exportXls} disabled={filtered.length === 0}><Download className="h-4 w-4" /> XLS</Button>
++      </div>
++
++      <div className="mt-6 flex flex-wrap gap-3">
++        <div className="relative w-full max-w-sm">
++          <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
++          <Input className="pl-9" placeholder="Buscar por nome, contato ou origem" value={search} onChange={(e) => setSearch(e.target.value)} />
++        </div>
++        <Select value={origin} onValueChange={setOrigin}>
++          <SelectTrigger className="w-64"><SelectValue /></SelectTrigger>
++          <SelectContent>
++            <SelectItem value="todas">Todas as origens</SelectItem>
++            {origins.map((k) => <SelectItem key={k} value={k}>{originKeyLabel(k)}</SelectItem>)}
++          </SelectContent>
++        </Select>
++      </div>
++
++      <p className="mt-3 text-sm text-muted-foreground">
++        {visitors.length} {visitors.length === 1 ? "visitante" : "visitantes"} · {withAccount} com conta · {recentCount(visitors)} nos últimos 30 dias
++      </p>
++
++      <div className="mt-4 overflow-x-auto rounded-2xl border bg-card">
++        <table className="w-full text-sm">
++          <thead className="border-b text-left text-muted-foreground">
++            <tr>
++              <th className="p-4 font-medium">Nome</th>
++              <th className="p-4 font-medium">Contato</th>
++              <th className="p-4 font-medium">Origem do cadastro</th>
++              <th className="p-4 font-medium">Cadastrado em</th>
++              <th className="p-4 font-medium">Conta</th>
++              <th className="p-4" />
++            </tr>
++          </thead>
++          <tbody>
++            {members.isLoading && <tr><td className="p-4 text-muted-foreground" colSpan={6}>Carregando...</td></tr>}
++            {members.isError && <tr><td className="p-4 text-destructive" colSpan={6}>Não foi possível carregar os visitantes.</td></tr>}
++            {!members.isLoading && !members.isError && filtered.length === 0 && (
++              <tr>
++                <td className="p-6 text-center text-muted-foreground" colSpan={6}>
++                  {visitors.length === 0 ? "Nenhum visitante cadastrado ainda. Quem se inscreve em um evento sem ser membro aparece aqui." : "Nenhum visitante encontrado com esses filtros."}
++                </td>
++              </tr>
++            )}
++            {filtered.map((m) => (
++              <tr key={m.id} className="border-b last:border-0">
++                <td className="p-4">
++                  <div className="flex items-center gap-3">
++                    <MemberAvatar path={m.photo_path} />
++                    <div>
++                      <Link to="/painel/membro/$id" params={{ id: m.id }} className="font-medium text-foreground hover:text-primary hover:underline">{m.full_name}</Link>
++                      {m.approval_status !== "aprovado" && <p className="text-xs text-destructive">{APPROVAL_LABELS[m.approval_status] ?? m.approval_status}</p>}
++                    </div>
++                  </div>
++                </td>
++                <td className="p-4 text-muted-foreground">{m.phone}<br />{m.email}</td>
++                <td className="p-4">
++                  <Badge variant={m.signup_source === "event" ? "default" : "secondary"} className="max-w-xs whitespace-normal text-left font-normal">{signupOrigin(m)}</Badge>
++                </td>
++                <td className="whitespace-nowrap p-4 text-muted-foreground">{dateBR(m.created_at)}</td>
++                <td className="p-4"><AccountBadge linked={!!m.user_id} email={accountEmail(m.user_id)} /></td>
++                <td className="whitespace-nowrap p-4 text-right">
++                  <Button size="icon" variant="ghost" asChild aria-label="Ver perfil"><Link to="/painel/membro/$id" params={{ id: m.id }}><Eye className="h-4 w-4" /></Link></Button>
++                  {isFullAccess && (
++                    <Button size="icon" variant="ghost" aria-label={m.user_id ? "Ver conta vinculada" : "Vincular conta"} title={m.user_id ? "Ver conta vinculada" : "Vincular conta"} onClick={() => setLinking({ id: m.id, full_name: m.full_name, user_id: m.user_id })}>
++                      <UserRoundCheck className="h-4 w-4" />
++                    </Button>
++                  )}
++                </td>
++              </tr>
++            ))}
++          </tbody>
++        </table>
++      </div>
++
++      {isFullAccess && <LinkAccountDialog member={linking} accounts={accountLinks.data ?? []} onClose={() => setLinking(null)} />}
++    </div>
++  );
++}
+diff --git a/src/hooks/use-members.ts b/src/hooks/use-members.ts
+new file mode 100644
+index 0000000..cabb7a7
+--- /dev/null
++++ b/src/hooks/use-members.ts
+@@ -0,0 +1,15 @@
++import { useQuery } from "@tanstack/react-query";
++import { supabase } from "@/integrations/supabase/client";
++
++/** Todos os cadastros (membros e visitantes). As telas separam os dois com splitVisitors. */
++export function useAllMembers(enabled = true) {
++  return useQuery({
++    queryKey: ["members"],
++    enabled,
++    queryFn: async () => {
++      const { data, error } = await supabase.from("members").select("*").order("full_name");
++      if (error) throw error;
++      return data;
++    },
++  });
++}
+diff --git a/src/integrations/supabase/types.ts b/src/integrations/supabase/types.ts
+index c332f15..b664f42 100644
+--- a/src/integrations/supabase/types.ts
++++ b/src/integrations/supabase/types.ts
+@@ -801,6 +801,9 @@ export type Database = {
+           photo_path: string | null
+           registration_number: string | null
+           rg: string | null
++          signup_event_id: string | null
++          signup_event_title: string | null
++          signup_source: string | null
+           status: string
+           updated_at: string
+           user_id: string | null
+@@ -832,6 +835,9 @@ export type Database = {
+           photo_path?: string | null
+           registration_number?: string | null
+           rg?: string | null
++          signup_event_id?: string | null
++          signup_event_title?: string | null
++          signup_source?: string | null
+           status?: string
+           updated_at?: string
+           user_id?: string | null
+@@ -863,6 +869,9 @@ export type Database = {
+           photo_path?: string | null
+           registration_number?: string | null
+           rg?: string | null
++          signup_event_id?: string | null
++          signup_event_title?: string | null
++          signup_source?: string | null
+           status?: string
+           updated_at?: string
+           user_id?: string | null
+@@ -876,6 +885,13 @@ export type Database = {
+             referencedRelation: "church_roles"
+             referencedColumns: ["id"]
+           },
++          {
++            foreignKeyName: "members_signup_event_id_fkey"
++            columns: ["signup_event_id"]
++            isOneToOne: false
++            referencedRelation: "events"
++            referencedColumns: ["id"]
++          },
+         ]
+       }
+       prayer_requests: {
+diff --git a/src/lib/account-link.ts b/src/lib/account-link.ts
+new file mode 100644
+index 0000000..89b32ad
+--- /dev/null
++++ b/src/lib/account-link.ts
+@@ -0,0 +1,28 @@
++const norm = (s: string | null | undefined) =>
++  (s ?? "")
++    .normalize("NFD")
++    .replace(/[\u0300-\u036f]/g, "")
++    .toLowerCase()
++    .replace(/\s+/g, " ")
++    .trim();
++
++type AccountLike = { name: string | null; email: string | null };
++type MemberLike = { full_name: string; email: string | null; phone?: string | null };
++
++/**
++ * Cadastros que ainda não têm conta, para escolher a quem ligar uma conta.
++ * Os que parecem ser da mesma pessoa (mesmo e-mail ou mesmo nome) vêm primeiro e ficam marcados como sugestão.
++ * `query` filtra por nome, e-mail ou telefone.
++ */
++export function rankMembersForAccount<T extends MemberLike>(account: AccountLike, members: readonly T[], query = ""): Array<T & { suggested: boolean }> {
++  const q = norm(query);
++  const accountEmail = norm(account.email);
++  const accountName = norm(account.name);
++  return members
++    .filter((m) => !q || norm(m.full_name).includes(q) || norm(m.email).includes(q) || norm(m.phone).includes(q))
++    .map((m) => ({
++      ...m,
++      suggested: (!!accountEmail && norm(m.email) === accountEmail) || (!!accountName && norm(m.full_name) === accountName),
++    }))
++    .sort((a, b) => Number(b.suggested) - Number(a.suggested) || a.full_name.localeCompare(b.full_name, "pt-BR"));
++}
+diff --git a/src/lib/visitors.ts b/src/lib/visitors.ts
+new file mode 100644
+index 0000000..45970a6
+--- /dev/null
++++ b/src/lib/visitors.ts
+@@ -0,0 +1,49 @@
++/** Quem tem status "visitante" fica separado dos membros (página própria, contagem própria). */
++export const VISITOR_STATUS = "visitante";
++
++export const isVisitor = (m: { status: string }) => m.status === VISITOR_STATUS;
++
++/** Separa a lista em membros e visitantes, mantendo a ordem de entrada. */
++export function splitVisitors<T extends { status: string }>(list: readonly T[]): { members: T[]; visitors: T[] } {
++  const members: T[] = [];
++  const visitors: T[] = [];
++  for (const m of list) (isVisitor(m) ? visitors : members).push(m);
++  return { members, visitors };
++}
++
++type SignupInfo = { signup_source?: string | null; signup_event_title?: string | null };
++
++/** Texto "de onde veio" o cadastro, para mostrar na tela. */
++export function signupOrigin(m: SignupInfo): string {
++  switch (m.signup_source) {
++    case "event":
++      return m.signup_event_title ? `Veio pelo evento: ${m.signup_event_title}` : "Veio por um evento";
++    case "admin":
++      return "Cadastrado pela equipe";
++    case "site":
++      return "Cadastro feito no site";
++    default:
++      return "Origem não registrada";
++  }
++}
++
++/** Valor usado no filtro por origem: event:<título>, admin, site ou none. */
++export function originKey(m: SignupInfo): string {
++  if (m.signup_source === "event") return `event:${m.signup_event_title ?? ""}`;
++  if (m.signup_source === "admin" || m.signup_source === "site") return m.signup_source;
++  return "none";
++}
++
++/** Nome mostrado no seletor de origem. */
++export function originKeyLabel(key: string): string {
++  if (key.startsWith("event:")) return key.length > 6 ? `Evento: ${key.slice(6)}` : "Evento (sem título)";
++  if (key === "admin") return "Cadastrado pela equipe";
++  if (key === "site") return "Cadastro feito no site";
++  return "Origem não registrada";
++}
++
++/** Quantos cadastros foram criados nos últimos `days` dias. */
++export function recentCount(list: readonly { created_at: string }[], days = 30, now = new Date()): number {
++  const since = now.getTime() - days * 86_400_000;
++  return list.filter((m) => new Date(m.created_at).getTime() >= since).length;
++}
+diff --git a/src/routeTree.gen.ts b/src/routeTree.gen.ts
+index e6f4348..c11e3ea 100644
+--- a/src/routeTree.gen.ts
++++ b/src/routeTree.gen.ts
+@@ -33,6 +33,7 @@ import { Route as AuthenticatedPainelOracaoRouteImport } from './routes/_authent
+ import { Route as AuthenticatedPainelPermissoesRouteImport } from './routes/_authenticated/painel.permissoes'
+ import { Route as AuthenticatedPainelRelatorioRouteImport } from './routes/_authenticated/painel.relatorio'
+ import { Route as AuthenticatedPainelSiteRouteImport } from './routes/_authenticated/painel.site'
++import { Route as AuthenticatedPainelVisitantesRouteImport } from './routes/_authenticated/painel.visitantes'
+ import { Route as AuthenticatedPainelDepartamentoIdRouteImport } from './routes/_authenticated/painel.departamento.$id'
+ import { Route as AuthenticatedPainelEventoIdRouteImport } from './routes/_authenticated/painel.evento.$id'
+ import { Route as AuthenticatedPainelMembroIdRouteImport } from './routes/_authenticated/painel.membro.$id'
+@@ -167,6 +168,12 @@ const AuthenticatedPainelSiteRoute = AuthenticatedPainelSiteRouteImport.update({
+   path: '/site',
+   getParentRoute: () => AuthenticatedPainelRoute,
+ } as any)
++const AuthenticatedPainelVisitantesRoute =
++  AuthenticatedPainelVisitantesRouteImport.update({
++    id: '/visitantes',
++    path: '/visitantes',
++    getParentRoute: () => AuthenticatedPainelRoute,
++  } as any)
+ const AuthenticatedPainelDepartamentoIdRoute =
+   AuthenticatedPainelDepartamentoIdRouteImport.update({
+     id: '/departamento/$id',
+@@ -209,6 +216,7 @@ export interface FileRoutesByFullPath {
+   '/painel/permissoes': typeof AuthenticatedPainelPermissoesRoute
+   '/painel/relatorio': typeof AuthenticatedPainelRelatorioRoute
+   '/painel/site': typeof AuthenticatedPainelSiteRoute
++  '/painel/visitantes': typeof AuthenticatedPainelVisitantesRoute
+   '/painel/': typeof AuthenticatedPainelIndexRoute
+   '/painel/departamento/$id': typeof AuthenticatedPainelDepartamentoIdRoute
+   '/painel/evento/$id': typeof AuthenticatedPainelEventoIdRoute
+@@ -236,6 +244,7 @@ export interface FileRoutesByTo {
+   '/painel/permissoes': typeof AuthenticatedPainelPermissoesRoute
+   '/painel/relatorio': typeof AuthenticatedPainelRelatorioRoute
+   '/painel/site': typeof AuthenticatedPainelSiteRoute
++  '/painel/visitantes': typeof AuthenticatedPainelVisitantesRoute
+   '/painel': typeof AuthenticatedPainelIndexRoute
+   '/painel/departamento/$id': typeof AuthenticatedPainelDepartamentoIdRoute
+   '/painel/evento/$id': typeof AuthenticatedPainelEventoIdRoute
+@@ -266,6 +275,7 @@ export interface FileRoutesById {
+   '/_authenticated/painel/permissoes': typeof AuthenticatedPainelPermissoesRoute
+   '/_authenticated/painel/relatorio': typeof AuthenticatedPainelRelatorioRoute
+   '/_authenticated/painel/site': typeof AuthenticatedPainelSiteRoute
++  '/_authenticated/painel/visitantes': typeof AuthenticatedPainelVisitantesRoute
+   '/_authenticated/painel/': typeof AuthenticatedPainelIndexRoute
+   '/_authenticated/painel/departamento/$id': typeof AuthenticatedPainelDepartamentoIdRoute
+   '/_authenticated/painel/evento/$id': typeof AuthenticatedPainelEventoIdRoute
+@@ -296,6 +306,7 @@ export interface FileRouteTypes {
+     | '/painel/permissoes'
+     | '/painel/relatorio'
+     | '/painel/site'
++    | '/painel/visitantes'
+     | '/painel/'
+     | '/painel/departamento/$id'
+     | '/painel/evento/$id'
+@@ -323,6 +334,7 @@ export interface FileRouteTypes {
+     | '/painel/permissoes'
+     | '/painel/relatorio'
+     | '/painel/site'
++    | '/painel/visitantes'
+     | '/painel'
+     | '/painel/departamento/$id'
+     | '/painel/evento/$id'
+@@ -352,6 +364,7 @@ export interface FileRouteTypes {
+     | '/_authenticated/painel/permissoes'
+     | '/_authenticated/painel/relatorio'
+     | '/_authenticated/painel/site'
++    | '/_authenticated/painel/visitantes'
+     | '/_authenticated/painel/'
+     | '/_authenticated/painel/departamento/$id'
+     | '/_authenticated/painel/evento/$id'
+@@ -542,6 +555,13 @@ declare module '@tanstack/react-router' {
+       preLoaderRoute: typeof AuthenticatedPainelSiteRouteImport
+       parentRoute: typeof AuthenticatedPainelRoute
+     }
++    '/_authenticated/painel/visitantes': {
++      id: '/_authenticated/painel/visitantes'
++      path: '/visitantes'
++      fullPath: '/painel/visitantes'
++      preLoaderRoute: typeof AuthenticatedPainelVisitantesRouteImport
++      parentRoute: typeof AuthenticatedPainelRoute
++    }
+     '/_authenticated/painel/departamento/$id': {
+       id: '/_authenticated/painel/departamento/$id'
+       path: '/departamento/$id'
+@@ -578,6 +598,7 @@ interface AuthenticatedPainelRouteChildren {
+   AuthenticatedPainelPermissoesRoute: typeof AuthenticatedPainelPermissoesRoute
+   AuthenticatedPainelRelatorioRoute: typeof AuthenticatedPainelRelatorioRoute
+   AuthenticatedPainelSiteRoute: typeof AuthenticatedPainelSiteRoute
++  AuthenticatedPainelVisitantesRoute: typeof AuthenticatedPainelVisitantesRoute
+   AuthenticatedPainelIndexRoute: typeof AuthenticatedPainelIndexRoute
+   AuthenticatedPainelDepartamentoIdRoute: typeof AuthenticatedPainelDepartamentoIdRoute
+   AuthenticatedPainelEventoIdRoute: typeof AuthenticatedPainelEventoIdRoute
+@@ -596,6 +617,7 @@ const AuthenticatedPainelRouteChildren: AuthenticatedPainelRouteChildren = {
+   AuthenticatedPainelPermissoesRoute: AuthenticatedPainelPermissoesRoute,
+   AuthenticatedPainelRelatorioRoute: AuthenticatedPainelRelatorioRoute,
+   AuthenticatedPainelSiteRoute: AuthenticatedPainelSiteRoute,
++  AuthenticatedPainelVisitantesRoute: AuthenticatedPainelVisitantesRoute,
+   AuthenticatedPainelIndexRoute: AuthenticatedPainelIndexRoute,
+   AuthenticatedPainelDepartamentoIdRoute:
+     AuthenticatedPainelDepartamentoIdRoute,
+diff --git a/src/routes/_authenticated/painel.index.tsx b/src/routes/_authenticated/painel.index.tsx
+index 888b5fb..df7b46f 100644
+--- a/src/routes/_authenticated/painel.index.tsx
++++ b/src/routes/_authenticated/painel.index.tsx
+@@ -4,7 +4,7 @@ import { supabase } from "@/integrations/supabase/client";
+ import { useAccess } from "@/hooks/use-access";
+ import { brl } from "@/lib/church";
+ import { siteMeta } from "@/lib/site-query";
+-import { EventsCard, FinanceCards, PrayerCard, VolunteerCards } from "@/components/dashboard/DashboardCards";
++import { EventsCard, FinanceCards, PrayerCard, VisitorsCard, VolunteerCards } from "@/components/dashboard/DashboardCards";
+ import { MyTickets } from "@/components/events/MyTickets";
+ import { NextShiftCard } from "@/components/shifts/MyShifts";
+ 
+@@ -20,7 +20,8 @@ function Overview() {
+     queryKey: ["members-count"],
+     enabled: can("view_members"),
+     queryFn: async () =>
+-      (await supabase.from("members").select("id", { count: "exact", head: true })).count ?? 0,
++      // Visitantes têm card próprio: aqui contam só os membros.
++      (await supabase.from("members").select("id", { count: "exact", head: true }).neq("status", "visitante")).count ?? 0,
+   });
+   const fin = useQuery({
+     queryKey: ["fin-summary"],
+@@ -57,6 +58,7 @@ function Overview() {
+             <p className="mt-2 font-display text-4xl text-foreground">{members.data ?? "—"}</p>
+           </Link>
+         )}
++        <VisitorsCard />
+         <VolunteerCards />
+         {can("view_finance") && (
+           <>
+diff --git a/src/routes/_authenticated/painel.membro.$id.tsx b/src/routes/_authenticated/painel.membro.$id.tsx
+index c353e6a..df48c5c 100644
+--- a/src/routes/_authenticated/painel.membro.$id.tsx
++++ b/src/routes/_authenticated/painel.membro.$id.tsx
+@@ -18,6 +18,7 @@ import {
+ import { MemberAvatar, MemberForm, type MemberDraft } from "@/components/members/MemberForm";
+ import { APPROVAL_LABELS, MEMBER_STATUS, ageFrom, brl, dateBR } from "@/lib/church";
+ import { siteMeta } from "@/lib/site-query";
++import { isVisitor, signupOrigin } from "@/lib/visitors";
+ import { memberSaveError, saveMemberDepartmentLinks } from "@/lib/departments";
+ import { useChurchRoles, useDepartments, useMemberDepartments } from "@/hooks/use-departments";
+ 
+@@ -146,12 +147,14 @@ function MemberProfile() {
+   if (member.isLoading) return <p className="text-muted-foreground">Carregando...</p>;
+ 
+   const m = member.data;
++  // Visitantes têm página própria: o "Voltar" leva para a lista certa.
++  const backToVisitors = !!m && isVisitor(m);
+   const back = (
+     <Link
+-      to="/painel/membros"
++      to={backToVisitors ? "/painel/visitantes" : "/painel/membros"}
+       className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"
+     >
+-      <ArrowLeft className="h-4 w-4" /> Voltar para membros
++      <ArrowLeft className="h-4 w-4" /> {backToVisitors ? "Voltar para visitantes" : "Voltar para membros"}
+     </Link>
+   );
+   if (!m) {
+@@ -219,6 +222,8 @@ function MemberProfile() {
+         </Block>
+ 
+         <Block title="Vida na igreja">
++          <Field label="Origem do cadastro">{signupOrigin(m)}</Field>
++          <Field label="Cadastrado em">{dateBR(m.created_at)}</Field>
+           <Field label="Matrícula">{m.registration_number}</Field>
+           <Field label="Filiação">{dateBR(m.affiliated_on)}</Field>
+           <Field label="Batizado">
+diff --git a/src/routes/_authenticated/painel.membros.tsx b/src/routes/_authenticated/painel.membros.tsx
+index 17151b8..7230e3e 100644
+--- a/src/routes/_authenticated/painel.membros.tsx
++++ b/src/routes/_authenticated/painel.membros.tsx
+@@ -2,7 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
+ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+ import { useState } from "react";
+ import { toast } from "sonner";
+-import { Plus, Pencil, Trash2, Search, Check, X, Link2, Copy, Download, Eye, UserRoundCheck, Activity, UserPlus, Mail } from "lucide-react";
++import { Plus, Pencil, Trash2, Search, Check, X, Link2, Copy, Download, Eye, UserRoundCheck, UserRoundPlus } from "lucide-react";
+ import { supabase } from "@/integrations/supabase/client";
+ import { useAccess } from "@/hooks/use-access";
+ import { Switch } from "@/components/ui/switch";
+@@ -23,6 +23,9 @@ import { copyText } from "@/lib/clipboard";
+ import { purgeStorageTrash } from "@/lib/storage-trash";
+ import { memberSaveError, saveMemberDepartmentLinks } from "@/lib/departments";
+ import { useChurchRoles, useDepartments, useMemberDepartments } from "@/hooks/use-departments";
++import { useAllMembers } from "@/hooks/use-members";
++import { RecentActivity } from "@/components/members/RecentActivity";
++import { splitVisitors } from "@/lib/visitors";
+ 
+ export const Route = createFileRoute("/_authenticated/painel/membros")({
+   head: () => siteMeta("Membros — Comunidade Aava", "Cadastros, aprovação e convites da Comunidade Aava."),
+@@ -50,40 +53,7 @@ function MembersPage() {
+   const memberDepts = useMemberDepartments(can("view_members") || can("view_departments"));
+   const deptNames = (id: string) => (memberDepts.data?.get(id) ?? []).map((d) => d.name);
+ 
+-  const recentActivity = useQuery({
+-    queryKey: ["member-activity"],
+-    enabled: can("view_members"),
+-    queryFn: async () => {
+-      const { data: events, error } = await supabase
+-        .from("member_activity")
+-        .select("id, kind, member_id, user_id, created_at, account_name, account_email")
+-        .order("created_at", { ascending: false })
+-        .limit(12);
+-      if (error) throw error;
+-
+-      const memberIds = [...new Set(events.map((event) => event.member_id).filter((id): id is string => !!id))];
+-      const memberNames = new Map<string, string>();
+-      if (memberIds.length) {
+-        const { data: linkedMembers, error: membersError } = await supabase
+-          .from("members")
+-          .select("id, full_name")
+-          .in("id", memberIds);
+-        if (membersError) throw membersError;
+-        for (const member of linkedMembers ?? []) memberNames.set(member.id, member.full_name);
+-      }
+-
+-      return events.map((event) => ({ ...event, member_name: event.member_id ? memberNames.get(event.member_id) ?? null : null }));
+-    },
+-  });
+-
+-  const { data = [], isLoading } = useQuery({
+-    queryKey: ["members"],
+-    queryFn: async () => {
+-      const { data, error } = await supabase.from("members").select("*").order("full_name");
+-      if (error) throw error;
+-      return data;
+-    },
+-  });
++  const { data = [], isLoading } = useAllMembers();
+ 
+   async function openEdit(m: MemberDraft) {
+     setEditing(m);
+@@ -159,8 +129,10 @@ function MembersPage() {
+ 
+   if (!can("view_members")) return <p className="text-muted-foreground">Você não tem acesso a esta área.</p>;
+ 
+-  const approved = data.filter((m) => m.approval_status !== "pendente");
+-  const pending = data.filter((m) => m.approval_status === "pendente");
++  // Quem tem status "visitante" fica na página Visitantes, separado dos membros.
++  const { members: people, visitors } = splitVisitors(data);
++  const approved = people.filter((m) => m.approval_status !== "pendente");
++  const pending = people.filter((m) => m.approval_status === "pendente");
+   const filtered = approved.filter(
+     (m) =>
+       (statusFilter === "todos" || m.status === statusFilter) &&
+@@ -194,52 +166,7 @@ function MembersPage() {
+         </div>
+       </div>
+ 
+-      <section className="mt-6 rounded-2xl border bg-card p-5" aria-labelledby="member-activity-title">
+-        <div className="flex flex-wrap items-center justify-between gap-3">
+-          <div>
+-            <h2 id="member-activity-title" className="flex items-center gap-2 text-lg font-semibold text-foreground">
+-              <Activity className="h-5 w-5 text-primary" /> Atividade recente
+-            </h2>
+-            <p className="mt-1 text-sm text-muted-foreground">Novos cadastros, criação de contas e vínculos com membros.</p>
+-          </div>
+-          <Badge variant="secondary">{recentActivity.data?.length ?? 0} atividades</Badge>
+-        </div>
+-
+-        {recentActivity.isLoading ? (
+-          <p className="mt-4 text-sm text-muted-foreground">Carregando atividades...</p>
+-        ) : recentActivity.isError ? (
+-          <p className="mt-4 text-sm text-destructive">Não foi possível carregar as atividades recentes.</p>
+-        ) : (recentActivity.data ?? []).length === 0 ? (
+-          <p className="mt-4 text-sm text-muted-foreground">Nenhuma atividade registrada ainda.</p>
+-        ) : (
+-          <ol className="mt-4 divide-y">
+-            {(recentActivity.data ?? []).map((event) => {
+-              const linkedName = event.member_name ?? event.account_name ?? "Membro";
+-              const timestamp = new Intl.DateTimeFormat("pt-BR", { dateStyle: "short", timeStyle: "short" }).format(new Date(event.created_at));
+-              const isAccount = event.kind === "account_created";
+-              const isLinked = event.kind === "account_linked";
+-              const title = isAccount
+-                ? `Nova conta criada por ${event.account_name ?? "novo usuário"}`
+-                : isLinked
+-                  ? `Nova conta vinculada para ${linkedName}`
+-                  : `Novo membro cadastrado: ${event.member_name ?? event.account_name ?? "Membro"}`;
+-              const Icon = isAccount ? UserPlus : isLinked ? Mail : UserRoundCheck;
+-
+-              return (
+-                <li key={event.id} className="flex items-start gap-3 py-3 first:pt-0 last:pb-0">
+-                  <span className="mt-0.5 rounded-full bg-primary/10 p-2 text-primary"><Icon className="h-4 w-4" /></span>
+-                  <div className="min-w-0 flex-1">
+-                    <p className="text-sm font-medium text-foreground">{title}</p>
+-                    {event.account_email && <p className="mt-0.5 break-all text-xs text-muted-foreground">{event.account_email}</p>}
+-                    <p className="mt-1 text-xs text-muted-foreground">{timestamp}</p>
+-                  </div>
+-                  <Badge variant="outline">{isAccount ? "Conta" : isLinked ? "Vínculo" : "Cadastro"}</Badge>
+-                </li>
+-              );
+-            })}
+-          </ol>
+-        )}
+-      </section>
++      <RecentActivity enabled={can("view_members")} />
+ 
+       <Tabs defaultValue="lista" className="mt-6">
+         <TabsList>
+@@ -258,7 +185,7 @@ function MembersPage() {
+               <SelectTrigger className="w-44"><SelectValue /></SelectTrigger>
+               <SelectContent>
+                 <SelectItem value="todos">Todos os status</SelectItem>
+-                {Object.entries(MEMBER_STATUS).map(([k, l]) => <SelectItem key={k} value={k}>{l}</SelectItem>)}
++                {Object.entries(MEMBER_STATUS).filter(([k]) => k !== "visitante").map(([k, l]) => <SelectItem key={k} value={k}>{l}</SelectItem>)}
+               </SelectContent>
+             </Select>
+             <Select value={accountFilter} onValueChange={setAccountFilter}>
+@@ -271,6 +198,12 @@ function MembersPage() {
+             </Select>
+           </div>
+           <p className="mt-3 text-sm text-muted-foreground">{withAccount} com conta · {approved.length - withAccount} sem conta (de {approved.length} cadastrados)</p>
++          <p className="mt-1 text-sm text-muted-foreground">
++            Visitantes ficam em uma página própria.{" "}
++            <Link to="/painel/visitantes" className="inline-flex items-center gap-1 font-medium text-primary hover:underline">
++              <UserRoundPlus className="h-3.5 w-3.5" /> Ver visitantes ({visitors.length})
++            </Link>
++          </p>
+           <div className="mt-4 overflow-x-auto rounded-2xl border bg-card">
+             <table className="w-full text-sm">
+               <thead className="border-b text-left text-muted-foreground">
+diff --git a/src/routes/_authenticated/painel.permissoes.tsx b/src/routes/_authenticated/painel.permissoes.tsx
+index a280e43..331d340 100644
+--- a/src/routes/_authenticated/painel.permissoes.tsx
++++ b/src/routes/_authenticated/painel.permissoes.tsx
+@@ -9,6 +9,7 @@ import type { Database } from "@/integrations/supabase/types";
+ import { Button } from "@/components/ui/button";
+ import { siteMeta } from "@/lib/site-query";
+ import { DeleteUserSection, StorageCleanupCard } from "@/components/admin/UserAdmin";
++import { AccountMemberSection } from "@/components/admin/AccountMemberSection";
+ import { Switch } from "@/components/ui/switch";
+ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+ 
+@@ -93,6 +94,7 @@ function PermissionsPage() {
+         {current ? (
+           <div className="rounded-2xl border bg-card p-6">
+             <p className="font-display text-xl text-foreground">{current.full_name || current.email}</p>
++            <AccountMemberSection user={{ id: current.id, name: current.full_name, email: current.email }} canView={can("view_members")} canLink={isFullAccess} />
+             {current.role === "ceo" ? (
+               <p className="mt-3 text-sm text-muted-foreground">O CEO tem acesso total ao sistema.</p>
+             ) : (
+diff --git a/src/routes/_authenticated/painel.tsx b/src/routes/_authenticated/painel.tsx
+index 21fc8d4..50b2a09 100644
+--- a/src/routes/_authenticated/painel.tsx
++++ b/src/routes/_authenticated/painel.tsx
+@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
+ import {
+   LayoutDashboard,
+   Users,
++  UserRoundPlus,
+   Wallet,
+   HandCoins,
+   ShieldCheck,
+@@ -72,6 +73,7 @@ function PanelLayout() {
+       show: can("view_prayer_requests"),
+     },
+     { to: "/painel/membros", label: "Membros", icon: Users, show: can("view_members") },
++    { to: "/painel/visitantes", label: "Visitantes", icon: UserRoundPlus, show: can("view_members") },
+     { to: "/painel/departamentos", label: "Departamentos", icon: Network, show: canViewDepartments },
+     { to: "/painel/eventos", label: "Eventos", icon: CalendarDays, show: can("manage_events") || can("verify_event_payments") || can("checkin_events") },
+     { to: "/painel/financeiro", label: "Financeiro", icon: Wallet, show: can("view_finance") },
+diff --git a/src/routes/_authenticated/painel.visitantes.tsx b/src/routes/_authenticated/painel.visitantes.tsx
+new file mode 100644
+index 0000000..6701dbb
+--- /dev/null
++++ b/src/routes/_authenticated/painel.visitantes.tsx
+@@ -0,0 +1,8 @@
++import { createFileRoute } from "@tanstack/react-router";
++import { siteMeta } from "@/lib/site-query";
++import { VisitorsPage } from "@/components/members/VisitorsPage";
++
++export const Route = createFileRoute("/_authenticated/painel/visitantes")({
++  head: () => siteMeta("Visitantes — Comunidade Aava", "Pessoas que se cadastraram como visitantes e de onde vieram."),
++  component: VisitorsPage,
++});
+diff --git a/src/test/account-member-section.test.tsx b/src/test/account-member-section.test.tsx
+new file mode 100644
+index 0000000..d81a145
+--- /dev/null
++++ b/src/test/account-member-section.test.tsx
+@@ -0,0 +1,98 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
++import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
++
++const state = vi.hoisted(() => ({
++  linked: null as null | { id: string; full_name: string; status: string },
++  rpc: vi.fn(async () => ({ data: "ok", error: null })),
++}));
++
++vi.mock("@tanstack/react-router", () => ({
++  Link: ({ children, to, params, ...rest }: { children: React.ReactNode; to: string; params?: Record<string, string> }) => (
++    <a href={params?.["id"] ? to.replace("$id", params["id"]) : to} {...rest}>{children}</a>
++  ),
++}));
++vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
++vi.mock("@/integrations/supabase/client", () => {
++  const candidates = [
++    { id: "m1", full_name: "Carlos Souza", email: "carlos@x.com", phone: null, status: "membro" },
++    { id: "m2", full_name: "Joana Lima", email: "joana@x.com", phone: null, status: "visitante" },
++  ];
++  const builder = (kind: "linked" | "candidates") => {
++    const result = () => ({ data: kind === "linked" ? state.linked : candidates, error: null });
++    const b: Record<string, unknown> = {};
++    for (const k of ["select", "eq", "is", "order"]) b[k] = () => b;
++    b["maybeSingle"] = () => Promise.resolve(result());
++    b["then"] = (res: (v: unknown) => unknown, rej: (e: unknown) => unknown) => Promise.resolve(result()).then(res, rej);
++    return b;
++  };
++  return {
++    supabase: {
++      from: () => {
++        // a primeira consulta (cadastro ligado) usa maybeSingle; a lista de candidatos usa .is(user_id, null)
++        const linkedB = builder("linked");
++        const candB = builder("candidates");
++        const b: Record<string, unknown> = {};
++        b["select"] = () => b;
++        b["eq"] = () => linkedB;
++        b["is"] = () => candB;
++        return b;
++      },
++      rpc: (...args: unknown[]) => (state.rpc as (...a: unknown[]) => unknown)(...args),
++    },
++  };
++});
++
++import { AccountMemberSection } from "@/components/admin/AccountMemberSection";
++
++const user = { id: "u1", name: "Joana Lima", email: "joana@x.com" };
++const renderIt = (props: { canView?: boolean; canLink?: boolean } = {}) =>
++  render(
++    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
++      <AccountMemberSection user={user} canView={props.canView ?? true} canLink={props.canLink ?? true} />
++    </QueryClientProvider>,
++  );
++
++describe("Vínculo de conta em Usuários e permissões", () => {
++  beforeEach(() => {
++    state.linked = null;
++    state.rpc.mockClear();
++    vi.spyOn(window, "confirm").mockReturnValue(true);
++  });
++  afterEach(cleanup);
++
++  it("mostra o cadastro quando a conta já está vinculada e permite desvincular", async () => {
++    state.linked = { id: "m9", full_name: "Joana Lima", status: "visitante" };
++    renderIt();
++    const link = await screen.findByRole("link", { name: "Joana Lima" });
++    expect(link.getAttribute("href")).toBe("/painel/membro/m9");
++    expect(screen.getByText("Visitante")).toBeTruthy();
++
++    fireEvent.click(screen.getByRole("button", { name: /Desvincular/ }));
++    await waitFor(() => expect(state.rpc).toHaveBeenCalledWith("unlink_member_account", { _member: "m9" }));
++  });
++
++  it("avisa quando não há vínculo e vincula dali mesmo, com sugestão primeiro", async () => {
++    renderIt();
++    expect(await screen.findByText(/não está vinculada/)).toBeTruthy();
++    fireEvent.click(screen.getByRole("button", { name: /Vincular a um cadastro/ }));
++
++    expect(await screen.findByText("Sugestão")).toBeTruthy();
++    const rows = await screen.findAllByRole("button", { name: "Vincular" });
++    expect(rows.length).toBe(2);
++    // Joana Lima (mesmo e-mail e nome da conta) vem primeiro
++    fireEvent.click(rows[0]!);
++    await waitFor(() => expect(state.rpc).toHaveBeenCalledWith("link_member_account", { _member: "m2", _user: "u1" }));
++  });
++
++  it("sem permissão para vincular, só mostra o estado", async () => {
++    renderIt({ canLink: false });
++    expect(await screen.findByText(/Somente o CEO e o Pastor Presidente/)).toBeTruthy();
++    expect(screen.queryByRole("button", { name: /Vincular a um cadastro/ })).toBeNull();
++  });
++
++  it("não aparece para quem não pode ver cadastros", () => {
++    const { container } = renderIt({ canView: false });
++    expect(container.textContent).toBe("");
++  });
++});
+diff --git a/src/test/recent-activity.test.tsx b/src/test/recent-activity.test.tsx
+new file mode 100644
+index 0000000..63515cf
+--- /dev/null
++++ b/src/test/recent-activity.test.tsx
+@@ -0,0 +1,62 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import { cleanup, fireEvent, render, screen } from "@testing-library/react";
++import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
++
++const tables = vi.hoisted(() => ({
++  member_activity: [
++    { id: "1", kind: "member_created", member_id: "m1", user_id: null, created_at: "2026-11-05T10:00:00Z", account_name: null, account_email: null },
++    { id: "2", kind: "member_created", member_id: "m2", user_id: null, created_at: "2026-11-04T10:00:00Z", account_name: null, account_email: null },
++  ] as unknown[],
++  members: [
++    { id: "m1", full_name: "Maria Visitante", status: "visitante" },
++    { id: "m2", full_name: "Pedro Membro", status: "membro" },
++  ] as unknown[],
++}));
++
++vi.mock("@/integrations/supabase/client", () => {
++  const builder = (data: unknown) => {
++    const b: Record<string, unknown> = {};
++    for (const k of ["select", "order", "limit", "in"]) b[k] = () => b;
++    b["then"] = (res: (v: unknown) => unknown, rej: (e: unknown) => unknown) => Promise.resolve({ data, error: null }).then(res, rej);
++    return b;
++  };
++  return { supabase: { from: (t: "member_activity" | "members") => builder(tables[t]) } };
++});
++
++import { RecentActivity } from "@/components/members/RecentActivity";
++
++const renderIt = () =>
++  render(
++    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
++      <RecentActivity enabled />
++    </QueryClientProvider>,
++  );
++
++describe("Atividade recente recolhível", () => {
++  beforeEach(() => window.localStorage.clear());
++  afterEach(cleanup);
++
++  it("começa recolhida e só mostra o resumo", async () => {
++    renderIt();
++    expect(await screen.findByText("2 atividades")).toBeTruthy();
++    expect(screen.queryByText(/Novo visitante cadastrado/)).toBeNull();
++    expect(screen.getByRole("button", { name: /Atividade recente/ }).getAttribute("aria-expanded")).toBe("false");
++  });
++
++  it("abre, diferencia visitante de membro, e lembra a escolha", async () => {
++    const first = renderIt();
++    await screen.findByText("2 atividades");
++    fireEvent.click(screen.getByRole("button", { name: /Atividade recente/ }));
++    expect(await screen.findByText("Novo visitante cadastrado: Maria Visitante")).toBeTruthy();
++    expect(screen.getByText("Novo membro cadastrado: Pedro Membro")).toBeTruthy();
++    expect(window.localStorage.getItem("aava:membros:atividade-aberta")).toBe("1");
++
++    first.unmount();
++    renderIt();
++    expect(await screen.findByText("Novo visitante cadastrado: Maria Visitante")).toBeTruthy();
++
++    fireEvent.click(screen.getByRole("button", { name: /Atividade recente/ }));
++    expect(screen.queryByText("Novo visitante cadastrado: Maria Visitante")).toBeNull();
++    expect(window.localStorage.getItem("aava:membros:atividade-aberta")).toBe("0");
++  });
++});
+diff --git a/src/test/visitors-page.test.tsx b/src/test/visitors-page.test.tsx
+new file mode 100644
+index 0000000..35cad33
+--- /dev/null
++++ b/src/test/visitors-page.test.tsx
+@@ -0,0 +1,75 @@
++import { afterEach, describe, expect, it, vi } from "vitest";
++import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
++
++const state = vi.hoisted(() => ({
++  access: { can: (_: string): boolean => true, isFullAccess: false, isLoading: false },
++  members: [] as Record<string, unknown>[],
++}));
++
++vi.mock("@tanstack/react-router", () => ({
++  Link: ({ children, to, params, ...rest }: { children: React.ReactNode; to: string; params?: Record<string, string> }) => (
++    <a href={params?.["id"] ? to.replace("$id", params["id"]) : to} {...rest}>{children}</a>
++  ),
++}));
++vi.mock("@/hooks/use-access", () => ({ useAccess: () => state.access }));
++vi.mock("@/hooks/use-members", () => ({ useAllMembers: () => ({ data: state.members, isLoading: false, isError: false }) }));
++vi.mock("@/components/members/MemberForm", () => ({ MemberAvatar: () => <span /> }));
++vi.mock("@/components/members/MemberAccountLink", () => ({
++  useAccountLinks: () => ({ data: [] }),
++  AccountBadge: ({ linked }: { linked: boolean }) => <span>{linked ? "Com conta" : "Sem conta"}</span>,
++  LinkAccountDialog: () => null,
++}));
++vi.mock("@/lib/export", () => ({ downloadXls: vi.fn() }));
++
++import { VisitorsPage } from "@/components/members/VisitorsPage";
++
++const row = (over: Record<string, unknown>) => ({
++  id: "x", full_name: "Fulano", status: "visitante", approval_status: "aprovado", email: null, phone: null, cpf: null, birth_date: null, photo_path: null,
++  user_id: null, created_at: "2026-11-05T10:00:00Z", signup_source: null, signup_event_title: null, ...over,
++});
++
++describe("Página de visitantes", () => {
++  afterEach(cleanup);
++
++  it("lista só visitantes, com a origem do cadastro", () => {
++    state.access = { can: () => true, isFullAccess: false, isLoading: false };
++    state.members = [
++      row({ id: "1", full_name: "Maria Visitante", signup_source: "event", signup_event_title: "Musical de Natal", user_id: "u1" }),
++      row({ id: "2", full_name: "Pedro Membro", status: "membro" }),
++      row({ id: "3", full_name: "Ana Sem Origem" }),
++    ];
++    render(<VisitorsPage />);
++    expect(screen.getByText("Maria Visitante")).toBeTruthy();
++    expect(screen.getByText("Ana Sem Origem")).toBeTruthy();
++    expect(screen.queryByText("Pedro Membro")).toBeNull();
++    expect(screen.getByText("Veio pelo evento: Musical de Natal")).toBeTruthy();
++    expect(screen.getByText("Origem não registrada")).toBeTruthy();
++    expect(screen.getByText(/2 visitantes · 1 com conta/)).toBeTruthy();
++  });
++
++  it("filtra por origem e por busca", () => {
++    state.members = [
++      row({ id: "1", full_name: "Maria Visitante", signup_source: "event", signup_event_title: "Musical de Natal" }),
++      row({ id: "3", full_name: "Ana Sem Origem" }),
++    ];
++    render(<VisitorsPage />);
++    fireEvent.change(screen.getByPlaceholderText(/Buscar/), { target: { value: "ana" } });
++    const body = screen.getAllByRole("rowgroup")[1]!;
++    expect(within(body).queryByText("Maria Visitante")).toBeNull();
++    expect(within(body).getByText("Ana Sem Origem")).toBeTruthy();
++    fireEvent.change(screen.getByPlaceholderText(/Buscar/), { target: { value: "natal" } });
++    expect(within(screen.getAllByRole("rowgroup")[1]!).getByText("Maria Visitante")).toBeTruthy();
++  });
++
++  it("mostra mensagem quando não há visitantes", () => {
++    state.members = [row({ id: "2", full_name: "Pedro Membro", status: "membro" })];
++    render(<VisitorsPage />);
++    expect(screen.getByText(/Nenhum visitante cadastrado ainda/)).toBeTruthy();
++  });
++
++  it("bloqueia quem não pode ver membros", () => {
++    state.access = { can: () => false, isFullAccess: false, isLoading: false };
++    render(<VisitorsPage />);
++    expect(screen.getByText(/não tem acesso/)).toBeTruthy();
++  });
++});
+diff --git a/src/test/visitors.test.ts b/src/test/visitors.test.ts
+new file mode 100644
+index 0000000..cf32b23
+--- /dev/null
++++ b/src/test/visitors.test.ts
+@@ -0,0 +1,67 @@
++import { describe, expect, it } from "vitest";
++import { isVisitor, originKey, originKeyLabel, recentCount, signupOrigin, splitVisitors } from "@/lib/visitors";
++import { rankMembersForAccount } from "@/lib/account-link";
++
++describe("visitantes", () => {
++  it("separa visitantes de membros mantendo a ordem", () => {
++    const list = [
++      { id: "1", status: "membro" },
++      { id: "2", status: "visitante" },
++      { id: "3", status: "membro_ativo" },
++      { id: "4", status: "visitante" },
++      { id: "5", status: "inativo" },
++    ];
++    const { members, visitors } = splitVisitors(list);
++    expect(visitors.map((m) => m.id)).toEqual(["2", "4"]);
++    expect(members.map((m) => m.id)).toEqual(["1", "3", "5"]);
++    expect(isVisitor({ status: "visitante" })).toBe(true);
++    expect(isVisitor({ status: "membro" })).toBe(false);
++  });
++
++  it("descreve a origem do cadastro", () => {
++    expect(signupOrigin({ signup_source: "event", signup_event_title: "Musical de Natal" })).toBe("Veio pelo evento: Musical de Natal");
++    expect(signupOrigin({ signup_source: "event", signup_event_title: null })).toBe("Veio por um evento");
++    expect(signupOrigin({ signup_source: "admin" })).toBe("Cadastrado pela equipe");
++    expect(signupOrigin({ signup_source: "site" })).toBe("Cadastro feito no site");
++    expect(signupOrigin({ signup_source: null })).toBe("Origem não registrada");
++    expect(signupOrigin({})).toBe("Origem não registrada");
++  });
++
++  it("gera chaves de filtro por origem", () => {
++    expect(originKey({ signup_source: "event", signup_event_title: "X" })).toBe("event:X");
++    expect(originKey({ signup_source: "admin" })).toBe("admin");
++    expect(originKey({ signup_source: null })).toBe("none");
++    expect(originKeyLabel("event:X")).toBe("Evento: X");
++    expect(originKeyLabel("none")).toBe("Origem não registrada");
++  });
++
++  it("conta cadastros recentes", () => {
++    const now = new Date("2026-11-06T12:00:00Z");
++    const list = [{ created_at: "2026-11-05T10:00:00Z" }, { created_at: "2026-10-10T10:00:00Z" }, { created_at: "2026-09-01T10:00:00Z" }];
++    expect(recentCount(list, 30, now)).toBe(2);
++    expect(recentCount(list, 7, now)).toBe(1);
++    expect(recentCount([], 30, now)).toBe(0);
++  });
++});
++
++describe("sugestão de cadastro para vincular conta", () => {
++  const members = [
++    { id: "a", full_name: "Zélia Santos", email: null, phone: "1199" },
++    { id: "b", full_name: "João da Silva", email: "joao@x.com", phone: null },
++    { id: "c", full_name: "Ana Lima", email: "ana@x.com", phone: null },
++  ];
++
++  it("coloca primeiro quem tem o mesmo e-mail ou nome (ignorando acento e caixa)", () => {
++    const byEmail = rankMembersForAccount({ name: "Outro", email: "JOAO@x.com" }, members);
++    expect(byEmail[0]).toMatchObject({ id: "b", suggested: true });
++    const byName = rankMembersForAccount({ name: "zelia santos", email: null }, members);
++    expect(byName[0]).toMatchObject({ id: "a", suggested: true });
++    expect(byName.slice(1).every((m) => !m.suggested)).toBe(true);
++  });
++
++  it("filtra por nome, e-mail ou telefone e ordena por nome", () => {
++    expect(rankMembersForAccount({ name: null, email: null }, members, "ana").map((m) => m.id)).toEqual(["c"]);
++    expect(rankMembersForAccount({ name: null, email: null }, members, "1199").map((m) => m.id)).toEqual(["a"]);
++    expect(rankMembersForAccount({ name: null, email: null }, members).map((m) => m.id)).toEqual(["c", "b", "a"]);
++  });
++});
+diff --git a/supabase/.temp/cli-latest b/supabase/.temp/cli-latest
+deleted file mode 100644
+index 1c5ae58..0000000
+--- a/supabase/.temp/cli-latest
++++ /dev/null
+@@ -1 +0,0 @@
+-v3.0.0
+\ No newline at end of file
+diff --git a/supabase/.temp/gotrue-version b/supabase/.temp/gotrue-version
+deleted file mode 100644
+index 5db6733..0000000
+--- a/supabase/.temp/gotrue-version
++++ /dev/null
+@@ -1 +0,0 @@
+-v2.197.0
+\ No newline at end of file
+diff --git a/supabase/.temp/linked-project.json b/supabase/.temp/linked-project.json
+deleted file mode 100644
+index bb4640e..0000000
+--- a/supabase/.temp/linked-project.json
++++ /dev/null
+@@ -1 +0,0 @@
+-{"ref":"mzqdsfadkaviwaazdwlx","name":"Aava","organization_id":"ebhquybspaudzfrvoabm","organization_slug":"ebhquybspaudzfrvoabm"}
+\ No newline at end of file
+diff --git a/supabase/.temp/pooler-url b/supabase/.temp/pooler-url
+deleted file mode 100644
+index 1021767..0000000
+--- a/supabase/.temp/pooler-url
++++ /dev/null
+@@ -1 +0,0 @@
+-postgresql://postgres.mzqdsfadkaviwaazdwlx@aws-0-us-east-1.pooler.supabase.com:5432/postgres
+\ No newline at end of file
+diff --git a/supabase/.temp/postgres-version b/supabase/.temp/postgres-version
+deleted file mode 100644
+index fc31344..0000000
+--- a/supabase/.temp/postgres-version
++++ /dev/null
+@@ -1 +0,0 @@
+-17.11.0.003
+\ No newline at end of file
+diff --git a/supabase/.temp/project-ref b/supabase/.temp/project-ref
+deleted file mode 100644
+index 91800bf..0000000
+--- a/supabase/.temp/project-ref
++++ /dev/null
+@@ -1 +0,0 @@
+-mzqdsfadkaviwaazdwlx
+\ No newline at end of file
+diff --git a/supabase/.temp/rest-version b/supabase/.temp/rest-version
+deleted file mode 100644
+index 2f6fbab..0000000
+--- a/supabase/.temp/rest-version
++++ /dev/null
+@@ -1 +0,0 @@
+-v14.18
+\ No newline at end of file
+diff --git a/supabase/.temp/storage-migration b/supabase/.temp/storage-migration
+deleted file mode 100644
+index 0a535c3..0000000
+--- a/supabase/.temp/storage-migration
++++ /dev/null
+@@ -1 +0,0 @@
+-lifecycle-writer-coordination
+\ No newline at end of file
+diff --git a/supabase/.temp/storage-version b/supabase/.temp/storage-version
+deleted file mode 100644
+index 44b2f3d..0000000
+--- a/supabase/.temp/storage-version
++++ /dev/null
+@@ -1 +0,0 @@
+-v1.89.11
+\ No newline at end of file
+diff --git a/supabase/migrations/20261106140000_visitor_signup_source.sql b/supabase/migrations/20261106140000_visitor_signup_source.sql
+new file mode 100644
+index 0000000..b059e41
+--- /dev/null
++++ b/supabase/migrations/20261106140000_visitor_signup_source.sql
+@@ -0,0 +1,117 @@
++-- Origem do cadastro de visitantes ("veio pelo evento X").
++--
++-- Só ACRESCENTA colunas e gatilhos. Não apaga nem altera dados existentes; a única escrita em dados
++-- antigos é preencher a origem dos visitantes que já têm inscrição em evento.
++--
++-- signup_source: 'event' (visitante criado pela inscrição em evento), 'admin' (cadastrado pela equipe)
++--                ou 'site' (cadastro feito pela própria pessoa). Nulo = origem não registrada.
++-- signup_event_id / signup_event_title: evento da primeira inscrição (o título fica guardado mesmo se
++--                o evento for apagado depois).
++
++alter table public.members
++  add column if not exists signup_source text
++    check (signup_source is null or signup_source in ('event', 'admin', 'site')),
++  add column if not exists signup_event_id uuid references public.events(id) on delete set null,
++  add column if not exists signup_event_title text;
++
++comment on column public.members.signup_source is 'Como o cadastro nasceu: event, admin ou site. Nulo = não registrado.';
++comment on column public.members.signup_event_id is 'Evento da primeira inscrição do visitante (some se o evento for apagado).';
++comment on column public.members.signup_event_title is 'Título do evento da primeira inscrição, guardado para o histórico.';
++
++-- Novo cadastro: define a origem. Ninguém escolhe a origem pelo navegador.
++-- (Sem usuário logado, como em migrations e na chave de serviço, o valor é mantido como veio.)
++create or replace function public.members_signup_source_defaults()
++returns trigger language plpgsql security definer set search_path = public as $$
++begin
++  if auth.uid() is null then return new; end if;
++  if current_setting('app.event_visitor', true) = 'on' then
++    new.signup_source := 'event';
++  elsif public.has_permission(auth.uid(), 'create_member') then
++    new.signup_source := 'admin';
++  else
++    new.signup_source := 'site';
++  end if;
++  new.signup_event_id := null;
++  new.signup_event_title := null;
++  return new;
++end $$;
++
++drop trigger if exists members_signup_source_defaults on public.members;
++create trigger members_signup_source_defaults before insert on public.members
++  for each row execute function public.members_signup_source_defaults();
++
++-- Edição de cadastro: a origem não muda pelo navegador (nem quando a tela salva a ficha inteira).
++-- Passam: o gatilho de inscrição (que liga app.signup_source), migrations/chave de serviço (sem usuário)
++-- e ações internas do banco (profundidade de gatilho > 1, como o "ao apagar evento, zera o vínculo").
++create or replace function public.members_signup_source_lock()
++returns trigger language plpgsql security definer set search_path = public as $$
++begin
++  if auth.uid() is not null
++     and pg_trigger_depth() <= 1
++     and current_setting('app.signup_source', true) is distinct from 'on' then
++    new.signup_source := old.signup_source;
++    new.signup_event_id := old.signup_event_id;
++    new.signup_event_title := old.signup_event_title;
++  end if;
++  return new;
++end $$;
++
++drop trigger if exists members_signup_source_lock on public.members;
++create trigger members_signup_source_lock before update on public.members
++  for each row execute function public.members_signup_source_lock();
++
++-- Primeira inscrição em evento de um visitante: grava de qual evento ele veio.
++-- Nunca bloqueia a inscrição: se algo falhar, só emite um aviso.
++create or replace function public.event_registration_signup_source()
++returns trigger language plpgsql security definer set search_path = public as $$
++begin
++  if new.member_id is not null then
++    begin
++      perform set_config('app.signup_source', 'on', true);
++      update public.members m
++         set signup_source = 'event',
++             signup_event_id = new.event_id,
++             signup_event_title = (select e.title from public.events e where e.id = new.event_id)
++       where m.id = new.member_id
++         and m.status = 'visitante'
++         and (m.signup_source is null or m.signup_source = 'event')
++         and m.signup_event_title is null;
++      perform set_config('app.signup_source', 'off', true);
++    exception when others then
++      perform set_config('app.signup_source', 'off', true);
++      raise warning 'signup_source (event_registrations): %', sqlerrm;
++    end;
++  end if;
++  return null;
++end $$;
++
++drop trigger if exists event_registration_signup_source on public.event_registrations;
++create trigger event_registration_signup_source after insert on public.event_registrations
++  for each row execute function public.event_registration_signup_source();
++
++-- Gatilhos não precisam ficar chamáveis de fora.
++revoke all on function
++  public.members_signup_source_defaults(),
++  public.members_signup_source_lock(),
++  public.event_registration_signup_source()
++  from public, anon, authenticated;
++
++-- Visitantes que já existem e já têm inscrição: origem = evento da primeira inscrição.
++-- O gatilho members_guard é pausado só aqui para não mexer em updated_at (mesmo cuidado de migrations anteriores).
++alter table public.members disable trigger members_guard;
++
++update public.members m
++   set signup_source = 'event',
++       signup_event_id = fr.event_id,
++       signup_event_title = fr.title
++  from (
++    select distinct on (r.member_id) r.member_id, r.event_id, e.title
++      from public.event_registrations r
++      join public.events e on e.id = r.event_id
++     order by r.member_id, r.created_at
++  ) fr
++ where m.id = fr.member_id
++   and m.status = 'visitante'
++   and m.signup_source is null;
++
++alter table public.members enable trigger members_guard;
+-- 
+2.43.0
+
