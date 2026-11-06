@@ -33,6 +33,7 @@ import { Route as AuthenticatedPainelOracaoRouteImport } from './routes/_authent
 import { Route as AuthenticatedPainelPermissoesRouteImport } from './routes/_authenticated/painel.permissoes'
 import { Route as AuthenticatedPainelRelatorioRouteImport } from './routes/_authenticated/painel.relatorio'
 import { Route as AuthenticatedPainelSiteRouteImport } from './routes/_authenticated/painel.site'
+import { Route as AuthenticatedPainelVisitantesRouteImport } from './routes/_authenticated/painel.visitantes'
 import { Route as AuthenticatedPainelDepartamentoIdRouteImport } from './routes/_authenticated/painel.departamento.$id'
 import { Route as AuthenticatedPainelEventoIdRouteImport } from './routes/_authenticated/painel.evento.$id'
 import { Route as AuthenticatedPainelMembroIdRouteImport } from './routes/_authenticated/painel.membro.$id'
@@ -167,6 +168,12 @@ const AuthenticatedPainelSiteRoute = AuthenticatedPainelSiteRouteImport.update({
   path: '/site',
   getParentRoute: () => AuthenticatedPainelRoute,
 } as any)
+const AuthenticatedPainelVisitantesRoute =
+  AuthenticatedPainelVisitantesRouteImport.update({
+    id: '/visitantes',
+    path: '/visitantes',
+    getParentRoute: () => AuthenticatedPainelRoute,
+  } as any)
 const AuthenticatedPainelDepartamentoIdRoute =
   AuthenticatedPainelDepartamentoIdRouteImport.update({
     id: '/departamento/$id',
@@ -209,6 +216,7 @@ export interface FileRoutesByFullPath {
   '/painel/permissoes': typeof AuthenticatedPainelPermissoesRoute
   '/painel/relatorio': typeof AuthenticatedPainelRelatorioRoute
   '/painel/site': typeof AuthenticatedPainelSiteRoute
+  '/painel/visitantes': typeof AuthenticatedPainelVisitantesRoute
   '/painel/': typeof AuthenticatedPainelIndexRoute
   '/painel/departamento/$id': typeof AuthenticatedPainelDepartamentoIdRoute
   '/painel/evento/$id': typeof AuthenticatedPainelEventoIdRoute
@@ -236,6 +244,7 @@ export interface FileRoutesByTo {
   '/painel/permissoes': typeof AuthenticatedPainelPermissoesRoute
   '/painel/relatorio': typeof AuthenticatedPainelRelatorioRoute
   '/painel/site': typeof AuthenticatedPainelSiteRoute
+  '/painel/visitantes': typeof AuthenticatedPainelVisitantesRoute
   '/painel': typeof AuthenticatedPainelIndexRoute
   '/painel/departamento/$id': typeof AuthenticatedPainelDepartamentoIdRoute
   '/painel/evento/$id': typeof AuthenticatedPainelEventoIdRoute
@@ -266,6 +275,7 @@ export interface FileRoutesById {
   '/_authenticated/painel/permissoes': typeof AuthenticatedPainelPermissoesRoute
   '/_authenticated/painel/relatorio': typeof AuthenticatedPainelRelatorioRoute
   '/_authenticated/painel/site': typeof AuthenticatedPainelSiteRoute
+  '/_authenticated/painel/visitantes': typeof AuthenticatedPainelVisitantesRoute
   '/_authenticated/painel/': typeof AuthenticatedPainelIndexRoute
   '/_authenticated/painel/departamento/$id': typeof AuthenticatedPainelDepartamentoIdRoute
   '/_authenticated/painel/evento/$id': typeof AuthenticatedPainelEventoIdRoute
@@ -296,6 +306,7 @@ export interface FileRouteTypes {
     | '/painel/permissoes'
     | '/painel/relatorio'
     | '/painel/site'
+    | '/painel/visitantes'
     | '/painel/'
     | '/painel/departamento/$id'
     | '/painel/evento/$id'
@@ -323,6 +334,7 @@ export interface FileRouteTypes {
     | '/painel/permissoes'
     | '/painel/relatorio'
     | '/painel/site'
+    | '/painel/visitantes'
     | '/painel'
     | '/painel/departamento/$id'
     | '/painel/evento/$id'
@@ -352,6 +364,7 @@ export interface FileRouteTypes {
     | '/_authenticated/painel/permissoes'
     | '/_authenticated/painel/relatorio'
     | '/_authenticated/painel/site'
+    | '/_authenticated/painel/visitantes'
     | '/_authenticated/painel/'
     | '/_authenticated/painel/departamento/$id'
     | '/_authenticated/painel/evento/$id'
@@ -542,6 +555,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedPainelSiteRouteImport
       parentRoute: typeof AuthenticatedPainelRoute
     }
+    '/_authenticated/painel/visitantes': {
+      id: '/_authenticated/painel/visitantes'
+      path: '/visitantes'
+      fullPath: '/painel/visitantes'
+      preLoaderRoute: typeof AuthenticatedPainelVisitantesRouteImport
+      parentRoute: typeof AuthenticatedPainelRoute
+    }
     '/_authenticated/painel/departamento/$id': {
       id: '/_authenticated/painel/departamento/$id'
       path: '/departamento/$id'
@@ -578,6 +598,7 @@ interface AuthenticatedPainelRouteChildren {
   AuthenticatedPainelPermissoesRoute: typeof AuthenticatedPainelPermissoesRoute
   AuthenticatedPainelRelatorioRoute: typeof AuthenticatedPainelRelatorioRoute
   AuthenticatedPainelSiteRoute: typeof AuthenticatedPainelSiteRoute
+  AuthenticatedPainelVisitantesRoute: typeof AuthenticatedPainelVisitantesRoute
   AuthenticatedPainelIndexRoute: typeof AuthenticatedPainelIndexRoute
   AuthenticatedPainelDepartamentoIdRoute: typeof AuthenticatedPainelDepartamentoIdRoute
   AuthenticatedPainelEventoIdRoute: typeof AuthenticatedPainelEventoIdRoute
@@ -596,6 +617,7 @@ const AuthenticatedPainelRouteChildren: AuthenticatedPainelRouteChildren = {
   AuthenticatedPainelPermissoesRoute: AuthenticatedPainelPermissoesRoute,
   AuthenticatedPainelRelatorioRoute: AuthenticatedPainelRelatorioRoute,
   AuthenticatedPainelSiteRoute: AuthenticatedPainelSiteRoute,
+  AuthenticatedPainelVisitantesRoute: AuthenticatedPainelVisitantesRoute,
   AuthenticatedPainelIndexRoute: AuthenticatedPainelIndexRoute,
   AuthenticatedPainelDepartamentoIdRoute:
     AuthenticatedPainelDepartamentoIdRoute,

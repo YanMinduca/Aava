@@ -4,7 +4,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { useAccess } from "@/hooks/use-access";
 import { brl } from "@/lib/church";
 import { siteMeta } from "@/lib/site-query";
-import { EventsCard, FinanceCards, PrayerCard, VolunteerCards } from "@/components/dashboard/DashboardCards";
+import { EventsCard, FinanceCards, PrayerCard, VisitorsCard, VolunteerCards } from "@/components/dashboard/DashboardCards";
 import { MyTickets } from "@/components/events/MyTickets";
 import { NextShiftCard } from "@/components/shifts/MyShifts";
 
@@ -20,7 +20,8 @@ function Overview() {
     queryKey: ["members-count"],
     enabled: can("view_members"),
     queryFn: async () =>
-      (await supabase.from("members").select("id", { count: "exact", head: true })).count ?? 0,
+      // Visitantes têm card próprio: aqui contam só os membros.
+      (await supabase.from("members").select("id", { count: "exact", head: true }).neq("status", "visitante")).count ?? 0,
   });
   const fin = useQuery({
     queryKey: ["fin-summary"],
@@ -57,6 +58,7 @@ function Overview() {
             <p className="mt-2 font-display text-4xl text-foreground">{members.data ?? "—"}</p>
           </Link>
         )}
+        <VisitorsCard />
         <VolunteerCards />
         {can("view_finance") && (
           <>

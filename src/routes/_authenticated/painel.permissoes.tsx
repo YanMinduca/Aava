@@ -9,6 +9,7 @@ import type { Database } from "@/integrations/supabase/types";
 import { Button } from "@/components/ui/button";
 import { siteMeta } from "@/lib/site-query";
 import { DeleteUserSection, StorageCleanupCard } from "@/components/admin/UserAdmin";
+import { AccountMemberSection } from "@/components/admin/AccountMemberSection";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
@@ -93,6 +94,7 @@ function PermissionsPage() {
         {current ? (
           <div className="rounded-2xl border bg-card p-6">
             <p className="font-display text-xl text-foreground">{current.full_name || current.email}</p>
+            <AccountMemberSection user={{ id: current.id, name: current.full_name, email: current.email }} canView={can("view_members")} canLink={isFullAccess} />
             {current.role === "ceo" ? (
               <p className="mt-3 text-sm text-muted-foreground">O CEO tem acesso total ao sistema.</p>
             ) : (

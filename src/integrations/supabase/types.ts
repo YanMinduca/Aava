@@ -801,6 +801,9 @@ export type Database = {
           photo_path: string | null
           registration_number: string | null
           rg: string | null
+          signup_event_id: string | null
+          signup_event_title: string | null
+          signup_source: string | null
           status: string
           updated_at: string
           user_id: string | null
@@ -832,6 +835,9 @@ export type Database = {
           photo_path?: string | null
           registration_number?: string | null
           rg?: string | null
+          signup_event_id?: string | null
+          signup_event_title?: string | null
+          signup_source?: string | null
           status?: string
           updated_at?: string
           user_id?: string | null
@@ -863,6 +869,9 @@ export type Database = {
           photo_path?: string | null
           registration_number?: string | null
           rg?: string | null
+          signup_event_id?: string | null
+          signup_event_title?: string | null
+          signup_source?: string | null
           status?: string
           updated_at?: string
           user_id?: string | null
@@ -874,6 +883,13 @@ export type Database = {
             columns: ["church_role_id"]
             isOneToOne: false
             referencedRelation: "church_roles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "members_signup_event_id_fkey"
+            columns: ["signup_event_id"]
+            isOneToOne: false
+            referencedRelation: "events"
             referencedColumns: ["id"]
           },
         ]

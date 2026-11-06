@@ -2,7 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
-import { Plus, Pencil, Trash2, Search, Check, X, Link2, Copy, Download, Eye, UserRoundCheck, Activity, UserPlus, Mail } from "lucide-react";
+import { Plus, Pencil, Trash2, Search, Check, X, Link2, Copy, Download, Eye, UserRoundCheck, UserRoundPlus } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAccess } from "@/hooks/use-access";
 import { Switch } from "@/components/ui/switch";
@@ -23,6 +23,9 @@ import { copyText } from "@/lib/clipboard";
 import { purgeStorageTrash } from "@/lib/storage-trash";
 import { memberSaveError, saveMemberDepartmentLinks } from "@/lib/departments";
 import { useChurchRoles, useDepartments, useMemberDepartments } from "@/hooks/use-departments";
+import { useAllMembers } from "@/hooks/use-members";
+import { RecentActivity } from "@/components/members/RecentActivity";
+import { splitVisitors } from "@/lib/visitors";
 
 export const Route = createFileRoute("/_authenticated/painel/membros")({
   head: () => siteMeta("Membros — Comunidade Aava", "Cadastros, aprovação e convites da Comunidade Aava."),
@@ -50,40 +53,7 @@ function MembersPage() {
   const memberDepts = useMemberDepartments(can("view_members") || can("view_departments"));
   const deptNames = (id: string) => (memberDepts.data?.get(id) ?? []).map((d) => d.name);
 
-  const recentActivity = useQuery({
-    queryKey: ["member-activity"],
-    enabled: can("view_members"),
-    queryFn: async () => {
-      const { data: events, error } = await supabase
-        .from("member_activity")
-        .select("id, kind, member_id, user_id, created_at, account_name, account_email")
-        .order("created_at", { ascending: false })
-        .limit(12);
-      if (error) throw error;
-
-      const memberIds = [...new Set(events.map((event) => event.member_id).filter((id): id is string => !!id))];
-      const memberNames = new Map<string, string>();
-      if (memberIds.length) {
-        const { data: linkedMembers, error: membersError } = await supabase
-          .from("members")
-          .select("id, full_name")
-          .in("id", memberIds);
-        if (membersError) throw membersError;
-        for (const member of linkedMembers ?? []) memberNames.set(member.id, member.full_name);
-      }
-
-      return events.map((event) => ({ ...event, member_name: event.member_id ? memberNames.get(event.member_id) ?? null : null }));
-    },
-  });
-
-  const { data = [], isLoading } = useQuery({
-    queryKey: ["members"],
-    queryFn: async () => {
-      const { data, error } = await supabase.from("members").select("*").order("full_name");
-      if (error) throw error;
-      return data;
-    },
-  });
+  const { data = [], isLoading } = useAllMembers();
 
   async function openEdit(m: MemberDraft) {
     setEditing(m);
@@ -159,8 +129,10 @@ function MembersPage() {
 
   if (!can("view_members")) return <p className="text-muted-foreground">Você não tem acesso a esta área.</p>;
 
-  const approved = data.filter((m) => m.approval_status !== "pendente");
-  const pending = data.filter((m) => m.approval_status === "pendente");
+  // Quem tem status "visitante" fica na página Visitantes, separado dos membros.
+  const { members: people, visitors } = splitVisitors(data);
+  const approved = people.filter((m) => m.approval_status !== "pendente");
+  const pending = people.filter((m) => m.approval_status === "pendente");
   const filtered = approved.filter(
     (m) =>
       (statusFilter === "todos" || m.status === statusFilter) &&
@@ -194,52 +166,7 @@ function MembersPage() {
         </div>
       </div>
 
-      <section className="mt-6 rounded-2xl border bg-card p-5" aria-labelledby="member-activity-title">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 id="member-activity-title" className="flex items-center gap-2 text-lg font-semibold text-foreground">
-              <Activity className="h-5 w-5 text-primary" /> Atividade recente
-            </h2>
-            <p className="mt-1 text-sm text-muted-foreground">Novos cadastros, criação de contas e vínculos com membros.</p>
-          </div>
-          <Badge variant="secondary">{recentActivity.data?.length ?? 0} atividades</Badge>
-        </div>
-
-        {recentActivity.isLoading ? (
-          <p className="mt-4 text-sm text-muted-foreground">Carregando atividades...</p>
-        ) : recentActivity.isError ? (
-          <p className="mt-4 text-sm text-destructive">Não foi possível carregar as atividades recentes.</p>
-        ) : (recentActivity.data ?? []).length === 0 ? (
-          <p className="mt-4 text-sm text-muted-foreground">Nenhuma atividade registrada ainda.</p>
-        ) : (
-          <ol className="mt-4 divide-y">
-            {(recentActivity.data ?? []).map((event) => {
-              const linkedName = event.member_name ?? event.account_name ?? "Membro";
-              const timestamp = new Intl.DateTimeFormat("pt-BR", { dateStyle: "short", timeStyle: "short" }).format(new Date(event.created_at));
-              const isAccount = event.kind === "account_created";
-              const isLinked = event.kind === "account_linked";
-              const title = isAccount
-                ? `Nova conta criada por ${event.account_name ?? "novo usuário"}`
-                : isLinked
-                  ? `Nova conta vinculada para ${linkedName}`
-                  : `Novo membro cadastrado: ${event.member_name ?? event.account_name ?? "Membro"}`;
-              const Icon = isAccount ? UserPlus : isLinked ? Mail : UserRoundCheck;
-
-              return (
-                <li key={event.id} className="flex items-start gap-3 py-3 first:pt-0 last:pb-0">
-                  <span className="mt-0.5 rounded-full bg-primary/10 p-2 text-primary"><Icon className="h-4 w-4" /></span>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium text-foreground">{title}</p>
-                    {event.account_email && <p className="mt-0.5 break-all text-xs text-muted-foreground">{event.account_email}</p>}
-                    <p className="mt-1 text-xs text-muted-foreground">{timestamp}</p>
-                  </div>
-                  <Badge variant="outline">{isAccount ? "Conta" : isLinked ? "Vínculo" : "Cadastro"}</Badge>
-                </li>
-              );
-            })}
-          </ol>
-        )}
-      </section>
+      <RecentActivity enabled={can("view_members")} />
 
       <Tabs defaultValue="lista" className="mt-6">
         <TabsList>
@@ -258,7 +185,7 @@ function MembersPage() {
               <SelectTrigger className="w-44"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="todos">Todos os status</SelectItem>
-                {Object.entries(MEMBER_STATUS).map(([k, l]) => <SelectItem key={k} value={k}>{l}</SelectItem>)}
+                {Object.entries(MEMBER_STATUS).filter(([k]) => k !== "visitante").map(([k, l]) => <SelectItem key={k} value={k}>{l}</SelectItem>)}
               </SelectContent>
             </Select>
             <Select value={accountFilter} onValueChange={setAccountFilter}>
@@ -271,6 +198,12 @@ function MembersPage() {
             </Select>
           </div>
           <p className="mt-3 text-sm text-muted-foreground">{withAccount} com conta · {approved.length - withAccount} sem conta (de {approved.length} cadastrados)</p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Visitantes ficam em uma página própria.{" "}
+            <Link to="/painel/visitantes" className="inline-flex items-center gap-1 font-medium text-primary hover:underline">
+              <UserRoundPlus className="h-3.5 w-3.5" /> Ver visitantes ({visitors.length})
+            </Link>
+          </p>
           <div className="mt-4 overflow-x-auto rounded-2xl border bg-card">
             <table className="w-full text-sm">
               <thead className="border-b text-left text-muted-foreground">

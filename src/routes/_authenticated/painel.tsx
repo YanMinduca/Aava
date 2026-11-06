@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   LayoutDashboard,
   Users,
+  UserRoundPlus,
   Wallet,
   HandCoins,
   ShieldCheck,
@@ -72,6 +73,7 @@ function PanelLayout() {
       show: can("view_prayer_requests"),
     },
     { to: "/painel/membros", label: "Membros", icon: Users, show: can("view_members") },
+    { to: "/painel/visitantes", label: "Visitantes", icon: UserRoundPlus, show: can("view_members") },
     { to: "/painel/departamentos", label: "Departamentos", icon: Network, show: canViewDepartments },
     { to: "/painel/eventos", label: "Eventos", icon: CalendarDays, show: can("manage_events") || can("verify_event_payments") || can("checkin_events") },
     { to: "/painel/financeiro", label: "Financeiro", icon: Wallet, show: can("view_finance") },
