@@ -736,6 +736,44 @@ export type Database = {
         }
         Relationships: []
       }
+      member_activity: {
+        Row: {
+          account_email: string | null
+          account_name: string | null
+          created_at: string
+          id: string
+          kind: string
+          member_id: string | null
+          user_id: string | null
+        }
+        Insert: {
+          account_email?: string | null
+          account_name?: string | null
+          created_at?: string
+          id?: string
+          kind: string
+          member_id?: string | null
+          user_id?: string | null
+        }
+        Update: {
+          account_email?: string | null
+          account_name?: string | null
+          created_at?: string
+          id?: string
+          kind?: string
+          member_id?: string | null
+          user_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "member_activity_member_id_fkey"
+            columns: ["member_id"]
+            isOneToOne: false
+            referencedRelation: "members"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       members: {
         Row: {
           address: string | null
