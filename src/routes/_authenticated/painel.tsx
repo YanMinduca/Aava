@@ -85,7 +85,7 @@ function PanelLayout() {
     },
     { to: "/painel/escalas", label: "Escalas", icon: CalendarClock, show: (shiftDepts.data?.length ?? 0) > 0 },
     { to: "/painel/notificacoes", label: "Avisos (notificações)", icon: Bell, show: can("send_push") },
-    { to: "/painel/site", label: "Editar site", icon: Settings, show: isFullAccess },
+    { to: "/painel/site", label: "Editar site", icon: Settings, show: can("edit_site") },
   ] as const;
 
   async function signOut() {

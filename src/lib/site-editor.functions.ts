@@ -53,16 +53,20 @@ export const saveSiteContent = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((data: unknown) => schema.parse(data))
   .handler(async ({ data, context }) => {
-    const { data: roles, error: roleError } = await context.supabase
-      .from("user_roles")
-      .select("role")
-      .eq("user_id", context.userId);
-    if (roleError) throw roleError;
-    if (!roles?.some((r) => r.role === "ceo" || r.role === "pastor_presidente"))
-      throw new Error("Acesso negado.");
-    const { error } = await context.supabase
+    // CEO e pastor presidente editam sempre; os demais precisam da permissão "edit_site" (has_permission já cobre os dois casos).
+    const { data: allowed, error: permError } = await context.supabase.rpc("has_permission", {
+      _user_id: context.userId,
+      _permission: "edit_site",
+    });
+    if (permError) throw permError;
+    if (!allowed) throw new Error("Acesso negado.");
+    // Quem não é liderança não altera Pix nem métodos de contribuição: o banco mantém os valores atuais,
+    // por isso devolvemos o que realmente ficou salvo (e não o que foi enviado).
+    const { data: saved, error } = await context.supabase
       .from("site_content")
-      .upsert({ id: "main", content: data as Json, updated_at: new Date().toISOString() });
+      .upsert({ id: "main", content: data as Json, updated_at: new Date().toISOString() })
+      .select("content")
+      .single();
     if (error) throw error;
-    return mergeContent(data);
+    return mergeContent(saved.content);
   });

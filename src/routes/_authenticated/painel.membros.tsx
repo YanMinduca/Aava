@@ -26,6 +26,7 @@ import { useChurchRoles, useDepartments, useMemberDepartments } from "@/hooks/us
 import { useAllMembers } from "@/hooks/use-members";
 import { RecentActivity } from "@/components/members/RecentActivity";
 import { splitVisitors } from "@/lib/visitors";
+import { SORT_OPTIONS, countByStatus, sortMembers, type SortKey } from "@/lib/member-list";
 
 export const Route = createFileRoute("/_authenticated/painel/membros")({
   head: () => siteMeta("Membros — Comunidade Aava", "Cadastros, aprovação e convites da Comunidade Aava."),
@@ -38,6 +39,7 @@ function MembersPage() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("todos");
   const [accountFilter, setAccountFilter] = useState("todos");
+  const [sortKey, setSortKey] = useState<SortKey>("nome_asc");
   const [linking, setLinking] = useState<{ id: string; full_name: string; user_id: string | null } | null>(null);
   const accountLinks = useAccountLinks(isFullAccess);
   const accountEmail = (userId: string | null) => (userId ? accountLinks.data?.find((a) => a.account_id === userId)?.account_email ?? null : null);
@@ -133,7 +135,7 @@ function MembersPage() {
   const { members: people, visitors } = splitVisitors(data);
   const approved = people.filter((m) => m.approval_status !== "pendente");
   const pending = people.filter((m) => m.approval_status === "pendente");
-  const filtered = approved.filter(
+  const filtered = sortMembers(approved, sortKey).filter(
     (m) =>
       (statusFilter === "todos" || m.status === statusFilter) &&
       (accountFilter === "todos" || (accountFilter === "com_conta" ? !!m.user_id : !m.user_id)) &&
@@ -141,6 +143,12 @@ function MembersPage() {
   );
 
   const withAccount = approved.filter((m) => !!m.user_id).length;
+  const statusCounts = countByStatus(approved);
+  // Voluntários e líderes não são status: vêm dos departamentos e dos cargos de liderança
+  const leaderMemberIds = new Set((departments.data ?? []).flatMap((d) => d.leader_member_ids ?? []));
+  const leadershipRoleIds = new Set((roles.data ?? []).filter((r) => r.is_leadership).map((r) => r.id));
+  const volunteersCount = approved.filter((m) => (memberDepts.data?.get(m.id)?.length ?? 0) > 0).length;
+  const leadersCount = approved.filter((m) => leaderMemberIds.has(m.id) || (!!m.church_role_id && leadershipRoleIds.has(m.church_role_id))).length;
 
   function exportXls() {
     const head = ["Matrícula", "Nome", "Nascimento", "Idade", "CPF", "RG", "Telefone", "E-mail", "Endereço", "Bairro", "Cidade", "CEP", "Estado civil", "Filiação", "Batizado", "Data batismo", "Igreja do batismo", "Departamento", "Cargo", "Status", "Conta"];
@@ -188,6 +196,12 @@ function MembersPage() {
                 {Object.entries(MEMBER_STATUS).filter(([k]) => k !== "visitante").map(([k, l]) => <SelectItem key={k} value={k}>{l}</SelectItem>)}
               </SelectContent>
             </Select>
+            <Select value={sortKey} onValueChange={(v) => setSortKey(v as SortKey)}>
+              <SelectTrigger className="w-56" aria-label="Ordenar por"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {SORT_OPTIONS.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
+              </SelectContent>
+            </Select>
             <Select value={accountFilter} onValueChange={setAccountFilter}>
               <SelectTrigger className="w-44"><SelectValue /></SelectTrigger>
               <SelectContent>
@@ -196,6 +210,31 @@ function MembersPage() {
                 <SelectItem value="sem_conta">Sem conta</SelectItem>
               </SelectContent>
             </Select>
+          </div>
+          <div className="mt-4 flex flex-wrap gap-2" aria-label="Quantidade por status">
+            <button
+              type="button"
+              onClick={() => setStatusFilter("todos")}
+              className={`rounded-full border px-3 py-1 text-sm ${statusFilter === "todos" ? "border-primary bg-primary-soft text-foreground" : "bg-card text-muted-foreground hover:text-foreground"}`}
+            >
+              Total <strong className="text-foreground">{approved.length}</strong>
+            </button>
+            {statusCounts.map((s) => (
+              <button
+                key={s.status}
+                type="button"
+                onClick={() => setStatusFilter(s.status)}
+                className={`rounded-full border px-3 py-1 text-sm ${statusFilter === s.status ? "border-primary bg-primary-soft text-foreground" : "bg-card text-muted-foreground hover:text-foreground"}`}
+              >
+                {s.label} <strong className="text-foreground">{s.count}</strong>
+              </button>
+            ))}
+            <span className="rounded-full border bg-card px-3 py-1 text-sm text-muted-foreground">
+              Voluntários <strong className="text-foreground">{volunteersCount}</strong>
+            </span>
+            <span className="rounded-full border bg-card px-3 py-1 text-sm text-muted-foreground">
+              Líderes <strong className="text-foreground">{leadersCount}</strong>
+            </span>
           </div>
           <p className="mt-3 text-sm text-muted-foreground">{withAccount} com conta · {approved.length - withAccount} sem conta (de {approved.length} cadastrados)</p>
           <p className="mt-1 text-sm text-muted-foreground">

@@ -26,8 +26,9 @@ export const Route = createFileRoute("/_authenticated/painel/site")({
 });
 
 function SiteEditor() {
-  const { isFullAccess, isLoading } = useAccess();
-  const content = useQuery({ ...siteQuery, enabled: isFullAccess });
+  const { can, isFullAccess, isLoading } = useAccess();
+  const canEdit = can("edit_site");
+  const content = useQuery({ ...siteQuery, enabled: canEdit });
   const qc = useQueryClient();
   const [draft, setDraft] = useState<SiteContent | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -53,7 +54,7 @@ function SiteEditor() {
     if (c) setDraft({ ...c, [key]: value });
   }
   if (isLoading || content.isLoading) return <p className="text-muted-foreground">Carregando...</p>;
-  if (!isFullAccess) return <p>Você não tem acesso a esta área.</p>;
+  if (!canEdit) return <p>Você não tem acesso a esta área.</p>;
   if (!c) return <p className="text-destructive">Não foi possível carregar o site.</p>;
   const groups = [...new Set(Object.values(contentFields).map((f) => f[0]))];
   return (
@@ -67,7 +68,7 @@ function SiteEditor() {
       </div>
       <Tabs defaultValue="Início" className="mt-6">
         <TabsList className="h-auto max-w-full flex-wrap justify-start">
-          {[...groups, "Fotos", "Horários", "Pix e métodos"].map((group) => (
+          {[...groups, "Fotos", "Horários", ...(isFullAccess ? ["Pix e métodos"] : [])].map((group) => (
             <TabsTrigger key={group} value={group}>
               {group}
             </TabsTrigger>
@@ -236,6 +237,7 @@ function SiteEditor() {
             </Button>
           </div>
         </TabsContent>
+        {isFullAccess && (
         <TabsContent value="Pix e métodos">
           <div className="space-y-10 py-6">
             <section>
@@ -428,6 +430,7 @@ function SiteEditor() {
             </section>
           </div>
         </TabsContent>
+        )}
       </Tabs>
     </div>
   );
