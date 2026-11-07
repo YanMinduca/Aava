@@ -1,4 +1,4 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, redirect } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { useAccess } from "@/hooks/use-access";
@@ -9,6 +9,14 @@ import { MyTickets } from "@/components/events/MyTickets";
 import { NextShiftCard } from "@/components/shifts/MyShifts";
 
 export const Route = createFileRoute("/_authenticated/painel/")({
+  // Primeiro acesso: quem ainda não tem cadastro vinculado cai direto em "Meu cadastro", antes da visão geral.
+  // Se a consulta falhar (ex.: banco ainda sem a função), segue para a visão geral normalmente.
+  beforeLoad: async () => {
+    const { data } = await supabase.rpc("needs_member_onboarding");
+    if (data === true) {
+      throw redirect({ to: "/painel/meu-cadastro", search: { convite: undefined }, replace: true });
+    }
+  },
   head: () =>
     siteMeta("Visão geral — Comunidade Aava", "Área de membros e gestão da Comunidade Aava."),
   component: Overview,

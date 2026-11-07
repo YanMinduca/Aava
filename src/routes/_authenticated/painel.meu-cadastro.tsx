@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { MyContributions } from "@/components/members/MyContributions";
 import { ClaimSuggestion, ClaimedNotice } from "@/components/members/ClaimSuggestion";
 import { CpfSignupNotice } from "@/components/members/CpfSignupNotice";
+import { MemberMatchDialog } from "@/components/members/MemberMatchDialog";
 import { PushToggle } from "@/components/push/PushToggle";
 import { InstallCard } from "@/components/pwa/InstallApp";
 import { memberSaveError } from "@/lib/departments";
@@ -76,7 +77,12 @@ function MyProfile() {
   return (
     <div className="max-w-3xl">
       <h1 className="text-3xl text-foreground">Meu cadastro</h1>
-      {!row && <p className="mt-2 text-muted-foreground">Preencha seus dados e envie. Um responsável da igreja vai revisar e aprovar seu cadastro.</p>}
+      {!row && (
+        <p className="mt-2 text-muted-foreground">
+          Preencha seus dados e envie. Se a igreja já tiver o seu cadastro, vamos mostrar para você vincular a sua conta
+          a ele. Um responsável da igreja vai revisar e aprovar seu cadastro.
+        </p>
+      )}
       {row?.approval_status === "pendente" && (
         <div className="mt-4 flex items-center gap-3 rounded-2xl bg-primary-soft p-4 text-sm text-accent-foreground">
           <Clock className="h-5 w-5" /> Seu cadastro foi enviado e está aguardando aprovação.
@@ -111,6 +117,14 @@ function MyProfile() {
         <Button type="submit" size="lg" disabled={save.isPending || cpfBlocked}>{row ? "Salvar alterações" : "Enviar cadastro"}</Button>
         {cpfBlocked && <p className="text-sm text-muted-foreground">Corrija o CPF (ou vincule sua conta ao cadastro existente) para poder enviar.</p>}
       </form>
+      <MemberMatchDialog
+        cpf={draft.cpf}
+        phone={draft.phone}
+        email={draft.email}
+        rg={draft.rg}
+        enabled={!row}
+        onClaimed={handleClaimed}
+      />
       <MyTickets uid={me.data.uid} />
       {row?.approval_status === "aprovado" && <MyContributions memberId={row.id} />}
     </div>

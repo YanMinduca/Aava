@@ -1321,6 +1321,24 @@ export type Database = {
         }[]
       }
       norm_name: { Args: { _s: string }; Returns: string }
+      norm_phone: { Args: { _s: string }; Returns: string }
+      needs_member_onboarding: { Args: Record<PropertyKey, never>; Returns: boolean }
+      find_member_matches: {
+        Args: { _cpf: string; _email: string; _phone: string; _rg: string }
+        Returns: {
+          cpf_last2: string | null
+          matched_by: string[]
+          member_email: string | null
+          member_id: string
+          member_name: string
+          member_photo: string | null
+          needs_cpf: boolean
+        }[]
+      }
+      claim_member_match: {
+        Args: { _confirm_cpf?: string; _cpf: string; _email: string; _member: string; _phone: string; _rg: string }
+        Returns: string
+      }
       has_permission: {
         Args: { _permission: string; _user_id: string }
         Returns: boolean
