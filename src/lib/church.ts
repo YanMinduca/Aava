@@ -55,6 +55,10 @@ export const PERMISSION_GROUPS: { label: string; perms: { key: string; label: st
     perms: [{ key: "send_push", label: "Enviar avisos por notificação (push) para os membros" }],
   },
   {
+    label: "Site",
+    perms: [{ key: "edit_site", label: "Editar a landing page (textos, fotos, horários e links; Pix fica só com a liderança)" }],
+  },
+  {
     label: "Configurações",
     perms: [{ key: "manage_permissions", label: "Ver usuários e permissões" }],
   },
