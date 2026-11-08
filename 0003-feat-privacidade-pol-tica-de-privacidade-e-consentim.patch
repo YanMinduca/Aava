@@ -1,0 +1,1069 @@
+From 69ee559805979f9fb2f0345eb686fe2df32667bf Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 8 Nov 2026 00:59:47 +0000
+Subject: [PATCH 3/3] =?UTF-8?q?feat(privacidade):=20pol=C3=ADtica=20de=20p?=
+ =?UTF-8?q?rivacidade=20e=20consentimento=20(LGPD)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Página pública /privacidade (rodapé) descrevendo o que o sistema realmente coleta, terceiros incorporados, retenção e direitos
+- Aceite obrigatório da política ao criar conta (guarda data e versão nos dados da conta)
+- Aceite geral na etapa de dados do visitante e consentimento ESPECÍFICO para religião/instituição na inscrição (dado sensível)
+- Aviso em Meu cadastro sobre o uso de CPF/RG
+- Testes: 15 (+2 correções de tipagem de teste)
+---
+ src/components/auth/PrivacyConsent.tsx        |  37 +++
+ src/components/events/EventRegistration.tsx   |  38 ++-
+ src/components/site/SiteLayout.tsx            |   7 +
+ src/lib/privacy.ts                            |  36 +++
+ src/routeTree.gen.ts                          |  21 ++
+ .../_authenticated/painel.meu-cadastro.tsx    |   8 +
+ src/routes/auth.tsx                           |  12 +-
+ src/routes/privacidade.tsx                    | 229 ++++++++++++++++++
+ src/test/event-registration-consent.test.tsx  | 217 +++++++++++++++++
+ src/test/privacy-consent.test.tsx             | 199 +++++++++++++++
+ 10 files changed, 802 insertions(+), 2 deletions(-)
+ create mode 100644 src/components/auth/PrivacyConsent.tsx
+ create mode 100644 src/lib/privacy.ts
+ create mode 100644 src/routes/privacidade.tsx
+ create mode 100644 src/test/event-registration-consent.test.tsx
+ create mode 100644 src/test/privacy-consent.test.tsx
+
+diff --git a/src/components/auth/PrivacyConsent.tsx b/src/components/auth/PrivacyConsent.tsx
+new file mode 100644
+index 0000000..b203fd0
+--- /dev/null
++++ b/src/components/auth/PrivacyConsent.tsx
+@@ -0,0 +1,37 @@
++import { Checkbox } from "@/components/ui/checkbox";
++
++type Props = {
++  checked: boolean;
++  onCheckedChange: (checked: boolean) => void;
++  /** Texto curto sobre o uso dos dados naquele formulário (aparece abaixo do aceite). */
++  note?: string;
++};
++
++/** Caixa de aceite da Política de Privacidade, no mesmo visual do aceite de uso de imagem dos eventos. */
++export function PrivacyConsent({ checked, onCheckedChange, note }: Props) {
++  return (
++    <label className="flex cursor-pointer items-start gap-3 rounded-lg border bg-primary-soft/40 p-4 text-sm">
++      <Checkbox
++        className="mt-0.5"
++        checked={checked}
++        onCheckedChange={(on) => onCheckedChange(on === true)}
++        aria-required="true"
++      />
++      <span>
++        <span className="block font-medium text-foreground">
++          Li e concordo com a{" "}
++          <a
++            href="/privacidade"
++            target="_blank"
++            rel="noreferrer"
++            className="text-primary underline"
++          >
++            Política de Privacidade
++          </a>{" "}
++          *
++        </span>
++        {note ? <span className="mt-1 block text-xs text-muted-foreground">{note}</span> : null}
++      </span>
++    </label>
++  );
++}
+diff --git a/src/components/events/EventRegistration.tsx b/src/components/events/EventRegistration.tsx
+index 3d669f4..29a0f59 100644
+--- a/src/components/events/EventRegistration.tsx
++++ b/src/components/events/EventRegistration.tsx
+@@ -10,6 +10,8 @@ import { Input } from "@/components/ui/input";
+ import { Label } from "@/components/ui/label";
+ import { Badge } from "@/components/ui/badge";
+ import { Checkbox } from "@/components/ui/checkbox";
++import { PrivacyConsent } from "@/components/auth/PrivacyConsent";
++import { recordPrivacyConsent, recordSensitiveConsent } from "@/lib/privacy";
+ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+ import { RELIGIONS } from "@/lib/event-data";
+ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+@@ -55,6 +57,8 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
+   const [cpf, setCpf] = useState("");
+   const [installments, setInstallments] = useState(1);
+   const [imageConsent, setImageConsent] = useState(false);
++  const [privacyOk, setPrivacyOk] = useState(false);
++  const [religionConsent, setReligionConsent] = useState(false);
+   const [birthDate, setBirthDate] = useState("");
+   const [institution, setInstitution] = useState("");
+   const [religion, setReligion] = useState("");
+@@ -77,6 +81,7 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
+       if (error) throw error;
+     },
+     onSuccess: () => {
++      void recordPrivacyConsent();
+       toast.success("Dados salvos! Agora é só escolher o ingresso.");
+       qc.invalidateQueries({ queryKey: ["event-profile", uid] });
+     },
+@@ -129,6 +134,7 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
+       if (error) throw error;
+     },
+     onSuccess: () => {
++      if (!isMember) void recordSensitiveConsent();
+       setDone({ paid: payRequired });
+       qc.invalidateQueries({ queryKey: ["public-event", event.slug] });
+       qc.invalidateQueries({ queryKey: ["public-events"] });
+@@ -200,6 +206,12 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
+               toast.error(eventError(new Error("invalid_birth_date")));
+               return;
+             }
++            if (!privacyOk) {
++              toast.error(
++                "Para continuar, marque que você leu e concorda com a Política de Privacidade.",
++              );
++              return;
++            }
+             createVisitor.mutate();
+           }}
+         >
+@@ -207,6 +219,11 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
+           <div className="space-y-1.5"><Label>CPF *</Label><Input required inputMode="numeric" placeholder="000.000.000-00" value={visitor.cpf} onChange={(e) => setVisitor({ ...visitor, cpf: formatCpf(e.target.value) })} /></div>
+           <div className="space-y-1.5"><Label>Telefone / WhatsApp *</Label><Input required inputMode="tel" value={visitor.phone} onChange={(e) => setVisitor({ ...visitor, phone: e.target.value })} /></div>
+           <div className="space-y-1.5"><Label>Data de nascimento *</Label><Input required type="date" max={new Date().toISOString().slice(0, 10)} value={visitor.birthDate} onChange={(e) => setVisitor({ ...visitor, birthDate: e.target.value })} /></div>
++          <PrivacyConsent
++            checked={privacyOk}
++            onCheckedChange={setPrivacyOk}
++            note="Usamos seu nome, CPF, telefone e data de nascimento para controlar vagas, pagamentos e a entrada no evento."
++          />
+           <Button type="submit" className="w-full" disabled={createVisitor.isPending}>Continuar</Button>
+         </form>
+         <p className="mt-4 text-xs text-muted-foreground">
+@@ -329,6 +346,25 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
+                 </SelectContent>
+               </Select>
+             </div>
++            <label className="flex cursor-pointer items-start gap-3 rounded-lg border bg-primary-soft/40 p-4 text-sm sm:col-span-2">
++              <Checkbox
++                className="mt-0.5"
++                checked={religionConsent}
++                onCheckedChange={(on) => setReligionConsent(on === true)}
++                aria-required="true"
++              />
++              <span>
++                <span className="block font-medium text-foreground">
++                  Autorizo o uso da minha religião e instituição para montar o perfil do público do
++                  evento. *
++                </span>
++                <span className="mt-1 block text-xs text-muted-foreground">
++                  Religião é um dado sensível. Ele aparece em contagens por religião, instituição e
++                  faixa etária e só é visto por quem a igreja autoriza a acompanhar os dados do
++                  evento.
++                </span>
++              </span>
++            </label>
+           </div>
+         )}
+ 
+@@ -369,7 +405,7 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
+           <p className="text-sm text-muted-foreground">
+             Total: <strong className="text-lg text-foreground">{payRequired ? moneyBR(total) : "Gratuito"}</strong>
+           </p>
+-          <Button type="submit" size="lg" disabled={register.isPending || !lotId || (event.require_image_consent && !imageConsent) || (!isMember && (!institution.trim() || !religion)) || (!profile.data.birth_date && !birthDate)}>Inscrever-se</Button>
++          <Button type="submit" size="lg" disabled={register.isPending || !lotId || (event.require_image_consent && !imageConsent) || (!isMember && (!institution.trim() || !religion || !religionConsent)) || (!profile.data.birth_date && !birthDate)}>Inscrever-se</Button>
+         </div>
+       </form>
+     </Box>
+diff --git a/src/components/site/SiteLayout.tsx b/src/components/site/SiteLayout.tsx
+index df5d2c0..6f18132 100644
+--- a/src/components/site/SiteLayout.tsx
++++ b/src/components/site/SiteLayout.tsx
+@@ -84,6 +84,13 @@ export function SiteLayout({ children }: { children: ReactNode }) {
+             </div>
+           </div>
+         </div>
++        <div className="border-t border-ink-foreground/15">
++          <div className="mx-auto max-w-7xl px-5 py-4 text-xs opacity-70 lg:px-10">
++            <Link to="/privacidade" className="hover:underline">
++              Política de Privacidade
++            </Link>
++          </div>
++        </div>
+       </footer>
+     </div>
+   );
+diff --git a/src/lib/privacy.ts b/src/lib/privacy.ts
+new file mode 100644
+index 0000000..2b23885
+--- /dev/null
++++ b/src/lib/privacy.ts
+@@ -0,0 +1,36 @@
++import { supabase } from "@/integrations/supabase/client";
++
++/** Versão do texto da Política de Privacidade. Mude quando o texto mudar de forma relevante. */
++export const PRIVACY_VERSION = "2026-11-07";
++export const PRIVACY_UPDATED_LABEL = "7 de novembro de 2026";
++
++/** Dados guardados no cadastro da conta como prova do consentimento (LGPD, art. 8º, §2º). */
++export function privacyConsentMetadata(now: Date = new Date()) {
++  return { privacy_accepted_at: now.toISOString(), privacy_version: PRIVACY_VERSION };
++}
++
++/** Consentimento específico e destacado para dado sensível (religião), exigido pela LGPD, art. 11, I. */
++export async function recordSensitiveConsent(): Promise<void> {
++  try {
++    await supabase.auth.updateUser({
++      data: {
++        sensitive_consent_at: new Date().toISOString(),
++        sensitive_consent_version: PRIVACY_VERSION,
++      },
++    });
++  } catch {
++    // sem efeito: o aceite já foi exigido na tela
++  }
++}
++
++/**
++ * Anota o consentimento na conta que já está logada (ex.: ao completar os dados de visitante em um evento).
++ * Nunca lança erro: falhar em anotar não pode impedir a inscrição da pessoa.
++ */
++export async function recordPrivacyConsent(): Promise<void> {
++  try {
++    await supabase.auth.updateUser({ data: privacyConsentMetadata() });
++  } catch {
++    // sem efeito: o aceite já foi exigido na tela
++  }
++}
+diff --git a/src/routeTree.gen.ts b/src/routeTree.gen.ts
+index 62f98ec..50fd5e4 100644
+--- a/src/routeTree.gen.ts
++++ b/src/routeTree.gen.ts
+@@ -16,6 +16,7 @@ import { Route as ContatoRouteImport } from './routes/contato'
+ import { Route as ContribuicaoRouteImport } from './routes/contribuicao'
+ import { Route as CultosRouteImport } from './routes/cultos'
+ import { Route as OracaoRouteImport } from './routes/oracao'
++import { Route as PrivacidadeRouteImport } from './routes/privacidade'
+ import { Route as QuemSomosRouteImport } from './routes/quem-somos'
+ import { Route as RedefinirSenhaRouteImport } from './routes/redefinir-senha'
+ import { Route as AuthenticatedPainelRouteImport } from './routes/_authenticated/painel'
+@@ -74,6 +75,11 @@ const OracaoRoute = OracaoRouteImport.update({
+   path: '/oracao',
+   getParentRoute: () => rootRouteImport,
+ } as any)
++const PrivacidadeRoute = PrivacidadeRouteImport.update({
++  id: '/privacidade',
++  path: '/privacidade',
++  getParentRoute: () => rootRouteImport,
++} as any)
+ const QuemSomosRoute = QuemSomosRouteImport.update({
+   id: '/quem-somos',
+   path: '/quem-somos',
+@@ -213,6 +219,7 @@ export interface FileRoutesByFullPath {
+   '/contribuicao': typeof ContribuicaoRoute
+   '/cultos': typeof CultosRoute
+   '/oracao': typeof OracaoRoute
++  '/privacidade': typeof PrivacidadeRoute
+   '/quem-somos': typeof QuemSomosRoute
+   '/redefinir-senha': typeof RedefinirSenhaRoute
+   '/painel': typeof AuthenticatedPainelRouteWithChildren
+@@ -244,6 +251,7 @@ export interface FileRoutesByTo {
+   '/contribuicao': typeof ContribuicaoRoute
+   '/cultos': typeof CultosRoute
+   '/oracao': typeof OracaoRoute
++  '/privacidade': typeof PrivacidadeRoute
+   '/quem-somos': typeof QuemSomosRoute
+   '/redefinir-senha': typeof RedefinirSenhaRoute
+   '/convite/$code': typeof ConviteCodeRoute
+@@ -276,6 +284,7 @@ export interface FileRoutesById {
+   '/contribuicao': typeof ContribuicaoRoute
+   '/cultos': typeof CultosRoute
+   '/oracao': typeof OracaoRoute
++  '/privacidade': typeof PrivacidadeRoute
+   '/quem-somos': typeof QuemSomosRoute
+   '/redefinir-senha': typeof RedefinirSenhaRoute
+   '/_authenticated/painel': typeof AuthenticatedPainelRouteWithChildren
+@@ -309,6 +318,7 @@ export interface FileRouteTypes {
+     | '/contribuicao'
+     | '/cultos'
+     | '/oracao'
++    | '/privacidade'
+     | '/quem-somos'
+     | '/redefinir-senha'
+     | '/painel'
+@@ -340,6 +350,7 @@ export interface FileRouteTypes {
+     | '/contribuicao'
+     | '/cultos'
+     | '/oracao'
++    | '/privacidade'
+     | '/quem-somos'
+     | '/redefinir-senha'
+     | '/convite/$code'
+@@ -371,6 +382,7 @@ export interface FileRouteTypes {
+     | '/contribuicao'
+     | '/cultos'
+     | '/oracao'
++    | '/privacidade'
+     | '/quem-somos'
+     | '/redefinir-senha'
+     | '/_authenticated/painel'
+@@ -404,6 +416,7 @@ export interface RootRouteChildren {
+   ContribuicaoRoute: typeof ContribuicaoRoute
+   CultosRoute: typeof CultosRoute
+   OracaoRoute: typeof OracaoRoute
++  PrivacidadeRoute: typeof PrivacidadeRoute
+   QuemSomosRoute: typeof QuemSomosRoute
+   RedefinirSenhaRoute: typeof RedefinirSenhaRoute
+   ConviteCodeRoute: typeof ConviteCodeRoute
+@@ -462,6 +475,13 @@ declare module '@tanstack/react-router' {
+       preLoaderRoute: typeof OracaoRouteImport
+       parentRoute: typeof rootRouteImport
+     }
++    '/privacidade': {
++      id: '/privacidade'
++      path: '/privacidade'
++      fullPath: '/privacidade'
++      preLoaderRoute: typeof PrivacidadeRouteImport
++      parentRoute: typeof rootRouteImport
++    }
+     '/quem-somos': {
+       id: '/quem-somos'
+       path: '/quem-somos'
+@@ -689,6 +709,7 @@ const rootRouteChildren: RootRouteChildren = {
+   ContribuicaoRoute: ContribuicaoRoute,
+   CultosRoute: CultosRoute,
+   OracaoRoute: OracaoRoute,
++  PrivacidadeRoute: PrivacidadeRoute,
+   QuemSomosRoute: QuemSomosRoute,
+   RedefinirSenhaRoute: RedefinirSenhaRoute,
+   ConviteCodeRoute: ConviteCodeRoute,
+diff --git a/src/routes/_authenticated/painel.meu-cadastro.tsx b/src/routes/_authenticated/painel.meu-cadastro.tsx
+index abbaafa..b444d4b 100644
+--- a/src/routes/_authenticated/painel.meu-cadastro.tsx
++++ b/src/routes/_authenticated/painel.meu-cadastro.tsx
+@@ -77,6 +77,14 @@ function MyProfile() {
+   return (
+     <div className="max-w-3xl">
+       <h1 className="text-3xl text-foreground">Meu cadastro</h1>
++      <p className="mt-2 text-sm text-muted-foreground">
++        Seus dados, como CPF e RG, são usados só para o cadastro da comunidade e ficam visíveis
++        apenas para a liderança autorizada. Saiba mais na{" "}
++        <a href="/privacidade" target="_blank" rel="noreferrer" className="text-primary underline">
++          Política de Privacidade
++        </a>
++        .
++      </p>
+       {!row && (
+         <p className="mt-2 text-muted-foreground">
+           Preencha seus dados e envie. Se a igreja já tiver o seu cadastro, vamos mostrar para você vincular a sua conta
+diff --git a/src/routes/auth.tsx b/src/routes/auth.tsx
+index 5549b57..a9ebf6a 100644
+--- a/src/routes/auth.tsx
++++ b/src/routes/auth.tsx
+@@ -6,6 +6,8 @@ import { Button } from "@/components/ui/button";
+ import { Input } from "@/components/ui/input";
+ import { ResendConfirmation } from "@/components/auth/ResendConfirmation";
+ import { ForgotPasswordCard } from "@/components/auth/ForgotPasswordCard";
++import { PrivacyConsent } from "@/components/auth/PrivacyConsent";
++import { privacyConsentMetadata } from "@/lib/privacy";
+ import { recordSend } from "@/lib/resend-limit";
+ import { Label } from "@/components/ui/label";
+ 
+@@ -35,11 +37,18 @@ function AuthPage() {
+   const [password, setPassword] = useState("");
+   const [loading, setLoading] = useState(false);
+   const [pendingEmail, setPendingEmail] = useState<string | null>(null);
++  const [accepted, setAccepted] = useState(false);
+   const navigate = useNavigate();
+   const redirectTo = typeof window === "undefined" ? "" : window.location.origin + (next ?? "/painel");
+ 
+   async function submit(e: React.FormEvent) {
+     e.preventDefault();
++    if (mode === "up" && !accepted) {
++      toast.error(
++        "Para criar a conta, marque que você leu e concorda com a Política de Privacidade.",
++      );
++      return;
++    }
+     setLoading(true);
+     try {
+       if (mode === "in") {
+@@ -50,7 +59,7 @@ function AuthPage() {
+         const { data: signed, error } = await supabase.auth.signUp({
+           email,
+           password,
+-          options: { emailRedirectTo: window.location.origin + (next ?? "/painel"), data: { full_name: name } },
++          options: { emailRedirectTo: window.location.origin + (next ?? "/painel"), data: { full_name: name, ...privacyConsentMetadata() } },
+         });
+         if (error) throw error;
+         if (signed.session && next) {
+@@ -104,6 +113,7 @@ function AuthPage() {
+             <Label htmlFor="pw">Senha</Label>
+             <Input id="pw" type="password" minLength={6} required value={password} onChange={(e) => setPassword(e.target.value)} />
+           </div>
++          {mode === "up" && <PrivacyConsent checked={accepted} onCheckedChange={setAccepted} />}
+           {mode === "in" && (
+             <div className="-mt-1 text-right">
+               <button
+diff --git a/src/routes/privacidade.tsx b/src/routes/privacidade.tsx
+new file mode 100644
+index 0000000..ab94247
+--- /dev/null
++++ b/src/routes/privacidade.tsx
+@@ -0,0 +1,229 @@
++import { createFileRoute } from "@tanstack/react-router";
++import type { ReactNode } from "react";
++import { SiteLayout, PageHeader } from "@/components/site/SiteLayout";
++import { PageError } from "@/components/site/PageError";
++import { siteQuery, siteMeta, useSiteContent } from "@/lib/site-query";
++import { safeLink } from "@/lib/site-content";
++import { PRIVACY_UPDATED_LABEL } from "@/lib/privacy";
++
++export const Route = createFileRoute("/privacidade")({
++  loader: ({ context }) => context.queryClient.ensureQueryData(siteQuery),
++  head: ({ loaderData: c }) =>
++    siteMeta(
++      `Política de Privacidade — ${c?.name ?? "Comunidade Aava"}`,
++      "Como tratamos seus dados pessoais: o que coletamos, para quê, por quanto tempo e como exercer seus direitos.",
++    ),
++  errorComponent: PageError,
++  notFoundComponent: PageError,
++  component: PrivacyPolicy,
++});
++
++function Section({ title, children }: { title: string; children: ReactNode }) {
++  return (
++    <section className="space-y-3">
++      <h2 className="text-2xl text-foreground">{title}</h2>
++      <div className="space-y-3 leading-relaxed text-muted-foreground">{children}</div>
++    </section>
++  );
++}
++
++function Bullets({ items }: { items: ReactNode[] }) {
++  return (
++    <ul className="list-disc space-y-2 pl-5">
++      {items.map((item, i) => (
++        <li key={i}>{item}</li>
++      ))}
++    </ul>
++  );
++}
++
++function PrivacyPolicy() {
++  const c = useSiteContent();
++  const whatsapp = safeLink(c.whatsappUrl) ? c.whatsappUrl : "";
++
++  return (
++    <SiteLayout>
++      <PageHeader
++        eyebrow="Privacidade"
++        title="Política de Privacidade"
++        text="Explicamos, em linguagem simples, como cuidamos dos seus dados pessoais."
++      />
++      <article className="mx-auto max-w-3xl space-y-10 px-5 py-16 lg:px-10">
++        <p className="text-sm text-muted-foreground">Última atualização: {PRIVACY_UPDATED_LABEL}</p>
++
++        <Section title="Quem é responsável pelos seus dados">
++          <p>
++            A <strong className="text-foreground">{c.name}</strong> ({c.address}, {c.city}) é a
++            responsável pelos dados pessoais tratados neste site e na área de membros. Seguimos a
++            Lei Geral de Proteção de Dados (LGPD, Lei nº 13.709/2018).
++          </p>
++        </Section>
++
++        <Section title="Quais dados coletamos e para quê">
++          <Bullets
++            items={[
++              <>
++                <strong className="text-foreground">Sua conta:</strong> nome, e-mail e senha. A
++                senha é guardada de forma protegida e nós não conseguimos lê-la. Serve para você
++                entrar na área de membros e se inscrever em eventos.
++              </>,
++              <>
++                <strong className="text-foreground">Cadastro de membro:</strong> nome, telefone,
++                e-mail, CPF, RG, data de nascimento, endereço, estado civil, dados de batismo e de
++                filiação, foto e anotações da liderança. Serve para manter o cadastro da comunidade,
++                entrar em contato e acompanhar a vida da igreja.
++              </>,
++              <>
++                <strong className="text-foreground">Inscrição em eventos:</strong> nome, CPF,
++                telefone, data de nascimento e, quando o evento pedir, autorização de uso de imagem
++                e comprovante de pagamento. Visitantes também informam a instituição que frequentam
++                e a religião. Serve para controlar vagas, confirmar pagamentos, fazer a entrada com
++                QR code e conhecer o perfil do público (por exemplo, quantos participantes por
++                religião, instituição e faixa etária).
++              </>,
++              <>
++                <strong className="text-foreground">Contribuições (dízimos e ofertas):</strong>{" "}
++                valor, data, forma de pagamento e, quando houver, a pessoa que contribuiu. Serve
++                para o controle e a prestação de contas financeiras.
++              </>,
++              <>
++                <strong className="text-foreground">Pedidos de oração:</strong> assunto e mensagem,
++                ligados à sua conta. Servem para que a equipe autorizada ore e acompanhe o pedido.
++              </>,
++              <>
++                <strong className="text-foreground">Escalas de voluntários:</strong> sua
++                participação nas escalas dos departamentos.
++              </>,
++              <>
++                <strong className="text-foreground">Avisos no celular:</strong> um identificador do
++                seu navegador ou aparelho, somente se você ativar as notificações.
++              </>,
++              <>
++                <strong className="text-foreground">Registro de atividades:</strong> o nome de quem
++                fez alterações importantes no painel, com data e hora. Ele não guarda o conteúdo dos
++                campos alterados. Serve para segurança e prestação de contas.
++              </>,
++            ]}
++          />
++        </Section>
++
++        <Section title="Dados sensíveis">
++          <p>
++            Religião e a participação em uma igreja são dados pessoais sensíveis pela LGPD. Isso
++            vale, por exemplo, para o seu cadastro como membro da {c.name} e para a religião
++            informada por visitantes em inscrições de eventos. Por isso esses dados só são tratados
++            com o seu consentimento e ficam disponíveis apenas para as pessoas que a igreja
++            autoriza. Você pode retirar o consentimento quando quiser (veja “Seus direitos”).
++          </p>
++        </Section>
++
++        <Section title="Com quem compartilhamos">
++          <Bullets
++            items={[
++              "Dentro da igreja, somente com pessoas autorizadas (liderança, administração, tesouraria e líderes de departamento). Cada função enxerga apenas o que precisa para o seu trabalho.",
++              "Não vendemos seus dados nem os cedemos a terceiros para publicidade.",
++              "Com empresas de tecnologia que fazem o sistema funcionar (hospedagem, banco de dados, autenticação e envio de e-mails e notificações). Elas tratam os dados em nosso nome e podem usar servidores fora do Brasil.",
++              "Com serviços incorporados ao site: fontes do Google (todas as páginas), mapa do Google (páginas Início e Contato) e vídeo do Instagram (página Início, quando configurado). Ao carregar esses itens, eles podem receber seu endereço de IP e dados do seu navegador, conforme as próprias políticas deles.",
++              "Com autoridades, quando a lei exigir.",
++            ]}
++          />
++        </Section>
++
++        <Section title="Cookies e armazenamento no navegador">
++          <p>
++            Usamos apenas o armazenamento do navegador que é necessário para manter você conectado e
++            lembrar de preferências do aplicativo. Não usamos cookies de publicidade nem ferramentas
++            de análise de audiência.
++          </p>
++        </Section>
++
++        <Section title="Por quanto tempo guardamos">
++          <p>
++            Guardamos seus dados enquanto você mantiver vínculo com a comunidade ou enquanto forem
++            necessários para as finalidades acima. Quando um cadastro ou uma conta é excluído, os
++            dados pessoais são apagados do sistema de forma definitiva. Alguns registros, como os
++            financeiros, podem ser mantidos pelo prazo que a lei exigir. O registro de atividades é
++            apagado automaticamente depois de 12 meses.
++          </p>
++        </Section>
++
++        <Section title="Seus direitos">
++          <p>Você pode, a qualquer momento, pedir à igreja para:</p>
++          <Bullets
++            items={[
++              "confirmar se tratamos seus dados e acessá-los;",
++              "corrigir dados incompletos ou errados (você mesmo pode editar o seu cadastro na área de membros);",
++              "pedir a anonimização, o bloqueio ou a eliminação de dados desnecessários ou tratados sem consentimento;",
++              "receber seus dados em formato que possa levar a outro serviço (portabilidade);",
++              "saber com quem compartilhamos seus dados;",
++              "excluir os dados tratados com o seu consentimento e retirar esse consentimento, sabendo que algumas funções (como entrar na área de membros) deixam de estar disponíveis.",
++            ]}
++          />
++          <p>Responderemos o mais rápido possível, em até 15 dias.</p>
++        </Section>
++
++        <Section title="Crianças e adolescentes">
++          <p>
++            O cadastro e a inscrição de menores de 18 anos devem ser feitos ou autorizados por pai,
++            mãe ou responsável legal, sempre no melhor interesse da criança ou do adolescente.
++          </p>
++        </Section>
++
++        <Section title="Segurança">
++          <p>
++            Protegemos os dados com acesso por login e senha, permissões diferentes para cada
++            função, conexão protegida (HTTPS) e registro das alterações importantes. Nenhum sistema
++            é totalmente imune a falhas; se houver um incidente que possa trazer risco a você, vamos
++            avisá-lo e comunicar a Autoridade Nacional de Proteção de Dados, como a lei determina.
++          </p>
++        </Section>
++
++        <Section title="Mudanças nesta política">
++          <p>
++            Podemos atualizar este texto. Sempre que houver mudança relevante, a data no início
++            desta página será alterada e, se necessário, pediremos um novo consentimento.
++          </p>
++        </Section>
++
++        <Section title="Fale com a gente">
++          <p>
++            Para exercer seus direitos ou tirar dúvidas sobre privacidade, fale com a equipe da{" "}
++            {c.name}:
++          </p>
++          <Bullets
++            items={[
++              ...(c.email
++                ? [
++                    <a key="mail" className="text-primary underline" href={`mailto:${c.email}`}>
++                      {c.email}
++                    </a>,
++                  ]
++                : []),
++              ...(c.phone ? [<span key="tel">{c.phone}</span>] : []),
++              ...(whatsapp
++                ? [
++                    <a
++                      key="wa"
++                      className="text-primary underline"
++                      href={whatsapp}
++                      target="_blank"
++                      rel="noreferrer"
++                    >
++                      WhatsApp
++                    </a>,
++                  ]
++                : []),
++              <span key="pg">
++                Pela página{" "}
++                <a className="text-primary underline" href="/contato">
++                  Contato
++                </a>
++                , ou pessoalmente em {c.address}, {c.city}.
++              </span>,
++            ]}
++          />
++        </Section>
++      </article>
++    </SiteLayout>
++  );
++}
+diff --git a/src/test/event-registration-consent.test.tsx b/src/test/event-registration-consent.test.tsx
+new file mode 100644
+index 0000000..e488044
+--- /dev/null
++++ b/src/test/event-registration-consent.test.tsx
+@@ -0,0 +1,217 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
++import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
++
++const h = vi.hoisted(() => ({
++  toastError: vi.fn(),
++  toastSuccess: vi.fn(),
++  rpc: vi.fn(),
++  updateUser: vi.fn(),
++  profile: null as null | Record<string, unknown>,
++}));
++
++vi.mock("@tanstack/react-router", () => ({
++  Link: ({ children, to, ...rest }: { children: React.ReactNode; to: string }) => (
++    <a href={to} {...rest}>
++      {children}
++    </a>
++  ),
++}));
++vi.mock("sonner", () => ({ toast: { error: h.toastError, success: h.toastSuccess } }));
++vi.mock("@/hooks/use-access", () => ({
++  useAccess: () => ({ data: { uid: "u1" }, isLoading: false }),
++}));
++vi.mock("@/integrations/supabase/client", () => ({
++  supabase: {
++    rpc: h.rpc,
++    auth: {
++      updateUser: h.updateUser,
++      getUser: () => Promise.resolve({ data: { user: { user_metadata: {} } } }),
++    },
++    from: (table: string) => {
++      if (table === "members") {
++        const chain = {
++          select: () => chain,
++          eq: () => chain,
++          maybeSingle: () => Promise.resolve({ data: h.profile }),
++        };
++        return chain;
++      }
++      const chain = {
++        select: () => chain,
++        eq: () => chain,
++        neq: () => Promise.resolve({ data: [] }),
++      };
++      return chain;
++    },
++  },
++}));
++
++import { PRIVACY_VERSION } from "@/lib/privacy";
++import { RELIGIONS } from "@/lib/event-data";
++import { EventRegistration } from "@/components/events/EventRegistration";
++import type { PublicEventDetail } from "@/lib/events";
++
++// O jsdom não tem estes recursos dos navegadores; o checkbox e o select do Radix precisam deles.
++vi.stubGlobal(
++  "ResizeObserver",
++  class {
++    observe() {}
++    unobserve() {}
++    disconnect() {}
++  },
++);
++Element.prototype.hasPointerCapture = () => false;
++Element.prototype.setPointerCapture = () => {};
++Element.prototype.releasePointerCapture = () => {};
++Element.prototype.scrollIntoView = () => {};
++
++const VALID_CPF = "529.982.247-25";
++
++const detail: PublicEventDetail = {
++  event: {
++    id: "ev1",
++    slug: "retiro",
++    title: "Retiro",
++    description: null,
++    location: null,
++    starts_at: "2099-01-01T10:00:00Z",
++    ends_at: null,
++    registration_opens_at: null,
++    registration_closes_at: null,
++    audience: "public",
++    payment_enabled: false,
++    accepts_card: false,
++    allow_installments: false,
++    max_installments: 1,
++    limit_per_person: false,
++    max_per_person: null,
++    require_image_consent: false,
++  },
++  lots: [
++    {
++      id: "lot1",
++      name: "Geral",
++      price: 0,
++      capacity: null,
++      spots_left: null,
++      public_access: true,
++      opens_at: null,
++      closes_at: null,
++    },
++  ],
++};
++
++function renderIt() {
++  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
++  return render(
++    <QueryClientProvider client={qc}>
++      <EventRegistration detail={detail} />
++    </QueryClientProvider>,
++  );
++}
++
++beforeEach(() => {
++  vi.clearAllMocks();
++  h.profile = null;
++  h.rpc.mockResolvedValue({ data: null, error: null });
++  h.updateUser.mockResolvedValue({ data: {}, error: null });
++});
++afterEach(cleanup);
++
++describe("inscrição em evento: dados do visitante", () => {
++  async function fillVisitor() {
++    const form = (await screen.findByRole("button", { name: "Continuar" })).closest("form")!;
++    const inputs = form.querySelectorAll("input:not([type=checkbox])");
++    const [name, cpf, phone, birth] = Array.from(inputs) as HTMLInputElement[];
++    fireEvent.change(name!, { target: { value: "Maria Souza" } });
++    fireEvent.change(cpf!, { target: { value: VALID_CPF } });
++    fireEvent.change(phone!, { target: { value: "12999990000" } });
++    fireEvent.change(birth!, { target: { value: "1990-05-10" } });
++    return form;
++  }
++
++  it("sem aceitar a Política de Privacidade, os dados NÃO são enviados", async () => {
++    renderIt();
++    const form = await fillVisitor();
++    fireEvent.submit(form);
++    expect(h.toastError).toHaveBeenCalledWith(expect.stringMatching(/Política de Privacidade/));
++    expect(h.rpc).not.toHaveBeenCalled();
++  });
++
++  it("aceitando, salva os dados e anota o consentimento na conta", async () => {
++    renderIt();
++    const form = await fillVisitor();
++    fireEvent.click(within(form).getByRole("checkbox"));
++    fireEvent.submit(form);
++    await waitFor(() =>
++      expect(h.rpc).toHaveBeenCalledWith(
++        "ensure_visitor_profile",
++        expect.objectContaining({ _cpf: VALID_CPF }),
++      ),
++    );
++    await waitFor(() =>
++      expect(h.updateUser).toHaveBeenCalledWith({
++        data: expect.objectContaining({ privacy_version: PRIVACY_VERSION }),
++      }),
++    );
++  });
++});
++
++describe("inscrição em evento: religião é dado sensível", () => {
++  const visitorProfile = {
++    id: "m1",
++    full_name: "Maria",
++    cpf: "52998224725",
++    phone: "1",
++    birth_date: "1990-05-10",
++    status: "visitante",
++    approval_status: "aprovado",
++  };
++
++  async function fillRegistration() {
++    const institution = await screen.findByPlaceholderText(/Ex\.: igreja/);
++    fireEvent.change(institution, { target: { value: "Escola Municipal" } });
++    const trigger = screen.getByRole("combobox");
++    fireEvent.keyDown(trigger, { key: "Enter" });
++    const option = await screen.findByRole("option", { name: RELIGIONS[0]!.label });
++    fireEvent.keyDown(option, { key: "Enter" });
++    await waitFor(() => expect(screen.queryByRole("option")).toBeNull());
++    return screen.getByRole("button", { name: "Inscrever-se" }) as HTMLButtonElement;
++  }
++
++  it("visitante: o botão só libera depois de autorizar o uso da religião", async () => {
++    h.profile = visitorProfile;
++    renderIt();
++    const submit = await fillRegistration();
++    expect(submit.disabled).toBe(true);
++    fireEvent.click(screen.getByRole("checkbox", { name: /Autorizo o uso da minha religião/ }));
++    await waitFor(() => expect(submit.disabled).toBe(false));
++  });
++
++  it("ao se inscrever, anota o consentimento específico de dado sensível", async () => {
++    h.profile = visitorProfile;
++    renderIt();
++    const submit = await fillRegistration();
++    fireEvent.click(screen.getByRole("checkbox", { name: /Autorizo o uso da minha religião/ }));
++    await waitFor(() => expect(submit.disabled).toBe(false));
++    fireEvent.click(submit);
++    await waitFor(() =>
++      expect(h.updateUser).toHaveBeenCalledWith({
++        data: expect.objectContaining({ sensitive_consent_version: PRIVACY_VERSION }),
++      }),
++    );
++    expect(h.rpc).toHaveBeenCalledWith(
++      "register_for_event",
++      expect.objectContaining({ _religion: RELIGIONS[0]!.value }),
++    );
++  });
++
++  it("membro aprovado não vê a pergunta de religião nem o consentimento sensível", async () => {
++    h.profile = { ...visitorProfile, status: "ativo" };
++    renderIt();
++    await screen.findByRole("button", { name: "Inscrever-se" });
++    expect(screen.queryByRole("combobox")).toBeNull();
++    expect(screen.queryByText(/Autorizo o uso da minha religião/)).toBeNull();
++  });
++});
+diff --git a/src/test/privacy-consent.test.tsx b/src/test/privacy-consent.test.tsx
+new file mode 100644
+index 0000000..aa7014c
+--- /dev/null
++++ b/src/test/privacy-consent.test.tsx
+@@ -0,0 +1,199 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
++
++const h = vi.hoisted(() => ({
++  toastError: vi.fn(),
++  toastSuccess: vi.fn(),
++  signUp: vi.fn(),
++  updateUser: vi.fn(),
++  navigate: vi.fn(),
++  site: {
++    name: "Comunidade Teste",
++    address: "Rua das Flores, 10",
++    city: "Jacareí",
++    email: "contato@teste.org",
++    phone: "(12) 99999-0000",
++    whatsappUrl: "https://wa.me/5512999990000",
++  } as {
++    name: string;
++    address: string;
++    city: string;
++    email: string;
++    phone: string;
++    whatsappUrl: string;
++  },
++}));
++
++vi.mock("@tanstack/react-router", () => ({
++  createFileRoute: () => (options: unknown) => ({ options, useSearch: () => ({}) }),
++  Link: ({ children, to, ...rest }: { children: React.ReactNode; to: string }) => (
++    <a href={to} {...rest}>
++      {children}
++    </a>
++  ),
++  useNavigate: () => h.navigate,
++}));
++vi.mock("sonner", () => ({ toast: { error: h.toastError, success: h.toastSuccess } }));
++vi.mock("@/components/auth/ResendConfirmation", () => ({ ResendConfirmation: () => null }));
++vi.mock("@/lib/resend-limit", () => ({ recordSend: vi.fn() }));
++vi.mock("@/components/site/SiteLayout", () => ({
++  SiteLayout: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
++  PageHeader: ({ title }: { title: string }) => <h1>{title}</h1>,
++}));
++vi.mock("@/components/site/PageError", () => ({ PageError: () => null }));
++vi.mock("@/lib/site-query", () => ({
++  siteQuery: {},
++  siteMeta: () => ({}),
++  useSiteContent: () => h.site,
++}));
++vi.mock("@/integrations/supabase/client", () => ({
++  supabase: {
++    auth: {
++      signUp: h.signUp,
++      signInWithPassword: vi.fn(),
++      updateUser: h.updateUser,
++      resetPasswordForEmail: vi.fn(),
++    },
++  },
++}));
++
++import { PRIVACY_VERSION, recordPrivacyConsent, recordSensitiveConsent } from "@/lib/privacy";
++import { Route as AuthRoute } from "@/routes/auth";
++import { Route as PrivacyRoute } from "@/routes/privacidade";
++
++vi.stubGlobal(
++  "ResizeObserver",
++  class {
++    observe() {}
++    unobserve() {}
++    disconnect() {}
++  },
++);
++
++const AuthPage = (AuthRoute as unknown as { options: { component: React.ComponentType } }).options
++  .component;
++const PrivacyPage = (PrivacyRoute as unknown as { options: { component: React.ComponentType } })
++  .options.component;
++
++beforeEach(() => {
++  vi.clearAllMocks();
++  h.site.email = "contato@teste.org";
++  h.site.phone = "(12) 99999-0000";
++  h.site.whatsappUrl = "https://wa.me/5512999990000";
++  h.signUp.mockResolvedValue({ data: { session: null }, error: null });
++  h.updateUser.mockResolvedValue({ data: {}, error: null });
++});
++afterEach(cleanup);
++
++function openSignup() {
++  render(<AuthPage />);
++  fireEvent.click(screen.getByRole("button", { name: /Criar conta/ }));
++  fireEvent.change(screen.getByLabelText("Nome completo"), { target: { value: "Maria Souza" } });
++  fireEvent.change(screen.getByLabelText("E-mail"), { target: { value: "maria@exemplo.com" } });
++  fireEvent.change(screen.getByLabelText("Senha"), { target: { value: "senha123" } });
++}
++const submitSignup = () => fireEvent.submit(screen.getByLabelText("E-mail").closest("form")!);
++
++describe("aceite da Política de Privacidade ao criar conta", () => {
++  it("sem marcar o aceite, a conta NÃO é criada e a pessoa é avisada", () => {
++    openSignup();
++    submitSignup();
++    expect(h.signUp).not.toHaveBeenCalled();
++    expect(h.toastError).toHaveBeenCalledWith(expect.stringMatching(/Política de Privacidade/));
++  });
++
++  it("marcando o aceite, cria a conta e guarda data e versão do aceite", async () => {
++    openSignup();
++    fireEvent.click(screen.getByRole("checkbox"));
++    submitSignup();
++    await waitFor(() => expect(h.signUp).toHaveBeenCalledTimes(1));
++    const { options } = h.signUp.mock.calls[0]![0];
++    expect(options.data.full_name).toBe("Maria Souza");
++    expect(options.data.privacy_version).toBe(PRIVACY_VERSION);
++    expect(Number.isNaN(Date.parse(options.data.privacy_accepted_at))).toBe(false);
++  });
++
++  it("o aceite tem link para a política em nova aba", () => {
++    openSignup();
++    const link = screen.getByRole("link", { name: "Política de Privacidade" });
++    expect(link.getAttribute("href")).toBe("/privacidade");
++    expect(link.getAttribute("target")).toBe("_blank");
++  });
++
++  it("entrar numa conta existente não exige aceite", () => {
++    render(<AuthPage />);
++    expect(screen.queryByRole("checkbox")).toBeNull();
++  });
++});
++
++describe("registro do consentimento", () => {
++  it("grava o aceite geral e o aceite de dado sensível nos dados da conta", async () => {
++    await recordPrivacyConsent();
++    expect(h.updateUser).toHaveBeenLastCalledWith({
++      data: expect.objectContaining({
++        privacy_version: PRIVACY_VERSION,
++        privacy_accepted_at: expect.any(String),
++      }),
++    });
++    await recordSensitiveConsent();
++    expect(h.updateUser).toHaveBeenLastCalledWith({
++      data: expect.objectContaining({
++        sensitive_consent_version: PRIVACY_VERSION,
++        sensitive_consent_at: expect.any(String),
++      }),
++    });
++  });
++
++  it("se gravar falhar, não derruba a inscrição (nunca lança erro)", async () => {
++    h.updateUser.mockRejectedValue(new Error("rede"));
++    await expect(recordPrivacyConsent()).resolves.toBeUndefined();
++    await expect(recordSensitiveConsent()).resolves.toBeUndefined();
++  });
++});
++
++describe("página Política de Privacidade", () => {
++  it("traz as seções que a LGPD pede e usa o nome e o endereço da igreja cadastrados", () => {
++    render(<PrivacyPage />);
++    for (const title of [
++      "Quem é responsável pelos seus dados",
++      "Quais dados coletamos e para quê",
++      "Dados sensíveis",
++      "Com quem compartilhamos",
++      "Por quanto tempo guardamos",
++      "Seus direitos",
++      "Crianças e adolescentes",
++      "Fale com a gente",
++    ]) {
++      expect(screen.getByRole("heading", { name: title })).toBeTruthy();
++    }
++    expect(screen.getAllByText(/Comunidade Teste/).length).toBeGreaterThan(0);
++    // o endereço aparece em "Quem é responsável" e em "Fale com a gente"
++    expect(screen.getAllByText(/Rua das Flores, 10, Jacareí/)).toHaveLength(2);
++  });
++
++  it("descreve o que o sistema realmente coleta, incluindo CPF e religião de visitantes", () => {
++    render(<PrivacyPage />);
++    expect(screen.getByText(/CPF, RG, data de nascimento/)).toBeTruthy();
++    expect(screen.getByText(/instituição que frequentam e a\s+religião/)).toBeTruthy();
++    expect(screen.getByText(/apagado automaticamente depois de 12 meses/)).toBeTruthy();
++  });
++
++  it("mostra os canais de contato que a igreja preencheu", () => {
++    render(<PrivacyPage />);
++    expect(screen.getByRole("link", { name: "contato@teste.org" }).getAttribute("href")).toBe(
++      "mailto:contato@teste.org",
++    );
++    expect(screen.getByText("(12) 99999-0000")).toBeTruthy();
++    expect(screen.getByRole("link", { name: "WhatsApp" })).toBeTruthy();
++  });
++
++  it("não mostra canais em branco nem links inseguros; sempre oferece a página Contato", () => {
++    h.site.email = "";
++    h.site.phone = "";
++    h.site.whatsappUrl = "javascript:alert(1)";
++    render(<PrivacyPage />);
++    expect(screen.queryByRole("link", { name: "WhatsApp" })).toBeNull();
++    expect(screen.queryByText(/mailto:/)).toBeNull();
++    expect(screen.getByRole("link", { name: "Contato" }).getAttribute("href")).toBe("/contato");
++  });
++});
+-- 
+2.43.0
+
