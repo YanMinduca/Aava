@@ -17,6 +17,7 @@ import { Route as ContribuicaoRouteImport } from './routes/contribuicao'
 import { Route as CultosRouteImport } from './routes/cultos'
 import { Route as OracaoRouteImport } from './routes/oracao'
 import { Route as QuemSomosRouteImport } from './routes/quem-somos'
+import { Route as RedefinirSenhaRouteImport } from './routes/redefinir-senha'
 import { Route as AuthenticatedPainelRouteImport } from './routes/_authenticated/painel'
 import { Route as ConviteCodeRouteImport } from './routes/convite.$code'
 import { Route as EventosIndexRouteImport } from './routes/eventos.index'
@@ -75,6 +76,11 @@ const OracaoRoute = OracaoRouteImport.update({
 const QuemSomosRoute = QuemSomosRouteImport.update({
   id: '/quem-somos',
   path: '/quem-somos',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const RedefinirSenhaRoute = RedefinirSenhaRouteImport.update({
+  id: '/redefinir-senha',
+  path: '/redefinir-senha',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AuthenticatedPainelRoute = AuthenticatedPainelRouteImport.update({
@@ -201,6 +207,7 @@ export interface FileRoutesByFullPath {
   '/cultos': typeof CultosRoute
   '/oracao': typeof OracaoRoute
   '/quem-somos': typeof QuemSomosRoute
+  '/redefinir-senha': typeof RedefinirSenhaRoute
   '/painel': typeof AuthenticatedPainelRouteWithChildren
   '/convite/$code': typeof ConviteCodeRoute
   '/eventos/$slug': typeof EventosSlugRoute
@@ -230,6 +237,7 @@ export interface FileRoutesByTo {
   '/cultos': typeof CultosRoute
   '/oracao': typeof OracaoRoute
   '/quem-somos': typeof QuemSomosRoute
+  '/redefinir-senha': typeof RedefinirSenhaRoute
   '/convite/$code': typeof ConviteCodeRoute
   '/eventos/$slug': typeof EventosSlugRoute
   '/eventos': typeof EventosIndexRoute
@@ -260,6 +268,7 @@ export interface FileRoutesById {
   '/cultos': typeof CultosRoute
   '/oracao': typeof OracaoRoute
   '/quem-somos': typeof QuemSomosRoute
+  '/redefinir-senha': typeof RedefinirSenhaRoute
   '/_authenticated/painel': typeof AuthenticatedPainelRouteWithChildren
   '/convite/$code': typeof ConviteCodeRoute
   '/eventos/$slug': typeof EventosSlugRoute
@@ -291,6 +300,7 @@ export interface FileRouteTypes {
     | '/cultos'
     | '/oracao'
     | '/quem-somos'
+    | '/redefinir-senha'
     | '/painel'
     | '/convite/$code'
     | '/eventos/$slug'
@@ -320,6 +330,7 @@ export interface FileRouteTypes {
     | '/cultos'
     | '/oracao'
     | '/quem-somos'
+    | '/redefinir-senha'
     | '/convite/$code'
     | '/eventos/$slug'
     | '/eventos'
@@ -349,6 +360,7 @@ export interface FileRouteTypes {
     | '/cultos'
     | '/oracao'
     | '/quem-somos'
+    | '/redefinir-senha'
     | '/_authenticated/painel'
     | '/convite/$code'
     | '/eventos/$slug'
@@ -380,6 +392,7 @@ export interface RootRouteChildren {
   CultosRoute: typeof CultosRoute
   OracaoRoute: typeof OracaoRoute
   QuemSomosRoute: typeof QuemSomosRoute
+  RedefinirSenhaRoute: typeof RedefinirSenhaRoute
   ConviteCodeRoute: typeof ConviteCodeRoute
   EventosSlugRoute: typeof EventosSlugRoute
   EventosIndexRoute: typeof EventosIndexRoute
@@ -441,6 +454,13 @@ declare module '@tanstack/react-router' {
       path: '/quem-somos'
       fullPath: '/quem-somos'
       preLoaderRoute: typeof QuemSomosRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/redefinir-senha': {
+      id: '/redefinir-senha'
+      path: '/redefinir-senha'
+      fullPath: '/redefinir-senha'
+      preLoaderRoute: typeof RedefinirSenhaRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_authenticated/painel': {
@@ -648,6 +668,7 @@ const rootRouteChildren: RootRouteChildren = {
   CultosRoute: CultosRoute,
   OracaoRoute: OracaoRoute,
   QuemSomosRoute: QuemSomosRoute,
+  RedefinirSenhaRoute: RedefinirSenhaRoute,
   ConviteCodeRoute: ConviteCodeRoute,
   EventosSlugRoute: EventosSlugRoute,
   EventosIndexRoute: EventosIndexRoute,

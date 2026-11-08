@@ -5,6 +5,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ResendConfirmation } from "@/components/auth/ResendConfirmation";
+import { ForgotPasswordCard } from "@/components/auth/ForgotPasswordCard";
 import { recordSend } from "@/lib/resend-limit";
 import { Label } from "@/components/ui/label";
 
@@ -28,7 +29,7 @@ export const Route = createFileRoute("/auth")({
 
 function AuthPage() {
   const { next, mode: initialMode } = Route.useSearch();
-  const [mode, setMode] = useState<"in" | "up">(initialMode ?? "in");
+  const [mode, setMode] = useState<"in" | "up" | "forgot">(initialMode ?? "in");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -75,6 +76,12 @@ function AuthPage() {
     }
   }
 
+  if (mode === "forgot") {
+    return (
+      <ForgotPasswordCard email={email} onEmailChange={setEmail} onBack={() => setMode("in")} />
+    );
+  }
+
   return (
     <div className="flex min-h-screen items-center justify-center bg-primary-soft px-4">
       <div className="w-full max-w-sm rounded-3xl border bg-card p-8 shadow-soft">
@@ -97,6 +104,17 @@ function AuthPage() {
             <Label htmlFor="pw">Senha</Label>
             <Input id="pw" type="password" minLength={6} required value={password} onChange={(e) => setPassword(e.target.value)} />
           </div>
+          {mode === "in" && (
+            <div className="-mt-1 text-right">
+              <button
+                type="button"
+                className="text-sm text-primary hover:underline"
+                onClick={() => setMode("forgot")}
+              >
+                Esqueci minha senha
+              </button>
+            </div>
+          )}
           <Button type="submit" className="w-full" disabled={loading}>
             {loading ? "Aguarde..." : mode === "in" ? "Entrar" : "Criar conta"}
           </Button>
