@@ -23,6 +23,7 @@ import { Route as ConviteCodeRouteImport } from './routes/convite.$code'
 import { Route as EventosIndexRouteImport } from './routes/eventos.index'
 import { Route as EventosSlugRouteImport } from './routes/eventos.$slug'
 import { Route as AuthenticatedPainelIndexRouteImport } from './routes/_authenticated/painel.index'
+import { Route as AuthenticatedPainelAtividadesRouteImport } from './routes/_authenticated/painel.atividades'
 import { Route as AuthenticatedPainelDepartamentosRouteImport } from './routes/_authenticated/painel.departamentos'
 import { Route as AuthenticatedPainelEscalasRouteImport } from './routes/_authenticated/painel.escalas'
 import { Route as AuthenticatedPainelEventosRouteImport } from './routes/_authenticated/painel.eventos'
@@ -107,6 +108,12 @@ const AuthenticatedPainelIndexRoute =
   AuthenticatedPainelIndexRouteImport.update({
     id: '/',
     path: '/',
+    getParentRoute: () => AuthenticatedPainelRoute,
+  } as any)
+const AuthenticatedPainelAtividadesRoute =
+  AuthenticatedPainelAtividadesRouteImport.update({
+    id: '/atividades',
+    path: '/atividades',
     getParentRoute: () => AuthenticatedPainelRoute,
   } as any)
 const AuthenticatedPainelDepartamentosRoute =
@@ -212,6 +219,7 @@ export interface FileRoutesByFullPath {
   '/convite/$code': typeof ConviteCodeRoute
   '/eventos/$slug': typeof EventosSlugRoute
   '/eventos/': typeof EventosIndexRoute
+  '/painel/atividades': typeof AuthenticatedPainelAtividadesRoute
   '/painel/departamentos': typeof AuthenticatedPainelDepartamentosRoute
   '/painel/escalas': typeof AuthenticatedPainelEscalasRoute
   '/painel/eventos': typeof AuthenticatedPainelEventosRoute
@@ -241,6 +249,7 @@ export interface FileRoutesByTo {
   '/convite/$code': typeof ConviteCodeRoute
   '/eventos/$slug': typeof EventosSlugRoute
   '/eventos': typeof EventosIndexRoute
+  '/painel/atividades': typeof AuthenticatedPainelAtividadesRoute
   '/painel/departamentos': typeof AuthenticatedPainelDepartamentosRoute
   '/painel/escalas': typeof AuthenticatedPainelEscalasRoute
   '/painel/eventos': typeof AuthenticatedPainelEventosRoute
@@ -273,6 +282,7 @@ export interface FileRoutesById {
   '/convite/$code': typeof ConviteCodeRoute
   '/eventos/$slug': typeof EventosSlugRoute
   '/eventos/': typeof EventosIndexRoute
+  '/_authenticated/painel/atividades': typeof AuthenticatedPainelAtividadesRoute
   '/_authenticated/painel/departamentos': typeof AuthenticatedPainelDepartamentosRoute
   '/_authenticated/painel/escalas': typeof AuthenticatedPainelEscalasRoute
   '/_authenticated/painel/eventos': typeof AuthenticatedPainelEventosRoute
@@ -305,6 +315,7 @@ export interface FileRouteTypes {
     | '/convite/$code'
     | '/eventos/$slug'
     | '/eventos/'
+    | '/painel/atividades'
     | '/painel/departamentos'
     | '/painel/escalas'
     | '/painel/eventos'
@@ -334,6 +345,7 @@ export interface FileRouteTypes {
     | '/convite/$code'
     | '/eventos/$slug'
     | '/eventos'
+    | '/painel/atividades'
     | '/painel/departamentos'
     | '/painel/escalas'
     | '/painel/eventos'
@@ -365,6 +377,7 @@ export interface FileRouteTypes {
     | '/convite/$code'
     | '/eventos/$slug'
     | '/eventos/'
+    | '/_authenticated/painel/atividades'
     | '/_authenticated/painel/departamentos'
     | '/_authenticated/painel/escalas'
     | '/_authenticated/painel/eventos'
@@ -498,6 +511,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedPainelIndexRouteImport
       parentRoute: typeof AuthenticatedPainelRoute
     }
+    '/_authenticated/painel/atividades': {
+      id: '/_authenticated/painel/atividades'
+      path: '/atividades'
+      fullPath: '/painel/atividades'
+      preLoaderRoute: typeof AuthenticatedPainelAtividadesRouteImport
+      parentRoute: typeof AuthenticatedPainelRoute
+    }
     '/_authenticated/painel/departamentos': {
       id: '/_authenticated/painel/departamentos'
       path: '/departamentos'
@@ -607,6 +627,7 @@ declare module '@tanstack/react-router' {
 }
 
 interface AuthenticatedPainelRouteChildren {
+  AuthenticatedPainelAtividadesRoute: typeof AuthenticatedPainelAtividadesRoute
   AuthenticatedPainelDepartamentosRoute: typeof AuthenticatedPainelDepartamentosRoute
   AuthenticatedPainelEscalasRoute: typeof AuthenticatedPainelEscalasRoute
   AuthenticatedPainelEventosRoute: typeof AuthenticatedPainelEventosRoute
@@ -626,6 +647,7 @@ interface AuthenticatedPainelRouteChildren {
 }
 
 const AuthenticatedPainelRouteChildren: AuthenticatedPainelRouteChildren = {
+  AuthenticatedPainelAtividadesRoute: AuthenticatedPainelAtividadesRoute,
   AuthenticatedPainelDepartamentosRoute: AuthenticatedPainelDepartamentosRoute,
   AuthenticatedPainelEscalasRoute: AuthenticatedPainelEscalasRoute,
   AuthenticatedPainelEventosRoute: AuthenticatedPainelEventosRoute,
