@@ -84,6 +84,13 @@ export function SiteLayout({ children }: { children: ReactNode }) {
             </div>
           </div>
         </div>
+        <div className="border-t border-ink-foreground/15">
+          <div className="mx-auto max-w-7xl px-5 py-4 text-xs opacity-70 lg:px-10">
+            <Link to="/privacidade" className="hover:underline">
+              Política de Privacidade
+            </Link>
+          </div>
+        </div>
       </footer>
     </div>
   );

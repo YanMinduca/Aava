@@ -16,12 +16,15 @@ import { Route as ContatoRouteImport } from './routes/contato'
 import { Route as ContribuicaoRouteImport } from './routes/contribuicao'
 import { Route as CultosRouteImport } from './routes/cultos'
 import { Route as OracaoRouteImport } from './routes/oracao'
+import { Route as PrivacidadeRouteImport } from './routes/privacidade'
 import { Route as QuemSomosRouteImport } from './routes/quem-somos'
+import { Route as RedefinirSenhaRouteImport } from './routes/redefinir-senha'
 import { Route as AuthenticatedPainelRouteImport } from './routes/_authenticated/painel'
 import { Route as ConviteCodeRouteImport } from './routes/convite.$code'
 import { Route as EventosIndexRouteImport } from './routes/eventos.index'
 import { Route as EventosSlugRouteImport } from './routes/eventos.$slug'
 import { Route as AuthenticatedPainelIndexRouteImport } from './routes/_authenticated/painel.index'
+import { Route as AuthenticatedPainelAtividadesRouteImport } from './routes/_authenticated/painel.atividades'
 import { Route as AuthenticatedPainelDepartamentosRouteImport } from './routes/_authenticated/painel.departamentos'
 import { Route as AuthenticatedPainelEscalasRouteImport } from './routes/_authenticated/painel.escalas'
 import { Route as AuthenticatedPainelEventosRouteImport } from './routes/_authenticated/painel.eventos'
@@ -72,9 +75,19 @@ const OracaoRoute = OracaoRouteImport.update({
   path: '/oracao',
   getParentRoute: () => rootRouteImport,
 } as any)
+const PrivacidadeRoute = PrivacidadeRouteImport.update({
+  id: '/privacidade',
+  path: '/privacidade',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const QuemSomosRoute = QuemSomosRouteImport.update({
   id: '/quem-somos',
   path: '/quem-somos',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const RedefinirSenhaRoute = RedefinirSenhaRouteImport.update({
+  id: '/redefinir-senha',
+  path: '/redefinir-senha',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AuthenticatedPainelRoute = AuthenticatedPainelRouteImport.update({
@@ -101,6 +114,12 @@ const AuthenticatedPainelIndexRoute =
   AuthenticatedPainelIndexRouteImport.update({
     id: '/',
     path: '/',
+    getParentRoute: () => AuthenticatedPainelRoute,
+  } as any)
+const AuthenticatedPainelAtividadesRoute =
+  AuthenticatedPainelAtividadesRouteImport.update({
+    id: '/atividades',
+    path: '/atividades',
     getParentRoute: () => AuthenticatedPainelRoute,
   } as any)
 const AuthenticatedPainelDepartamentosRoute =
@@ -200,11 +219,14 @@ export interface FileRoutesByFullPath {
   '/contribuicao': typeof ContribuicaoRoute
   '/cultos': typeof CultosRoute
   '/oracao': typeof OracaoRoute
+  '/privacidade': typeof PrivacidadeRoute
   '/quem-somos': typeof QuemSomosRoute
+  '/redefinir-senha': typeof RedefinirSenhaRoute
   '/painel': typeof AuthenticatedPainelRouteWithChildren
   '/convite/$code': typeof ConviteCodeRoute
   '/eventos/$slug': typeof EventosSlugRoute
   '/eventos/': typeof EventosIndexRoute
+  '/painel/atividades': typeof AuthenticatedPainelAtividadesRoute
   '/painel/departamentos': typeof AuthenticatedPainelDepartamentosRoute
   '/painel/escalas': typeof AuthenticatedPainelEscalasRoute
   '/painel/eventos': typeof AuthenticatedPainelEventosRoute
@@ -229,10 +251,13 @@ export interface FileRoutesByTo {
   '/contribuicao': typeof ContribuicaoRoute
   '/cultos': typeof CultosRoute
   '/oracao': typeof OracaoRoute
+  '/privacidade': typeof PrivacidadeRoute
   '/quem-somos': typeof QuemSomosRoute
+  '/redefinir-senha': typeof RedefinirSenhaRoute
   '/convite/$code': typeof ConviteCodeRoute
   '/eventos/$slug': typeof EventosSlugRoute
   '/eventos': typeof EventosIndexRoute
+  '/painel/atividades': typeof AuthenticatedPainelAtividadesRoute
   '/painel/departamentos': typeof AuthenticatedPainelDepartamentosRoute
   '/painel/escalas': typeof AuthenticatedPainelEscalasRoute
   '/painel/eventos': typeof AuthenticatedPainelEventosRoute
@@ -259,11 +284,14 @@ export interface FileRoutesById {
   '/contribuicao': typeof ContribuicaoRoute
   '/cultos': typeof CultosRoute
   '/oracao': typeof OracaoRoute
+  '/privacidade': typeof PrivacidadeRoute
   '/quem-somos': typeof QuemSomosRoute
+  '/redefinir-senha': typeof RedefinirSenhaRoute
   '/_authenticated/painel': typeof AuthenticatedPainelRouteWithChildren
   '/convite/$code': typeof ConviteCodeRoute
   '/eventos/$slug': typeof EventosSlugRoute
   '/eventos/': typeof EventosIndexRoute
+  '/_authenticated/painel/atividades': typeof AuthenticatedPainelAtividadesRoute
   '/_authenticated/painel/departamentos': typeof AuthenticatedPainelDepartamentosRoute
   '/_authenticated/painel/escalas': typeof AuthenticatedPainelEscalasRoute
   '/_authenticated/painel/eventos': typeof AuthenticatedPainelEventosRoute
@@ -290,11 +318,14 @@ export interface FileRouteTypes {
     | '/contribuicao'
     | '/cultos'
     | '/oracao'
+    | '/privacidade'
     | '/quem-somos'
+    | '/redefinir-senha'
     | '/painel'
     | '/convite/$code'
     | '/eventos/$slug'
     | '/eventos/'
+    | '/painel/atividades'
     | '/painel/departamentos'
     | '/painel/escalas'
     | '/painel/eventos'
@@ -319,10 +350,13 @@ export interface FileRouteTypes {
     | '/contribuicao'
     | '/cultos'
     | '/oracao'
+    | '/privacidade'
     | '/quem-somos'
+    | '/redefinir-senha'
     | '/convite/$code'
     | '/eventos/$slug'
     | '/eventos'
+    | '/painel/atividades'
     | '/painel/departamentos'
     | '/painel/escalas'
     | '/painel/eventos'
@@ -348,11 +382,14 @@ export interface FileRouteTypes {
     | '/contribuicao'
     | '/cultos'
     | '/oracao'
+    | '/privacidade'
     | '/quem-somos'
+    | '/redefinir-senha'
     | '/_authenticated/painel'
     | '/convite/$code'
     | '/eventos/$slug'
     | '/eventos/'
+    | '/_authenticated/painel/atividades'
     | '/_authenticated/painel/departamentos'
     | '/_authenticated/painel/escalas'
     | '/_authenticated/painel/eventos'
@@ -379,7 +416,9 @@ export interface RootRouteChildren {
   ContribuicaoRoute: typeof ContribuicaoRoute
   CultosRoute: typeof CultosRoute
   OracaoRoute: typeof OracaoRoute
+  PrivacidadeRoute: typeof PrivacidadeRoute
   QuemSomosRoute: typeof QuemSomosRoute
+  RedefinirSenhaRoute: typeof RedefinirSenhaRoute
   ConviteCodeRoute: typeof ConviteCodeRoute
   EventosSlugRoute: typeof EventosSlugRoute
   EventosIndexRoute: typeof EventosIndexRoute
@@ -436,11 +475,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof OracaoRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/privacidade': {
+      id: '/privacidade'
+      path: '/privacidade'
+      fullPath: '/privacidade'
+      preLoaderRoute: typeof PrivacidadeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/quem-somos': {
       id: '/quem-somos'
       path: '/quem-somos'
       fullPath: '/quem-somos'
       preLoaderRoute: typeof QuemSomosRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/redefinir-senha': {
+      id: '/redefinir-senha'
+      path: '/redefinir-senha'
+      fullPath: '/redefinir-senha'
+      preLoaderRoute: typeof RedefinirSenhaRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_authenticated/painel': {
@@ -476,6 +529,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/painel/'
       preLoaderRoute: typeof AuthenticatedPainelIndexRouteImport
+      parentRoute: typeof AuthenticatedPainelRoute
+    }
+    '/_authenticated/painel/atividades': {
+      id: '/_authenticated/painel/atividades'
+      path: '/atividades'
+      fullPath: '/painel/atividades'
+      preLoaderRoute: typeof AuthenticatedPainelAtividadesRouteImport
       parentRoute: typeof AuthenticatedPainelRoute
     }
     '/_authenticated/painel/departamentos': {
@@ -587,6 +647,7 @@ declare module '@tanstack/react-router' {
 }
 
 interface AuthenticatedPainelRouteChildren {
+  AuthenticatedPainelAtividadesRoute: typeof AuthenticatedPainelAtividadesRoute
   AuthenticatedPainelDepartamentosRoute: typeof AuthenticatedPainelDepartamentosRoute
   AuthenticatedPainelEscalasRoute: typeof AuthenticatedPainelEscalasRoute
   AuthenticatedPainelEventosRoute: typeof AuthenticatedPainelEventosRoute
@@ -606,6 +667,7 @@ interface AuthenticatedPainelRouteChildren {
 }
 
 const AuthenticatedPainelRouteChildren: AuthenticatedPainelRouteChildren = {
+  AuthenticatedPainelAtividadesRoute: AuthenticatedPainelAtividadesRoute,
   AuthenticatedPainelDepartamentosRoute: AuthenticatedPainelDepartamentosRoute,
   AuthenticatedPainelEscalasRoute: AuthenticatedPainelEscalasRoute,
   AuthenticatedPainelEventosRoute: AuthenticatedPainelEventosRoute,
@@ -647,7 +709,9 @@ const rootRouteChildren: RootRouteChildren = {
   ContribuicaoRoute: ContribuicaoRoute,
   CultosRoute: CultosRoute,
   OracaoRoute: OracaoRoute,
+  PrivacidadeRoute: PrivacidadeRoute,
   QuemSomosRoute: QuemSomosRoute,
+  RedefinirSenhaRoute: RedefinirSenhaRoute,
   ConviteCodeRoute: ConviteCodeRoute,
   EventosSlugRoute: EventosSlugRoute,
   EventosIndexRoute: EventosIndexRoute,

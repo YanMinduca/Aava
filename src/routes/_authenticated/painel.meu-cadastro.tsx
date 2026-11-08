@@ -77,6 +77,14 @@ function MyProfile() {
   return (
     <div className="max-w-3xl">
       <h1 className="text-3xl text-foreground">Meu cadastro</h1>
+      <p className="mt-2 text-sm text-muted-foreground">
+        Seus dados, como CPF e RG, são usados só para o cadastro da comunidade e ficam visíveis
+        apenas para a liderança autorizada. Saiba mais na{" "}
+        <a href="/privacidade" target="_blank" rel="noreferrer" className="text-primary underline">
+          Política de Privacidade
+        </a>
+        .
+      </p>
       {!row && (
         <p className="mt-2 text-muted-foreground">
           Preencha seus dados e envie. Se a igreja já tiver o seu cadastro, vamos mostrar para você vincular a sua conta

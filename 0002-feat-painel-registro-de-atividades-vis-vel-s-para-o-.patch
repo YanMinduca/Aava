@@ -1,0 +1,931 @@
+From 108a07dd390dda50d1d3800226dbec555acfa29a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sun, 8 Nov 2026 00:56:31 +0000
+Subject: [PATCH 2/3] =?UTF-8?q?feat(painel):=20registro=20de=20atividades?=
+ =?UTF-8?q?=20vis=C3=ADvel=20s=C3=B3=20para=20o=20CEO?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Migration activity_log: gatilhos em membros, financeiro, eventos, departamentos, cargos, site, funções, permissões e exclusão de conta
+- Não guarda conteúdo de campos (só os nomes dos que mudaram); entradas com mais de 12 meses são apagadas automaticamente
+- Leitura apenas pelo CEO (RLS + função activity_log_feed); ninguém escreve pelo front-end
+- Página /painel/atividades com busca, filtro por área, paginação e códigos traduzidos
+- Testes: 11 (tela) + verificação da migration em Postgres local
+---
+ src/routeTree.gen.ts                          |  22 ++
+ .../_authenticated/painel.atividades.tsx      | 327 ++++++++++++++++++
+ src/routes/_authenticated/painel.tsx          |   4 +-
+ src/test/activity-log-page.test.tsx           | 190 ++++++++++
+ .../20261107140000_activity_log.sql           | 236 +++++++++++++
+ 5 files changed, 778 insertions(+), 1 deletion(-)
+ create mode 100644 src/routes/_authenticated/painel.atividades.tsx
+ create mode 100644 src/test/activity-log-page.test.tsx
+ create mode 100644 supabase/migrations/20261107140000_activity_log.sql
+
+diff --git a/src/routeTree.gen.ts b/src/routeTree.gen.ts
+index 0a88868..62f98ec 100644
+--- a/src/routeTree.gen.ts
++++ b/src/routeTree.gen.ts
+@@ -23,6 +23,7 @@ import { Route as ConviteCodeRouteImport } from './routes/convite.$code'
+ import { Route as EventosIndexRouteImport } from './routes/eventos.index'
+ import { Route as EventosSlugRouteImport } from './routes/eventos.$slug'
+ import { Route as AuthenticatedPainelIndexRouteImport } from './routes/_authenticated/painel.index'
++import { Route as AuthenticatedPainelAtividadesRouteImport } from './routes/_authenticated/painel.atividades'
+ import { Route as AuthenticatedPainelDepartamentosRouteImport } from './routes/_authenticated/painel.departamentos'
+ import { Route as AuthenticatedPainelEscalasRouteImport } from './routes/_authenticated/painel.escalas'
+ import { Route as AuthenticatedPainelEventosRouteImport } from './routes/_authenticated/painel.eventos'
+@@ -109,6 +110,12 @@ const AuthenticatedPainelIndexRoute =
+     path: '/',
+     getParentRoute: () => AuthenticatedPainelRoute,
+   } as any)
++const AuthenticatedPainelAtividadesRoute =
++  AuthenticatedPainelAtividadesRouteImport.update({
++    id: '/atividades',
++    path: '/atividades',
++    getParentRoute: () => AuthenticatedPainelRoute,
++  } as any)
+ const AuthenticatedPainelDepartamentosRoute =
+   AuthenticatedPainelDepartamentosRouteImport.update({
+     id: '/departamentos',
+@@ -212,6 +219,7 @@ export interface FileRoutesByFullPath {
+   '/convite/$code': typeof ConviteCodeRoute
+   '/eventos/$slug': typeof EventosSlugRoute
+   '/eventos/': typeof EventosIndexRoute
++  '/painel/atividades': typeof AuthenticatedPainelAtividadesRoute
+   '/painel/departamentos': typeof AuthenticatedPainelDepartamentosRoute
+   '/painel/escalas': typeof AuthenticatedPainelEscalasRoute
+   '/painel/eventos': typeof AuthenticatedPainelEventosRoute
+@@ -241,6 +249,7 @@ export interface FileRoutesByTo {
+   '/convite/$code': typeof ConviteCodeRoute
+   '/eventos/$slug': typeof EventosSlugRoute
+   '/eventos': typeof EventosIndexRoute
++  '/painel/atividades': typeof AuthenticatedPainelAtividadesRoute
+   '/painel/departamentos': typeof AuthenticatedPainelDepartamentosRoute
+   '/painel/escalas': typeof AuthenticatedPainelEscalasRoute
+   '/painel/eventos': typeof AuthenticatedPainelEventosRoute
+@@ -273,6 +282,7 @@ export interface FileRoutesById {
+   '/convite/$code': typeof ConviteCodeRoute
+   '/eventos/$slug': typeof EventosSlugRoute
+   '/eventos/': typeof EventosIndexRoute
++  '/_authenticated/painel/atividades': typeof AuthenticatedPainelAtividadesRoute
+   '/_authenticated/painel/departamentos': typeof AuthenticatedPainelDepartamentosRoute
+   '/_authenticated/painel/escalas': typeof AuthenticatedPainelEscalasRoute
+   '/_authenticated/painel/eventos': typeof AuthenticatedPainelEventosRoute
+@@ -305,6 +315,7 @@ export interface FileRouteTypes {
+     | '/convite/$code'
+     | '/eventos/$slug'
+     | '/eventos/'
++    | '/painel/atividades'
+     | '/painel/departamentos'
+     | '/painel/escalas'
+     | '/painel/eventos'
+@@ -334,6 +345,7 @@ export interface FileRouteTypes {
+     | '/convite/$code'
+     | '/eventos/$slug'
+     | '/eventos'
++    | '/painel/atividades'
+     | '/painel/departamentos'
+     | '/painel/escalas'
+     | '/painel/eventos'
+@@ -365,6 +377,7 @@ export interface FileRouteTypes {
+     | '/convite/$code'
+     | '/eventos/$slug'
+     | '/eventos/'
++    | '/_authenticated/painel/atividades'
+     | '/_authenticated/painel/departamentos'
+     | '/_authenticated/painel/escalas'
+     | '/_authenticated/painel/eventos'
+@@ -498,6 +511,13 @@ declare module '@tanstack/react-router' {
+       preLoaderRoute: typeof AuthenticatedPainelIndexRouteImport
+       parentRoute: typeof AuthenticatedPainelRoute
+     }
++    '/_authenticated/painel/atividades': {
++      id: '/_authenticated/painel/atividades'
++      path: '/atividades'
++      fullPath: '/painel/atividades'
++      preLoaderRoute: typeof AuthenticatedPainelAtividadesRouteImport
++      parentRoute: typeof AuthenticatedPainelRoute
++    }
+     '/_authenticated/painel/departamentos': {
+       id: '/_authenticated/painel/departamentos'
+       path: '/departamentos'
+@@ -607,6 +627,7 @@ declare module '@tanstack/react-router' {
+ }
+ 
+ interface AuthenticatedPainelRouteChildren {
++  AuthenticatedPainelAtividadesRoute: typeof AuthenticatedPainelAtividadesRoute
+   AuthenticatedPainelDepartamentosRoute: typeof AuthenticatedPainelDepartamentosRoute
+   AuthenticatedPainelEscalasRoute: typeof AuthenticatedPainelEscalasRoute
+   AuthenticatedPainelEventosRoute: typeof AuthenticatedPainelEventosRoute
+@@ -626,6 +647,7 @@ interface AuthenticatedPainelRouteChildren {
+ }
+ 
+ const AuthenticatedPainelRouteChildren: AuthenticatedPainelRouteChildren = {
++  AuthenticatedPainelAtividadesRoute: AuthenticatedPainelAtividadesRoute,
+   AuthenticatedPainelDepartamentosRoute: AuthenticatedPainelDepartamentosRoute,
+   AuthenticatedPainelEscalasRoute: AuthenticatedPainelEscalasRoute,
+   AuthenticatedPainelEventosRoute: AuthenticatedPainelEventosRoute,
+diff --git a/src/routes/_authenticated/painel.atividades.tsx b/src/routes/_authenticated/painel.atividades.tsx
+new file mode 100644
+index 0000000..93cb8ed
+--- /dev/null
++++ b/src/routes/_authenticated/painel.atividades.tsx
+@@ -0,0 +1,327 @@
++import { createFileRoute } from "@tanstack/react-router";
++import { useCallback, useEffect, useMemo, useState } from "react";
++import { Loader2, Lock, Pencil, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
++import { supabase } from "@/integrations/supabase/client";
++import { useAccess } from "@/hooks/use-access";
++import { PERMISSION_GROUPS, ROLE_LABELS } from "@/lib/church";
++import { siteMeta } from "@/lib/site-query";
++import { Button } from "@/components/ui/button";
++import { Input } from "@/components/ui/input";
++
++export const Route = createFileRoute("/_authenticated/painel/atividades")({
++  head: () =>
++    siteMeta(
++      "Registro de atividades — Comunidade Aava",
++      "Quem fez o quê no painel da Comunidade Aava.",
++    ),
++  component: ActivityLogPage,
++});
++
++type Action = "create" | "update" | "delete";
++
++type LogRow = {
++  id: string;
++  created_at: string;
++  actor_id: string | null;
++  actor_name: string | null;
++  action: Action;
++  entity: string;
++  summary: string;
++  changed_fields: string[] | null;
++};
++
++type RpcResult = Promise<{ data: LogRow[] | null; error: { message: string } | null }>;
++
++const PAGE = 50;
++
++const ENTITY_FILTERS: { id: string | null; label: string }[] = [
++  { id: null, label: "Tudo" },
++  { id: "members", label: "Membros" },
++  { id: "financial", label: "Financeiro" },
++  { id: "access", label: "Acessos" },
++  { id: "events", label: "Eventos" },
++  { id: "departments", label: "Departamentos" },
++  { id: "site", label: "Site" },
++];
++
++const ACTION_UI: Record<Action, { label: string; Icon: typeof Plus; tone: string }> = {
++  create: {
++    label: "Criou",
++    Icon: Plus,
++    tone: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-200",
++  },
++  update: {
++    label: "Editou",
++    Icon: Pencil,
++    tone: "bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-200",
++  },
++  delete: {
++    label: "Excluiu",
++    Icon: Trash2,
++    tone: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200",
++  },
++};
++
++// Nomes dos campos como o CEO entende (o banco guarda só o nome do campo, nunca o valor).
++const FIELD_LABELS: Record<string, string> = {
++  full_name: "nome",
++  cpf: "CPF",
++  rg: "RG",
++  phone: "telefone",
++  email: "e-mail",
++  birth_date: "nascimento",
++  address: "endereço",
++  cep: "CEP",
++  city: "cidade",
++  marital_status: "estado civil",
++  baptized: "batismo",
++  status: "situação",
++  approval_status: "aprovação",
++  user_id: "conta vinculada",
++  amount: "valor",
++  category: "categoria",
++  description: "descrição",
++  kind: "tipo",
++  occurred_on: "data",
++  payment_method: "forma de pagamento",
++  responsible: "responsável",
++  notes: "observações",
++  title: "título",
++  name: "nome",
++  starts_at: "início",
++  ends_at: "fim",
++  location: "local",
++  published: "publicação",
++  permissions: "permissões",
++};
++
++const PERMISSION_LABELS: Record<string, string> = Object.fromEntries(
++  PERMISSION_GROUPS.flatMap((g) => g.perms.map((p) => [p.key, p.label] as const)),
++);
++
++// Troca "admin" / "view_finance" (códigos) pelos nomes em português quando existirem.
++function prettify(summary: string): string {
++  return summary.replace(/"([a-z_]+)"/g, (whole, key: string) => {
++    const label = ROLE_LABELS[key] ?? PERMISSION_LABELS[key];
++    return label ? `"${label}"` : whole;
++  });
++}
++
++function formatWhen(iso: string): string {
++  const d = new Date(iso);
++  return d.toLocaleString("pt-BR", {
++    day: "2-digit",
++    month: "2-digit",
++    year: "numeric",
++    hour: "2-digit",
++    minute: "2-digit",
++  });
++}
++
++function ActivityLogPage() {
++  const { isCeo, isLoading } = useAccess();
++  const [entity, setEntity] = useState<string | null>(null);
++  const [searchInput, setSearchInput] = useState("");
++  const [search, setSearch] = useState("");
++  const [rows, setRows] = useState<LogRow[]>([]);
++  const [loading, setLoading] = useState(true);
++  const [loadingMore, setLoadingMore] = useState(false);
++  const [hasMore, setHasMore] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++
++  // Espera o CEO terminar de digitar antes de consultar.
++  useEffect(() => {
++    const t = setTimeout(() => setSearch(searchInput.trim()), 350);
++    return () => clearTimeout(t);
++  }, [searchInput]);
++
++  // A função é nova e ainda não está nos tipos gerados do Supabase, por isso o cast.
++  const fetchPage = useCallback(
++    async (before: string | null) => {
++      const rpc = supabase.rpc as unknown as (fn: string, args: object) => RpcResult;
++      return rpc.call(supabase, "activity_log_feed", {
++        _limit: PAGE,
++        _before: before,
++        _entity: entity,
++        _search: search || null,
++      });
++    },
++    [entity, search],
++  );
++
++  const load = useCallback(async () => {
++    setLoading(true);
++    setError(null);
++    const { data, error: err } = await fetchPage(null);
++    if (err) {
++      setError(
++        err.message.includes("Acesso negado")
++          ? "Só o CEO pode ver o registro de atividades."
++          : "Não foi possível carregar o registro. Tente atualizar.",
++      );
++      setRows([]);
++      setHasMore(false);
++    } else {
++      setRows(data ?? []);
++      setHasMore((data?.length ?? 0) >= PAGE);
++    }
++    setLoading(false);
++  }, [fetchPage]);
++
++  const loadMore = async () => {
++    const last = rows[rows.length - 1];
++    if (!last) return;
++    setLoadingMore(true);
++    const { data, error: err } = await fetchPage(last.created_at);
++    if (err) {
++      setError("Não foi possível carregar mais registros. Tente novamente.");
++    } else {
++      setRows((prev) => [...prev, ...(data ?? [])]);
++      setHasMore((data?.length ?? 0) >= PAGE);
++    }
++    setLoadingMore(false);
++  };
++
++  useEffect(() => {
++    if (isCeo) void load();
++  }, [isCeo, load]);
++
++  const emptyText = useMemo(
++    () =>
++      search || entity
++        ? "Nada encontrado com esse filtro."
++        : "Ainda não há atividades registradas.",
++    [search, entity],
++  );
++
++  if (isLoading) {
++    return <p className="py-10 text-center text-sm text-muted-foreground">Carregando…</p>;
++  }
++
++  if (!isCeo) {
++    return (
++      <div className="mx-auto max-w-md rounded-lg border bg-card p-8 text-center">
++        <Lock className="mx-auto h-8 w-8 text-muted-foreground" aria-hidden="true" />
++        <h1 className="mt-3 text-lg font-semibold">Acesso restrito</h1>
++        <p className="mt-1 text-sm text-muted-foreground">
++          O registro de atividades é visível apenas para o CEO.
++        </p>
++      </div>
++    );
++  }
++
++  return (
++    <div className="space-y-6">
++      <div>
++        <h1 className="font-display text-3xl">Registro de atividades</h1>
++        <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
++          Mostra quem criou, editou ou excluiu informações importantes (membros, financeiro,
++          acessos, eventos e site). Em edições aparece apenas <strong>quais campos mudaram</strong>,
++          nunca o conteúdo. Registros com mais de 12 meses são apagados automaticamente.
++        </p>
++      </div>
++
++      <div className="flex flex-wrap items-center gap-3">
++        <div className="relative min-w-[220px] flex-1">
++          <Search
++            className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
++            aria-hidden="true"
++          />
++          <Input
++            value={searchInput}
++            onChange={(e) => setSearchInput(e.target.value)}
++            placeholder="Buscar por pessoa ou assunto (ex.: Maria, lançamento)"
++            aria-label="Buscar no registro de atividades"
++            className="pl-9"
++          />
++        </div>
++        <Button
++          type="button"
++          variant="outline"
++          size="icon"
++          onClick={() => void load()}
++          disabled={loading}
++          aria-label="Atualizar registro"
++        >
++          <RefreshCw className={"h-4 w-4 " + (loading ? "animate-spin" : "")} aria-hidden="true" />
++        </Button>
++      </div>
++
++      <div role="group" aria-label="Filtrar por área" className="flex flex-wrap gap-2">
++        {ENTITY_FILTERS.map((f) => (
++          <button
++            key={f.label}
++            type="button"
++            onClick={() => setEntity(f.id)}
++            aria-pressed={entity === f.id}
++            className={
++              "rounded-full px-3 py-1.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring " +
++              (entity === f.id
++                ? "bg-primary text-primary-foreground"
++                : "bg-muted text-muted-foreground hover:bg-muted/70")
++            }
++          >
++            {f.label}
++          </button>
++        ))}
++      </div>
++
++      <section aria-label="Atividades registradas" className="rounded-lg border bg-card">
++        {error ? (
++          <p role="alert" className="p-8 text-center text-sm text-muted-foreground">
++            {error}
++          </p>
++        ) : loading && rows.length === 0 ? (
++          <p className="p-8 text-center text-sm text-muted-foreground">Carregando…</p>
++        ) : rows.length === 0 ? (
++          <p className="p-8 text-center text-sm text-muted-foreground">{emptyText}</p>
++        ) : (
++          <ul className="divide-y">
++            {rows.map((r) => {
++              const ui = ACTION_UI[r.action];
++              const fields = (r.changed_fields ?? []).map((f) => FIELD_LABELS[f] ?? f);
++              return (
++                <li key={r.id} className="flex items-start gap-3 p-4">
++                  <span className={"mt-0.5 rounded-full p-2 " + ui.tone}>
++                    <ui.Icon className="h-4 w-4" aria-hidden="true" />
++                    <span className="sr-only">{ui.label}</span>
++                  </span>
++                  <div className="min-w-0 flex-1">
++                    <p className="text-sm leading-snug">{prettify(r.summary)}</p>
++                    {fields.length > 0 ? (
++                      <p className="mt-0.5 text-xs text-muted-foreground">
++                        Campos alterados: {fields.join(", ")}
++                      </p>
++                    ) : null}
++                    <p className="mt-1 text-xs text-muted-foreground">
++                      <span className="font-medium text-foreground/80">
++                        {r.actor_name ?? "Sistema"}
++                      </span>
++                      {" · "}
++                      <time dateTime={r.created_at}>{formatWhen(r.created_at)}</time>
++                    </p>
++                  </div>
++                </li>
++              );
++            })}
++          </ul>
++        )}
++        {hasMore && !error ? (
++          <div className="border-t p-3 text-center">
++            <Button
++              type="button"
++              variant="ghost"
++              onClick={() => void loadMore()}
++              disabled={loadingMore}
++            >
++              {loadingMore ? (
++                <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
++              ) : null}
++              Carregar mais
++            </Button>
++          </div>
++        ) : null}
++      </section>
++    </div>
++  );
++}
+diff --git a/src/routes/_authenticated/painel.tsx b/src/routes/_authenticated/painel.tsx
+index 59de62a..8d07458 100644
+--- a/src/routes/_authenticated/painel.tsx
++++ b/src/routes/_authenticated/painel.tsx
+@@ -17,6 +17,7 @@ import {
+   CalendarDays,
+   Bell,
+   CalendarClock,
++  ScrollText,
+ } from "lucide-react";
+ import { Button } from "@/components/ui/button";
+ import { supabase } from "@/integrations/supabase/client";
+@@ -36,7 +37,7 @@ export const Route = createFileRoute("/_authenticated/painel")({
+ });
+ 
+ function PanelLayout() {
+-  const { can, isFullAccess, roles, email } = useAccess();
++  const { can, isCeo, isFullAccess, roles, email } = useAccess();
+   const { canViewPage: canViewDepartments } = useDeptAccess();
+   const qc = useQueryClient();
+   const navigate = useNavigate();
+@@ -86,6 +87,7 @@ function PanelLayout() {
+     { to: "/painel/escalas", label: "Escalas", icon: CalendarClock, show: (shiftDepts.data?.length ?? 0) > 0 },
+     { to: "/painel/notificacoes", label: "Avisos (notificações)", icon: Bell, show: can("send_push") },
+     { to: "/painel/site", label: "Editar site", icon: Settings, show: can("edit_site") },
++    { to: "/painel/atividades", label: "Registro de atividades", icon: ScrollText, show: isCeo },
+   ] as const;
+ 
+   async function signOut() {
+diff --git a/src/test/activity-log-page.test.tsx b/src/test/activity-log-page.test.tsx
+new file mode 100644
+index 0000000..ee4636b
+--- /dev/null
++++ b/src/test/activity-log-page.test.tsx
+@@ -0,0 +1,190 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
++
++const h = vi.hoisted(() => ({
++  access: { isCeo: true, isLoading: false },
++  rpc: vi.fn(),
++}));
++
++vi.mock("@tanstack/react-router", () => ({
++  createFileRoute: () => (options: unknown) => ({ options }),
++}));
++vi.mock("@/hooks/use-access", () => ({ useAccess: () => h.access }));
++vi.mock("@/lib/site-query", () => ({ siteMeta: () => ({}) }));
++vi.mock("@/integrations/supabase/client", () => ({ supabase: { rpc: h.rpc } }));
++
++import { PERMISSION_GROUPS, ROLE_LABELS } from "@/lib/church";
++import { Route } from "@/routes/_authenticated/painel.atividades";
++
++const Page = (Route as unknown as { options: { component: React.ComponentType } }).options
++  .component;
++
++const row = (over: Partial<Record<string, unknown>> = {}) => ({
++  id: crypto.randomUUID(),
++  created_at: "2026-11-07T15:00:00Z",
++  actor_id: "u1",
++  actor_name: "Ana Admin",
++  action: "update",
++  entity: "members",
++  summary: "Membro editado: Maria Souza",
++  changed_fields: null,
++  ...over,
++});
++
++beforeEach(() => {
++  vi.clearAllMocks();
++  h.access = { isCeo: true, isLoading: false };
++  h.rpc.mockResolvedValue({ data: [], error: null });
++});
++afterEach(cleanup);
++
++describe("Registro de atividades (só CEO)", () => {
++  it("quem não é CEO vê aviso de acesso restrito e nada é consultado", () => {
++    h.access = { isCeo: false, isLoading: false };
++    render(<Page />);
++    expect(screen.getByText("Acesso restrito")).toBeTruthy();
++    expect(h.rpc).not.toHaveBeenCalled();
++  });
++
++  it("enquanto o acesso carrega, não pisca a tela de acesso restrito", () => {
++    h.access = { isCeo: false, isLoading: true };
++    render(<Page />);
++    expect(screen.queryByText("Acesso restrito")).toBeNull();
++    expect(h.rpc).not.toHaveBeenCalled();
++  });
++
++  it("o CEO carrega a primeira página com os filtros vazios", async () => {
++    render(<Page />);
++    await waitFor(() => expect(h.rpc).toHaveBeenCalled());
++    expect(h.rpc).toHaveBeenCalledWith("activity_log_feed", {
++      _limit: 50,
++      _before: null,
++      _entity: null,
++      _search: null,
++    });
++    expect(await screen.findByText("Ainda não há atividades registradas.")).toBeTruthy();
++  });
++
++  it("mostra quem fez, o quê e traduz códigos de função e permissão para português", async () => {
++    const roleKey = Object.keys(ROLE_LABELS).find((k) => k !== "member")!;
++    const perm = PERMISSION_GROUPS.flatMap((g) => g.perms)[0]!;
++    h.rpc.mockResolvedValue({
++      data: [
++        row({
++          summary: `Função "${roleKey}" atribuída a João Silva`,
++          action: "create",
++          entity: "access",
++        }),
++        row({
++          summary: `Permissão "${perm.key}" concedida a João Silva`,
++          action: "create",
++          entity: "access",
++        }),
++        row({
++          summary: "Membro editado: Maria Souza",
++          changed_fields: ["cpf", "phone", "campo_desconhecido"],
++        }),
++      ],
++      error: null,
++    });
++    render(<Page />);
++    expect(
++      await screen.findByText(`Função "${ROLE_LABELS[roleKey]}" atribuída a João Silva`),
++    ).toBeTruthy();
++    expect(screen.getByText(`Permissão "${perm.label}" concedida a João Silva`)).toBeTruthy();
++    expect(screen.getByText("Campos alterados: CPF, telefone, campo_desconhecido")).toBeTruthy();
++    expect(screen.getAllByText("Ana Admin").length).toBe(3);
++  });
++
++  it("registro sem autor aparece como Sistema", async () => {
++    h.rpc.mockResolvedValue({
++      data: [row({ actor_name: null, summary: "Conta excluída: Fulano" })],
++      error: null,
++    });
++    render(<Page />);
++    expect(await screen.findByText("Sistema")).toBeTruthy();
++  });
++
++  it("o filtro por área consulta de novo com a área escolhida", async () => {
++    render(<Page />);
++    await waitFor(() => expect(h.rpc).toHaveBeenCalledTimes(1));
++    fireEvent.click(screen.getByRole("button", { name: "Financeiro" }));
++    await waitFor(() =>
++      expect(h.rpc).toHaveBeenLastCalledWith("activity_log_feed", {
++        _limit: 50,
++        _before: null,
++        _entity: "financial",
++        _search: null,
++      }),
++    );
++    expect(screen.getByRole("button", { name: "Financeiro" }).getAttribute("aria-pressed")).toBe(
++      "true",
++    );
++  });
++
++  it("a busca espera o CEO parar de digitar e então consulta", async () => {
++    render(<Page />);
++    await waitFor(() => expect(h.rpc).toHaveBeenCalledTimes(1));
++    fireEvent.change(screen.getByLabelText("Buscar no registro de atividades"), {
++      target: { value: "  Maria " },
++    });
++    expect(h.rpc).toHaveBeenCalledTimes(1);
++    await waitFor(
++      () =>
++        expect(h.rpc).toHaveBeenLastCalledWith("activity_log_feed", {
++          _limit: 50,
++          _before: null,
++          _entity: null,
++          _search: "Maria",
++        }),
++      { timeout: 2000 },
++    );
++    expect(await screen.findByText("Nada encontrado com esse filtro.")).toBeTruthy();
++  });
++
++  it("com 50 registros aparece Carregar mais, que continua a partir do último", async () => {
++    const page1 = Array.from({ length: 50 }, (_, i) =>
++      row({
++        id: `a${i}`,
++        created_at: new Date(Date.UTC(2026, 10, 7, 12, 0, 59 - i)).toISOString(),
++      }),
++    );
++    const lastDate = page1[49]!.created_at;
++    h.rpc.mockResolvedValueOnce({ data: page1, error: null }).mockResolvedValueOnce({
++      data: [row({ id: "b1", summary: "Evento criado: Natal" })],
++      error: null,
++    });
++    render(<Page />);
++    fireEvent.click(await screen.findByRole("button", { name: "Carregar mais" }));
++    await waitFor(() =>
++      expect(h.rpc).toHaveBeenLastCalledWith("activity_log_feed", {
++        _limit: 50,
++        _before: lastDate,
++        _entity: null,
++        _search: null,
++      }),
++    );
++    expect(await screen.findByText("Evento criado: Natal")).toBeTruthy();
++    expect(screen.queryByRole("button", { name: "Carregar mais" })).toBeNull();
++  });
++
++  it("menos de 50 registros: não oferece Carregar mais", async () => {
++    h.rpc.mockResolvedValue({ data: [row()], error: null });
++    render(<Page />);
++    await screen.findByText("Membro editado: Maria Souza");
++    expect(screen.queryByRole("button", { name: "Carregar mais" })).toBeNull();
++  });
++
++  it("acesso negado pelo banco vira mensagem clara", async () => {
++    h.rpc.mockResolvedValue({ data: null, error: { message: "Acesso negado" } });
++    render(<Page />);
++    expect(await screen.findByText("Só o CEO pode ver o registro de atividades.")).toBeTruthy();
++  });
++
++  it("falha genérica mostra mensagem para tentar de novo, sem texto técnico", async () => {
++    h.rpc.mockResolvedValue({ data: null, error: { message: "connection reset by peer" } });
++    render(<Page />);
++    expect(await screen.findByText(/Não foi possível carregar o registro/)).toBeTruthy();
++    expect(screen.queryByText(/connection reset/)).toBeNull();
++  });
++});
+diff --git a/supabase/migrations/20261107140000_activity_log.sql b/supabase/migrations/20261107140000_activity_log.sql
+new file mode 100644
+index 0000000..b592389
+--- /dev/null
++++ b/supabase/migrations/20261107140000_activity_log.sql
+@@ -0,0 +1,236 @@
++-- Registro de atividades: quem fez o quê e quando nas áreas sensíveis (membros, financeiro,
++-- permissões, eventos, site). Visível SOMENTE para o CEO.
++--
++-- Decisões de privacidade (para manter a regra "o que foi apagado some de verdade"):
++--   * Nunca guarda valores de campos (CPF, RG, telefone, endereço...). Em edições guarda só o NOME dos campos alterados.
++--   * Em membros guarda apenas o nome da pessoa no resumo. Entradas com mais de 12 meses são apagadas automaticamente.
++--   * Ninguém escreve pelo front-end; só os gatilhos abaixo (security definer).
++
++create table if not exists public.activity_log (
++  id uuid primary key default gen_random_uuid(),
++  created_at timestamptz not null default now(),
++  actor_id uuid references auth.users(id) on delete set null,
++  actor_name text,
++  action text not null check (action in ('create', 'update', 'delete')),
++  entity text not null,
++  entity_id text,
++  summary text not null,
++  changed_fields text[]
++);
++
++create index if not exists activity_log_created_idx on public.activity_log (created_at desc);
++create index if not exists activity_log_entity_idx on public.activity_log (entity, created_at desc);
++
++alter table public.activity_log enable row level security;
++
++drop policy if exists "ceo reads activity log" on public.activity_log;
++create policy "ceo reads activity log" on public.activity_log
++  for select to authenticated
++  using (public.has_role(auth.uid(), 'ceo'));
++
++revoke all on public.activity_log from anon, authenticated;
++grant select on public.activity_log to authenticated;
++
++-- Gatilho genérico. O bloco de exceção garante que o registro NUNCA bloqueia a operação original.
++create or replace function public.trg_activity_log()
++returns trigger
++language plpgsql
++security definer
++set search_path = public
++as $$
++declare
++  v_new jsonb := case when tg_op = 'DELETE' then null else to_jsonb(new) end;
++  v_old jsonb := case when tg_op = 'INSERT' then null else to_jsonb(old) end;
++  v_row jsonb := coalesce(v_new, v_old);
++  v_action text := case tg_op when 'INSERT' then 'create' when 'DELETE' then 'delete' else 'update' end;
++  v_entity text;
++  v_summary text;
++  v_actor uuid := auth.uid();
++  v_actor_name text;
++  v_changed text[];
++  v_target_name text;
++  v_money text;
++begin
++  begin
++    -- Apagar uma conta remove funções e permissões em cascata: isso já aparece como "Conta excluída",
++    -- então não registra de novo. (pg_trigger_depth não distingue cascata aqui; o que distingue é a conta não existir mais.)
++    if tg_op = 'DELETE' and tg_table_name in ('user_roles', 'user_permissions')
++       and not exists (select 1 from auth.users u where u.id = (v_row ->> 'user_id')::uuid) then
++      return null;
++    end if;
++
++    -- Em edições, descobre quais campos mudaram (só os nomes). Se nada relevante mudou, não registra.
++    if tg_op = 'UPDATE' then
++      select array_agg(n.key order by n.key) into v_changed
++      from jsonb_each(v_new) n
++      where n.value is distinct from v_old -> n.key
++        and n.key not in ('updated_at', 'notified_at');
++      if v_changed is null then
++        return null;
++      end if;
++    end if;
++
++    if tg_table_name = 'members' then
++      v_entity := 'members';
++      v_summary := case tg_op
++        when 'INSERT' then 'Membro cadastrado: ' || coalesce(v_row ->> 'full_name', '(sem nome)')
++        when 'DELETE' then 'Membro excluído: ' || coalesce(v_row ->> 'full_name', '(sem nome)')
++        else 'Membro editado: ' || coalesce(v_row ->> 'full_name', '(sem nome)') end;
++
++    elsif tg_table_name = 'financial_transactions' then
++      v_entity := 'financial';
++      v_money := 'R$ ' || replace(to_char(coalesce((v_row ->> 'amount')::numeric, 0), 'FM999999990.00'), '.', ',');
++      v_summary := case tg_op
++        when 'INSERT' then 'Lançamento criado: '
++        when 'DELETE' then 'Lançamento excluído: '
++        else 'Lançamento editado: ' end
++        || case when v_row ->> 'kind' = 'entrada' then 'receita ' else 'despesa ' end
++        || v_money || ' (' || coalesce(v_row ->> 'category', 'sem categoria') || ')';
++
++    elsif tg_table_name = 'financial_goals' then
++      v_entity := 'financial';
++      v_summary := case tg_op when 'INSERT' then 'Meta criada: ' when 'DELETE' then 'Meta excluída: ' else 'Meta editada: ' end
++        || coalesce(v_row ->> 'title', '(sem título)');
++
++    elsif tg_table_name = 'recurring_bills' then
++      v_entity := 'financial';
++      v_summary := case tg_op when 'INSERT' then 'Conta recorrente criada: ' when 'DELETE' then 'Conta recorrente excluída: ' else 'Conta recorrente editada: ' end
++        || coalesce(v_row ->> 'name', '(sem nome)');
++
++    elsif tg_table_name = 'event_payments' then
++      -- Só confirmações/recusas de pagamento (dinheiro de evento). Criação e exclusão fazem parte da inscrição.
++      if tg_op <> 'UPDATE' or v_new ->> 'status' is not distinct from v_old ->> 'status' then
++        return null;
++      end if;
++      v_entity := 'events';
++      v_summary := 'Pagamento de evento marcado como "' || coalesce(v_new ->> 'status', '?') || '" (R$ '
++        || replace(to_char(coalesce((v_row ->> 'amount')::numeric, 0), 'FM999999990.00'), '.', ',') || ')';
++      v_changed := array['status'];
++
++    elsif tg_table_name = 'events' then
++      v_entity := 'events';
++      v_summary := case tg_op when 'INSERT' then 'Evento criado: ' when 'DELETE' then 'Evento excluído: ' else 'Evento editado: ' end
++        || coalesce(v_row ->> 'title', '(sem título)');
++
++    elsif tg_table_name = 'departments' then
++      v_entity := 'departments';
++      v_summary := case tg_op when 'INSERT' then 'Departamento criado: ' when 'DELETE' then 'Departamento excluído: ' else 'Departamento editado: ' end
++        || coalesce(v_row ->> 'name', '(sem nome)');
++
++    elsif tg_table_name = 'church_roles' then
++      v_entity := 'access';
++      v_summary := case tg_op when 'INSERT' then 'Cargo criado: ' when 'DELETE' then 'Cargo excluído: ' else 'Cargo editado: ' end
++        || coalesce(v_row ->> 'name', '(sem nome)');
++
++    elsif tg_table_name = 'site_content' then
++      if tg_op = 'DELETE' then
++        return null;
++      end if;
++      v_entity := 'site';
++      v_summary := 'Conteúdo do site editado';
++      v_changed := null;
++
++    elsif tg_table_name in ('user_roles', 'user_permissions') then
++      select coalesce(p.full_name, p.email) into v_target_name from public.profiles p where p.id = (v_row ->> 'user_id')::uuid;
++      v_entity := 'access';
++      if tg_table_name = 'user_roles' then
++        v_summary := case tg_op when 'INSERT' then 'Função "' when 'DELETE' then 'Função removida "' else 'Função alterada "' end
++          || coalesce(v_row ->> 'role', '?') || '" '
++          || case tg_op when 'INSERT' then 'atribuída a ' when 'DELETE' then 'de ' else 'de ' end
++          || coalesce(v_target_name, 'usuário removido');
++      else
++        v_summary := case tg_op when 'INSERT' then 'Permissão "' when 'DELETE' then 'Permissão removida "' else 'Permissão alterada "' end
++          || coalesce(v_row ->> 'permission', '?') || '" '
++          || case tg_op when 'INSERT' then 'concedida a ' else 'de ' end
++          || coalesce(v_target_name, 'usuário removido');
++      end if;
++      v_changed := null;
++
++    elsif tg_table_name = 'profiles' then
++      -- Só exclusão de conta.
++      if tg_op <> 'DELETE' then
++        return null;
++      end if;
++      v_entity := 'access';
++      v_summary := 'Conta excluída: ' || coalesce(v_row ->> 'full_name', v_row ->> 'email', '(sem nome)');
++
++    else
++      return null;
++    end if;
++
++    if v_actor is not null then
++      select coalesce(p.full_name, p.email) into v_actor_name from public.profiles p where p.id = v_actor;
++    end if;
++
++    insert into public.activity_log (actor_id, actor_name, action, entity, entity_id, summary, changed_fields)
++    values (v_actor, coalesce(v_actor_name, case when v_actor is null then 'Sistema' else 'Usuário removido' end),
++            v_action, v_entity, v_row ->> 'id', v_summary, v_changed);
++
++    -- Retenção de 12 meses: limpeza oportunista (cerca de 1 em cada 50 registros), sem depender de cron.
++    if random() < 0.02 then
++      delete from public.activity_log where created_at < now() - interval '12 months';
++    end if;
++  exception when others then
++    raise warning 'activity_log (%): %', tg_table_name, sqlerrm;
++  end;
++  return null;
++end $$;
++
++revoke execute on function public.trg_activity_log() from public, anon, authenticated;
++
++do $$
++declare
++  t text;
++begin
++  foreach t in array array[
++    'members', 'financial_transactions', 'financial_goals', 'recurring_bills', 'event_payments',
++    'events', 'departments', 'church_roles', 'site_content', 'user_roles', 'user_permissions', 'profiles'
++  ] loop
++    execute format('drop trigger if exists activity_log_%1$s on public.%1$I', t);
++    execute format(
++      'create trigger activity_log_%1$s after insert or update or delete on public.%1$I for each row execute function public.trg_activity_log()',
++      t);
++  end loop;
++end $$;
++
++-- Função que o painel chama. Só devolve dados para o CEO.
++create or replace function public.activity_log_feed(
++  _limit int default 50,
++  _before timestamptz default null,
++  _entity text default null,
++  _search text default null
++)
++returns table (
++  id uuid,
++  created_at timestamptz,
++  actor_id uuid,
++  actor_name text,
++  action text,
++  entity text,
++  summary text,
++  changed_fields text[]
++)
++language plpgsql
++stable
++security definer
++set search_path = public
++as $$
++#variable_conflict use_column
++begin
++  if auth.uid() is null or not public.has_role(auth.uid(), 'ceo') then
++    raise exception 'Acesso negado';
++  end if;
++  return query
++  select a.id, a.created_at, a.actor_id, a.actor_name, a.action, a.entity, a.summary, a.changed_fields
++  from public.activity_log a
++  where (_before is null or a.created_at < _before)
++    and (_entity is null or a.entity = _entity)
++    and (_search is null or btrim(_search) = ''
++         or a.summary ilike '%' || btrim(_search) || '%'
++         or a.actor_name ilike '%' || btrim(_search) || '%')
++  order by a.created_at desc
++  limit least(greatest(coalesce(_limit, 50), 1), 100);
++end $$;
++
++revoke all on function public.activity_log_feed(int, timestamptz, text, text) from public, anon;
++grant execute on function public.activity_log_feed(int, timestamptz, text, text) to authenticated;
+-- 
+2.43.0
+

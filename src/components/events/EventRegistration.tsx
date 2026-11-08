@@ -10,6 +10,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
+import { PrivacyConsent } from "@/components/auth/PrivacyConsent";
+import { recordPrivacyConsent, recordSensitiveConsent } from "@/lib/privacy";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { RELIGIONS } from "@/lib/event-data";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -55,6 +57,8 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
   const [cpf, setCpf] = useState("");
   const [installments, setInstallments] = useState(1);
   const [imageConsent, setImageConsent] = useState(false);
+  const [privacyOk, setPrivacyOk] = useState(false);
+  const [religionConsent, setReligionConsent] = useState(false);
   const [birthDate, setBirthDate] = useState("");
   const [institution, setInstitution] = useState("");
   const [religion, setReligion] = useState("");
@@ -77,6 +81,7 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
       if (error) throw error;
     },
     onSuccess: () => {
+      void recordPrivacyConsent();
       toast.success("Dados salvos! Agora é só escolher o ingresso.");
       qc.invalidateQueries({ queryKey: ["event-profile", uid] });
     },
@@ -129,6 +134,7 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
       if (error) throw error;
     },
     onSuccess: () => {
+      if (!isMember) void recordSensitiveConsent();
       setDone({ paid: payRequired });
       qc.invalidateQueries({ queryKey: ["public-event", event.slug] });
       qc.invalidateQueries({ queryKey: ["public-events"] });
@@ -200,6 +206,12 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
               toast.error(eventError(new Error("invalid_birth_date")));
               return;
             }
+            if (!privacyOk) {
+              toast.error(
+                "Para continuar, marque que você leu e concorda com a Política de Privacidade.",
+              );
+              return;
+            }
             createVisitor.mutate();
           }}
         >
@@ -207,6 +219,11 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
           <div className="space-y-1.5"><Label>CPF *</Label><Input required inputMode="numeric" placeholder="000.000.000-00" value={visitor.cpf} onChange={(e) => setVisitor({ ...visitor, cpf: formatCpf(e.target.value) })} /></div>
           <div className="space-y-1.5"><Label>Telefone / WhatsApp *</Label><Input required inputMode="tel" value={visitor.phone} onChange={(e) => setVisitor({ ...visitor, phone: e.target.value })} /></div>
           <div className="space-y-1.5"><Label>Data de nascimento *</Label><Input required type="date" max={new Date().toISOString().slice(0, 10)} value={visitor.birthDate} onChange={(e) => setVisitor({ ...visitor, birthDate: e.target.value })} /></div>
+          <PrivacyConsent
+            checked={privacyOk}
+            onCheckedChange={setPrivacyOk}
+            note="Usamos seu nome, CPF, telefone e data de nascimento para controlar vagas, pagamentos e a entrada no evento."
+          />
           <Button type="submit" className="w-full" disabled={createVisitor.isPending}>Continuar</Button>
         </form>
         <p className="mt-4 text-xs text-muted-foreground">
@@ -329,6 +346,25 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
                 </SelectContent>
               </Select>
             </div>
+            <label className="flex cursor-pointer items-start gap-3 rounded-lg border bg-primary-soft/40 p-4 text-sm sm:col-span-2">
+              <Checkbox
+                className="mt-0.5"
+                checked={religionConsent}
+                onCheckedChange={(on) => setReligionConsent(on === true)}
+                aria-required="true"
+              />
+              <span>
+                <span className="block font-medium text-foreground">
+                  Autorizo o uso da minha religião e instituição para montar o perfil do público do
+                  evento. *
+                </span>
+                <span className="mt-1 block text-xs text-muted-foreground">
+                  Religião é um dado sensível. Ele aparece em contagens por religião, instituição e
+                  faixa etária e só é visto por quem a igreja autoriza a acompanhar os dados do
+                  evento.
+                </span>
+              </span>
+            </label>
           </div>
         )}
 
@@ -369,7 +405,7 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
           <p className="text-sm text-muted-foreground">
             Total: <strong className="text-lg text-foreground">{payRequired ? moneyBR(total) : "Gratuito"}</strong>
           </p>
-          <Button type="submit" size="lg" disabled={register.isPending || !lotId || (event.require_image_consent && !imageConsent) || (!isMember && (!institution.trim() || !religion)) || (!profile.data.birth_date && !birthDate)}>Inscrever-se</Button>
+          <Button type="submit" size="lg" disabled={register.isPending || !lotId || (event.require_image_consent && !imageConsent) || (!isMember && (!institution.trim() || !religion || !religionConsent)) || (!profile.data.birth_date && !birthDate)}>Inscrever-se</Button>
         </div>
       </form>
     </Box>

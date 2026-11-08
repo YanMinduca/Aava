@@ -17,6 +17,7 @@ import {
   CalendarDays,
   Bell,
   CalendarClock,
+  ScrollText,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
@@ -36,7 +37,7 @@ export const Route = createFileRoute("/_authenticated/painel")({
 });
 
 function PanelLayout() {
-  const { can, isFullAccess, roles, email } = useAccess();
+  const { can, isCeo, isFullAccess, roles, email } = useAccess();
   const { canViewPage: canViewDepartments } = useDeptAccess();
   const qc = useQueryClient();
   const navigate = useNavigate();
@@ -86,6 +87,7 @@ function PanelLayout() {
     { to: "/painel/escalas", label: "Escalas", icon: CalendarClock, show: (shiftDepts.data?.length ?? 0) > 0 },
     { to: "/painel/notificacoes", label: "Avisos (notificações)", icon: Bell, show: can("send_push") },
     { to: "/painel/site", label: "Editar site", icon: Settings, show: can("edit_site") },
+    { to: "/painel/atividades", label: "Registro de atividades", icon: ScrollText, show: isCeo },
   ] as const;
 
   async function signOut() {
