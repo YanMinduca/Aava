@@ -16,6 +16,7 @@ import { Route as ContatoRouteImport } from './routes/contato'
 import { Route as ContribuicaoRouteImport } from './routes/contribuicao'
 import { Route as CultosRouteImport } from './routes/cultos'
 import { Route as OracaoRouteImport } from './routes/oracao'
+import { Route as PrivacidadeRouteImport } from './routes/privacidade'
 import { Route as QuemSomosRouteImport } from './routes/quem-somos'
 import { Route as RedefinirSenhaRouteImport } from './routes/redefinir-senha'
 import { Route as AuthenticatedPainelRouteImport } from './routes/_authenticated/painel'
@@ -72,6 +73,11 @@ const CultosRoute = CultosRouteImport.update({
 const OracaoRoute = OracaoRouteImport.update({
   id: '/oracao',
   path: '/oracao',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PrivacidadeRoute = PrivacidadeRouteImport.update({
+  id: '/privacidade',
+  path: '/privacidade',
   getParentRoute: () => rootRouteImport,
 } as any)
 const QuemSomosRoute = QuemSomosRouteImport.update({
@@ -213,6 +219,7 @@ export interface FileRoutesByFullPath {
   '/contribuicao': typeof ContribuicaoRoute
   '/cultos': typeof CultosRoute
   '/oracao': typeof OracaoRoute
+  '/privacidade': typeof PrivacidadeRoute
   '/quem-somos': typeof QuemSomosRoute
   '/redefinir-senha': typeof RedefinirSenhaRoute
   '/painel': typeof AuthenticatedPainelRouteWithChildren
@@ -244,6 +251,7 @@ export interface FileRoutesByTo {
   '/contribuicao': typeof ContribuicaoRoute
   '/cultos': typeof CultosRoute
   '/oracao': typeof OracaoRoute
+  '/privacidade': typeof PrivacidadeRoute
   '/quem-somos': typeof QuemSomosRoute
   '/redefinir-senha': typeof RedefinirSenhaRoute
   '/convite/$code': typeof ConviteCodeRoute
@@ -276,6 +284,7 @@ export interface FileRoutesById {
   '/contribuicao': typeof ContribuicaoRoute
   '/cultos': typeof CultosRoute
   '/oracao': typeof OracaoRoute
+  '/privacidade': typeof PrivacidadeRoute
   '/quem-somos': typeof QuemSomosRoute
   '/redefinir-senha': typeof RedefinirSenhaRoute
   '/_authenticated/painel': typeof AuthenticatedPainelRouteWithChildren
@@ -309,6 +318,7 @@ export interface FileRouteTypes {
     | '/contribuicao'
     | '/cultos'
     | '/oracao'
+    | '/privacidade'
     | '/quem-somos'
     | '/redefinir-senha'
     | '/painel'
@@ -340,6 +350,7 @@ export interface FileRouteTypes {
     | '/contribuicao'
     | '/cultos'
     | '/oracao'
+    | '/privacidade'
     | '/quem-somos'
     | '/redefinir-senha'
     | '/convite/$code'
@@ -371,6 +382,7 @@ export interface FileRouteTypes {
     | '/contribuicao'
     | '/cultos'
     | '/oracao'
+    | '/privacidade'
     | '/quem-somos'
     | '/redefinir-senha'
     | '/_authenticated/painel'
@@ -404,6 +416,7 @@ export interface RootRouteChildren {
   ContribuicaoRoute: typeof ContribuicaoRoute
   CultosRoute: typeof CultosRoute
   OracaoRoute: typeof OracaoRoute
+  PrivacidadeRoute: typeof PrivacidadeRoute
   QuemSomosRoute: typeof QuemSomosRoute
   RedefinirSenhaRoute: typeof RedefinirSenhaRoute
   ConviteCodeRoute: typeof ConviteCodeRoute
@@ -460,6 +473,13 @@ declare module '@tanstack/react-router' {
       path: '/oracao'
       fullPath: '/oracao'
       preLoaderRoute: typeof OracaoRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/privacidade': {
+      id: '/privacidade'
+      path: '/privacidade'
+      fullPath: '/privacidade'
+      preLoaderRoute: typeof PrivacidadeRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/quem-somos': {
@@ -689,6 +709,7 @@ const rootRouteChildren: RootRouteChildren = {
   ContribuicaoRoute: ContribuicaoRoute,
   CultosRoute: CultosRoute,
   OracaoRoute: OracaoRoute,
+  PrivacidadeRoute: PrivacidadeRoute,
   QuemSomosRoute: QuemSomosRoute,
   RedefinirSenhaRoute: RedefinirSenhaRoute,
   ConviteCodeRoute: ConviteCodeRoute,
