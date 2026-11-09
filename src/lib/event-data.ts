@@ -28,10 +28,18 @@ export const AGE_BANDS = [
 ] as const;
 
 export type Person = {
+  /** Inscrição de filho(a): idade informada pelo responsável e sem religião/instituição. */
+  is_child?: boolean | null;
+  child_age?: number | null;
   attendee_birth_date?: string | null;
   attendee_religion?: string | null;
   attendee_institution?: string | null;
 };
+
+/** Idade da inscrição: a informada pelo responsável (filho/a) ou a calculada pela data de nascimento. */
+export function registrationAge(r: Person): number | null {
+  return r.is_child ? (r.child_age ?? null) : ageFrom(r.attendee_birth_date);
+}
 
 const round1 = (n: number) => Math.round(n * 10) / 10;
 const norm = (s: string) =>
@@ -48,8 +56,11 @@ export function summarizePeople(
   ageOf: (b?: string | null) => number | null = ageFrom,
 ) {
   const total = people.length;
+  // Religião e instituição são perguntas feitas ao adulto: crianças ficam fora dessas contagens.
+  const adults = people.filter((p) => !p.is_child);
+  const children = total - adults.length;
   const ages = people
-    .map((p) => ageOf(p.attendee_birth_date))
+    .map((p) => (p.is_child ? (p.child_age ?? null) : ageOf(p.attendee_birth_date)))
     .filter((a): a is number => a !== null)
     .sort((a, b) => a - b);
   const mid = Math.floor(ages.length / 2);
@@ -70,17 +81,19 @@ export function summarizePeople(
   }));
 
   const rel = new Map<string, number>();
-  for (const p of people)
+  for (const p of adults)
     rel.set(p.attendee_religion ?? "", (rel.get(p.attendee_religion ?? "") ?? 0) + 1);
   const religions = [...RELIGIONS.map((r) => r.value as string), MEMBER_RELIGION.value, ""]
     .map((value) => ({ value, label: religionLabel(value || null), count: rel.get(value) ?? 0 }))
     .filter(
-      (r) => r.count > 0 || (r.value !== "" && r.value !== MEMBER_RELIGION.value && total > 0),
+      (r) =>
+        r.count > 0 ||
+        (r.value !== "" && r.value !== MEMBER_RELIGION.value && adults.length > 0),
     )
-    .map((r) => ({ ...r, pct: total ? round1((r.count / total) * 100) : 0 }));
+    .map((r) => ({ ...r, pct: adults.length ? round1((r.count / adults.length) * 100) : 0 }));
 
   const inst = new Map<string, { name: string; count: number }>();
-  for (const p of people) {
+  for (const p of adults) {
     const name = (p.attendee_institution ?? "").trim();
     if (!name) continue;
     const k = norm(name);
@@ -92,5 +105,5 @@ export function summarizePeople(
     (a, b) => b.count - a.count || a.name.localeCompare(b.name, "pt-BR"),
   );
 
-  return { total, ageStats, bands, religions, institutions };
+  return { total, children, ageStats, bands, religions, institutions };
 }

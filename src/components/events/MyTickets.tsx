@@ -194,6 +194,11 @@ export function MyTickets({ uid }: { uid: string }) {
                     <CalendarDays className="h-4 w-4" /> {r.events ? fmtDateTime(r.events.starts_at) : ""}
                     {r.events?.location ? ` · ${r.events.location}` : ""}
                   </p>
+                  {r.is_child && (
+                    <p className="mt-1 text-sm font-medium text-foreground">
+                      Ingresso de {r.attendee_name} <Badge variant="outline" className="ml-1">Filho(a)</Badge>
+                    </p>
+                  )}
                   <p className="mt-1 text-sm text-muted-foreground">
                     {r.event_lots?.name} · {r.quantity} {r.quantity === 1 ? "ingresso" : "ingressos"}
                     {r.total > 0 ? ` · ${moneyBR(r.total)}` : ""}

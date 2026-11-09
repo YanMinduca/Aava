@@ -11,7 +11,7 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { eventError, fromLocalInput, slugify, toLocalInput } from "@/lib/events";
+import { DEFAULT_CHILD_NOTICE, eventError, fromLocalInput, slugify, toLocalInput } from "@/lib/events";
 import { compressImage, fileExt } from "@/lib/images";
 import type { Tables } from "@/integrations/supabase/types";
 
@@ -41,6 +41,8 @@ export type EventDraft = {
   limit_per_person: boolean;
   max_per_person: string;
   require_image_consent: boolean;
+  allow_child_registration: boolean;
+  child_registration_notice: string;
 };
 
 const SINGLE_LOT = "Ingresso";
@@ -52,6 +54,7 @@ export const blankEvent = (): EventDraft => ({
   card_contact_note: "Para pagar no cartão, entre em contato com a igreja.",
   allow_installments: false, max_installments: "3", limit_per_person: false, max_per_person: "2",
   require_image_consent: false,
+  allow_child_registration: false, child_registration_notice: DEFAULT_CHILD_NOTICE,
 });
 
 export function draftFrom(
@@ -76,6 +79,8 @@ export function draftFrom(
     allow_installments: e.allow_installments, max_installments: String(Math.max(2, e.max_installments)),
     limit_per_person: e.limit_per_person, max_per_person: String(e.max_per_person ?? 2),
     require_image_consent: e.require_image_consent,
+    allow_child_registration: e.allow_child_registration,
+    child_registration_notice: e.child_registration_notice ?? DEFAULT_CHILD_NOTICE,
   };
 }
 
@@ -98,6 +103,7 @@ function validate(d: EventDraft) {
       return "Informe como pagar: link, chave Pix, QR code ou pagamento no cartão.";
     if (d.allow_installments && !(Number(d.max_installments) >= 2 && Number(d.max_installments) <= 12)) return "O parcelamento deve ter entre 2 e 12 parcelas.";
   }
+  if (d.allow_child_registration && d.child_registration_notice.length > 500) return "O aviso da inscrição de filho pode ter até 500 caracteres.";
   if (d.limit_per_person && !(Number.isInteger(Number(d.max_per_person)) && Number(d.max_per_person) >= 1)) return "Informe quantas inscrições cada pessoa pode fazer.";
   return null;
 }
@@ -115,6 +121,8 @@ async function saveEvent(d: EventDraft, userId: string | null | undefined, qrFil
     max_installments: d.payment_enabled && d.allow_installments ? Number(d.max_installments) : 1,
     limit_per_person: d.limit_per_person, max_per_person: d.limit_per_person ? Number(d.max_per_person) : null,
     require_image_consent: d.require_image_consent,
+    allow_child_registration: d.allow_child_registration,
+    child_registration_notice: d.allow_child_registration ? d.child_registration_notice.trim() || null : null,
   };
 
   let eventId = d.id;
@@ -250,6 +258,12 @@ export function EventForm({ initial, onSaved }: { initial: EventDraft; onSaved: 
           <Field label="Quantas inscrições cada pessoa pode fazer?"><Input type="number" min={1} value={d.max_per_person} onChange={(e) => set({ max_per_person: e.target.value })} className="max-w-32" /></Field>
         )}
         <Toggle checked={d.require_image_consent} onChange={(v) => set({ require_image_consent: v })} title="Exigir autorização de uso de imagem" help="Quem se inscrever precisa marcar “Estou de acordo com meu uso de imagem”. Sem o aceite, a inscrição não é feita." />
+        <Toggle checked={d.allow_child_registration} onChange={(v) => set({ allow_child_registration: v })} title="Permitir “Inscrever meu filho”" help="O responsável inscreve crianças de 0 a 13 anos (nome, CPF e idade). Cada criança ocupa uma vaga do lote e recebe um ingresso com QR code. A opção continua aparecendo mesmo depois de o responsável já ter se inscrito." />
+        {d.allow_child_registration && (
+          <Field label="Aviso na inscrição de filho" hint="Aparece em destaque antes do formulário da criança. Pode editar à vontade (até 500 caracteres).">
+            <Textarea rows={3} maxLength={500} value={d.child_registration_notice} onChange={(e) => set({ child_registration_notice: e.target.value })} />
+          </Field>
+        )}
       </section>
 
       <section className="space-y-4">

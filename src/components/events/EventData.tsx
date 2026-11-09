@@ -31,7 +31,13 @@ import {
 import { downloadSheets } from "@/lib/export";
 import { ageFrom, dateBR } from "@/lib/church";
 import { fmtDateTime, REGISTRATION_STATUS } from "@/lib/events";
-import { MEMBER_RELIGION, RELIGIONS, religionLabel, summarizePeople } from "@/lib/event-data";
+import {
+  MEMBER_RELIGION,
+  RELIGIONS,
+  registrationAge,
+  religionLabel,
+  summarizePeople,
+} from "@/lib/event-data";
 
 type Row = Tables<"event_registrations"> & { event_lots: { name: string } | null };
 
@@ -115,6 +121,8 @@ export function EventData({ eventId, title }: { eventId: string; title: string }
         rows: [
           [
             "Nome",
+            "Tipo",
+            "Responsável",
             "CPF",
             "Telefone",
             "E-mail",
@@ -128,12 +136,14 @@ export function EventData({ eventId, title }: { eventId: string; title: string }
           ],
           ...people.map((r) => [
             r.attendee_name,
+            r.is_child ? "Criança" : "Adulto",
+            r.is_child ? (r.guardian_name ?? "") : "",
             r.attendee_cpf ?? "",
             r.attendee_phone ?? "",
             r.attendee_email ?? "",
             dateBR(r.attendee_birth_date),
-            ageFrom(r.attendee_birth_date) ?? "",
-            religionLabel(r.attendee_religion),
+            registrationAge(r) ?? "",
+            r.is_child ? "" : religionLabel(r.attendee_religion),
             r.attendee_institution ?? "",
             r.event_lots?.name ?? "",
             REGISTRATION_STATUS[r.status] ?? r.status,
@@ -174,6 +184,13 @@ export function EventData({ eventId, title }: { eventId: string; title: string }
           </div>
         ))}
       </div>
+      {sum.children > 0 && (
+        <p className="-mt-3 text-xs text-muted-foreground">
+          Inclui {sum.children} {sum.children === 1 ? "inscrição de filho(a)" : "inscrições de filhos"}.
+          As crianças entram na idade e nas faixas etárias, mas não nas contagens de religião e
+          instituição.
+        </p>
+      )}
       {sum.ageStats.count < sum.total && (
         <p className="-mt-3 text-xs text-muted-foreground">
           A idade considera {sum.ageStats.count} de {sum.total} inscritos (os demais não têm data de
@@ -315,12 +332,17 @@ export function EventData({ eventId, title }: { eventId: string; title: string }
               )}
               {list.map((r) => (
                 <tr key={r.id} className="border-b last:border-0">
-                  <td className="p-4 font-medium text-foreground">{r.attendee_name}</td>
-                  <td className="p-4 text-muted-foreground">
-                    {ageFrom(r.attendee_birth_date) ?? "—"}
+                  <td className="p-4 font-medium text-foreground">
+                    {r.attendee_name}
+                    {r.is_child && (
+                      <Badge variant="outline" className="ml-2">
+                        Criança
+                      </Badge>
+                    )}
                   </td>
+                  <td className="p-4 text-muted-foreground">{registrationAge(r) ?? "—"}</td>
                   <td className="p-4 text-muted-foreground">
-                    {religionLabel(r.attendee_religion)}
+                    {r.is_child ? "—" : religionLabel(r.attendee_religion)}
                   </td>
                   <td className="p-4 text-muted-foreground">{r.attendee_institution || "—"}</td>
                   <td className="p-4 text-muted-foreground">{r.attendee_phone || "—"}</td>
@@ -350,14 +372,22 @@ export function EventData({ eventId, title }: { eventId: string; title: string }
                     ["Telefone", open.attendee_phone || "—"],
                     ["E-mail", open.attendee_email || "—"],
                     ["CPF", open.attendee_cpf || "—"],
-                    [
-                      "Data de nascimento",
-                      open.attendee_birth_date
-                        ? `${dateBR(open.attendee_birth_date)} (${ageFrom(open.attendee_birth_date)} anos)`
-                        : "—",
-                    ],
-                    ["Religião", religionLabel(open.attendee_religion)],
-                    ["Instituição", open.attendee_institution || "—"],
+                    ...(open.is_child
+                      ? ([
+                          ["Inscrição", "Criança (filho/a)"],
+                          ["Responsável", open.guardian_name || "—"],
+                          ["Idade", open.child_age == null ? "—" : `${open.child_age} anos`],
+                        ] as const)
+                      : ([
+                          [
+                            "Data de nascimento",
+                            open.attendee_birth_date
+                              ? `${dateBR(open.attendee_birth_date)} (${ageFrom(open.attendee_birth_date)} anos)`
+                              : "—",
+                          ],
+                          ["Religião", religionLabel(open.attendee_religion)],
+                          ["Instituição", open.attendee_institution || "—"],
+                        ] as const)),
                     ["Lote", `${open.event_lots?.name ?? "—"} × ${open.quantity}`],
                     ["Inscrito em", fmtDateTime(open.created_at)],
                   ] as const

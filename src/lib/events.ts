@@ -77,6 +77,12 @@ const ERRORS: Record<string, string> = {
   invalid_birth_date: "Data de nascimento inválida. Confira o dia, mês e ano.",
   invalid_institution: "Informe a instituição da qual você participa (ou escreva \"Nenhuma\").",
   invalid_religion: "Escolha a sua religião na lista.",
+  child_registration_disabled: "Este evento não está com a inscrição de filhos ativa.",
+  invalid_child_name: "Digite o nome completo da criança.",
+  invalid_child_age: "A idade da criança deve ser de 0 a 13 anos.",
+  invalid_child_cpf: "CPF da criança inválido. Confira os números.",
+  child_cpf_same_as_guardian: "O CPF da criança não pode ser o mesmo do responsável.",
+  child_already_registered: "Esta criança já está inscrita neste evento.",
   cannot_cancel: "Esta inscrição não pode mais ser cancelada por aqui. Fale com a igreja.",
   payment_closed: "Este pagamento não pode mais ser alterado.",
   invalid_proof: "Arquivo de comprovante inválido.",
@@ -88,6 +94,7 @@ const ERRORS: Record<string, string> = {
 export function eventError(e: unknown) {
   const msg = e instanceof Error ? e.message : typeof e === "object" && e && "message" in e ? String((e as { message: unknown }).message) : "";
   if (msg.includes("events_slug_key")) return "Já existe um evento com esse endereço (slug). Mude o nome ou o endereço.";
+  if (msg.includes("event_registrations_child_cpf_key")) return ERRORS["child_already_registered"]!;
   return ERRORS[msg] ?? (msg || "Algo deu errado. Tente novamente.");
 }
 
@@ -135,6 +142,8 @@ export type PublicEvent = {
   limit_per_person: boolean;
   max_per_person: number | null;
   require_image_consent: boolean;
+  allow_child_registration: boolean;
+  child_registration_notice: string | null;
 };
 export type PublicEventDetail = { event: PublicEvent; lots: PublicLot[] };
 export const asEventDetail = (j: Json | null) => (j ? (j as unknown as PublicEventDetail) : null);
@@ -143,3 +152,29 @@ export const lotIsOpen = (l: PublicLot, now = new Date()) =>
   (!l.opens_at || new Date(l.opens_at) <= now) && (!l.closes_at || new Date(l.closes_at) >= now);
 export const registrationIsOpen = (e: Pick<PublicEvent, "registration_opens_at" | "registration_closes_at">, now = new Date()) =>
   (!e.registration_opens_at || new Date(e.registration_opens_at) <= now) && (!e.registration_closes_at || new Date(e.registration_closes_at) >= now);
+
+/** Idade máxima aceita na inscrição de filho(a). */
+export const CHILD_MAX_AGE = 13;
+
+/** Aviso padrão mostrado na inscrição de filho(a) quando a igreja não escreve outro. */
+export const DEFAULT_CHILD_NOTICE = "Só faça a inscrição da criança se ela for ocupar uma cadeira.";
+
+/** Idade da criança: número inteiro de 0 a 13 (vazio ou fora disso = inválido). */
+export function parseChildAge(v: string): number | null {
+  if (!/^\d{1,2}$/.test(v.trim())) return null;
+  const n = Number(v);
+  return n >= 0 && n <= CHILD_MAX_AGE ? n : null;
+}
+
+/** Motivo pelo qual o lote não aceita a inscrição deste responsável (null = pode escolher). */
+export function lotBlockReason(
+  event: Pick<PublicEvent, "audience">,
+  lot: PublicLot,
+  isMember: boolean,
+  now = new Date(),
+): string | null {
+  if (event.audience === "members" && !isMember && !lot.public_access) return "Só para membros";
+  if (!lotIsOpen(lot, now)) return "Fora do período";
+  if (lot.spots_left === 0) return "Esgotado";
+  return null;
+}

@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { PrivacyConsent } from "@/components/auth/PrivacyConsent";
+import { ChildRegistration } from "@/components/events/ChildRegistration";
 import { recordPrivacyConsent, recordSensitiveConsent } from "@/lib/privacy";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { RELIGIONS } from "@/lib/event-data";
@@ -22,7 +23,17 @@ import {
 
 const Box = ({ children }: { children: React.ReactNode }) => <div className="rounded-2xl border bg-card p-6 shadow-soft">{children}</div>;
 
+/** Inscrição do adulto + (se o evento permitir) "Inscrever meu filho", que continua aparecendo depois da inscrição. */
 export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
+  return (
+    <div className="space-y-6">
+      <EventRegistrationMain detail={detail} />
+      <ChildRegistration detail={detail} />
+    </div>
+  );
+}
+
+function EventRegistrationMain({ detail }: { detail: PublicEventDetail }) {
   const { event, lots } = detail;
   const qc = useQueryClient();
   const { data: access, isLoading: loadingAccess } = useAccess();
@@ -46,7 +57,7 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
     queryKey: ["event-my-regs", uid, event.id],
     enabled: !!uid,
     queryFn: async () => {
-      const { data } = await supabase.from("event_registrations").select("id").eq("event_id", event.id).eq("user_id", uid!).neq("status", "cancelled");
+      const { data } = await supabase.from("event_registrations").select("id").eq("event_id", event.id).eq("user_id", uid!).eq("is_child", false).neq("status", "cancelled");
       return data ?? [];
     },
   });

@@ -14,7 +14,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { EventData } from "@/components/events/EventData";
-import { religionLabel } from "@/lib/event-data";
+import { registrationAge, religionLabel } from "@/lib/event-data";
 import { EventForm, draftFrom } from "@/components/events/EventForm";
 import { QrScanner, type ScanFeedbackKind } from "@/components/events/QrScanner";
 import { formatShortCode } from "@/lib/images";
@@ -273,9 +273,9 @@ function Registrations({ eventId, title, onChange }: { eventId: string; title: s
   const open = (regs.data ?? []).find((r) => r.id === openId) ?? null;
 
   function exportXls() {
-    const head = ["Nome", "CPF", "Data de nascimento", "Idade", "Religião", "Instituição", "Telefone", "E-mail", "Lote", "Quantidade", "Total (R$)", "Parcelas pagas", "Situação", "Uso de imagem", "Inscrito em"];
+    const head = ["Nome", "Tipo", "Responsável", "CPF", "Data de nascimento", "Idade", "Religião", "Instituição", "Telefone", "E-mail", "Lote", "Quantidade", "Total (R$)", "Parcelas pagas", "Situação", "Uso de imagem", "Inscrito em"];
     const rows = list.map((r) => [
-      r.attendee_name, r.attendee_cpf ?? "", dateBR(r.attendee_birth_date), ageFrom(r.attendee_birth_date) ?? "", religionLabel(r.attendee_religion), r.attendee_institution ?? "", r.attendee_phone ?? "", r.attendee_email ?? "", r.event_lots?.name ?? "", r.quantity, Number(r.total),
+      r.attendee_name, r.is_child ? "Criança" : "Adulto", r.is_child ? (r.guardian_name ?? "") : "", r.attendee_cpf ?? "", dateBR(r.attendee_birth_date), registrationAge(r) ?? "", r.is_child ? "" : religionLabel(r.attendee_religion), r.attendee_institution ?? "", r.attendee_phone ?? "", r.attendee_email ?? "", r.event_lots?.name ?? "", r.quantity, Number(r.total),
       `${(r.event_payments ?? []).filter((p) => p.status === "paid").length}/${(r.event_payments ?? []).length}`,
       REGISTRATION_STATUS[r.status] ?? r.status, r.image_consent ? `Autorizado em ${fmtDateTime(r.image_consent_at)}` : "Não solicitado/sem aceite", fmtDateTime(r.created_at),
     ]);
@@ -316,7 +316,10 @@ function Registrations({ eventId, title, onChange }: { eventId: string; title: s
               const claimed = pays.filter((p) => p.status === "claimed").length;
               return (
                 <tr key={r.id} className="border-b last:border-0">
-                  <td className="p-4"><p className="font-medium text-foreground">{r.attendee_name}</p><p className="text-xs text-muted-foreground">{r.attendee_phone}</p></td>
+                  <td className="p-4">
+                    <p className="font-medium text-foreground">{r.attendee_name}{r.is_child && <Badge variant="outline" className="ml-2">Criança</Badge>}</p>
+                    <p className="text-xs text-muted-foreground">{r.is_child ? `Filho(a) de ${r.guardian_name ?? "—"}${r.child_age != null ? ` · ${r.child_age} anos` : ""}` : r.attendee_phone}</p>
+                  </td>
                   <td className="p-4 text-muted-foreground">{r.event_lots?.name} × {r.quantity}</td>
                   <td className="p-4 text-foreground">{r.total > 0 ? moneyBR(r.total) : "Gratuito"}</td>
                   <td className="p-4 text-muted-foreground">
@@ -368,9 +371,18 @@ function RegistrationDetail({ reg, onChange }: { reg: RegRow; onChange: () => vo
       <div className="space-y-5 text-sm">
         <div className="grid gap-1 text-muted-foreground">
           <p>{reg.event_lots?.name} × {reg.quantity} · {reg.total > 0 ? moneyBR(reg.total) : "Gratuito"}</p>
-          <p>CPF: {reg.attendee_cpf || "—"} · Tel.: {reg.attendee_phone || "—"}</p>
-          <p>Nascimento: {dateBR(reg.attendee_birth_date)}{ageFrom(reg.attendee_birth_date) !== null ? ` (${ageFrom(reg.attendee_birth_date)} anos)` : ""}</p>
-          <p>Religião: {religionLabel(reg.attendee_religion)} · Instituição: {reg.attendee_institution || "—"}</p>
+          <p>CPF{reg.is_child ? " da criança" : ""}: {reg.attendee_cpf || "—"} · Tel.{reg.is_child ? " do responsável" : ""}: {reg.attendee_phone || "—"}</p>
+          {reg.is_child ? (
+            <>
+              <p>Inscrição de criança · Responsável: {reg.guardian_name || "—"}</p>
+              <p>Idade: {reg.child_age != null ? `${reg.child_age} anos` : "—"}</p>
+            </>
+          ) : (
+            <>
+              <p>Nascimento: {dateBR(reg.attendee_birth_date)}{ageFrom(reg.attendee_birth_date) !== null ? ` (${ageFrom(reg.attendee_birth_date)} anos)` : ""}</p>
+              <p>Religião: {religionLabel(reg.attendee_religion)} · Instituição: {reg.attendee_institution || "—"}</p>
+            </>
+          )}
           <p>{reg.attendee_email}</p>
           <p>Uso de imagem: {reg.image_consent ? `autorizado em ${fmtDateTime(reg.image_consent_at)}` : "sem aceite registrado"}</p>
           <p>Inscrito em {fmtDateTime(reg.created_at)}{reg.released_manually ? " · ingresso liberado manualmente" : ""}</p>

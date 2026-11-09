@@ -1,0 +1,1469 @@
+From c16344feb7bf9486f5651157caebc4266a201d57 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 9 Nov 2026 21:00:12 +0000
+Subject: [PATCH] =?UTF-8?q?feat(eventos):=20op=C3=A7=C3=A3o=20"Inscrever?=
+ =?UTF-8?q?=20meu=20filho"=20(nome,=20CPF=20e=20idade=20at=C3=A9=2013=20an?=
+ =?UTF-8?q?os)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Evento ganha o interruptor allow_child_registration e o aviso editável child_registration_notice
+- Nova RPC register_child_for_event: a criança ocupa vaga do lote, segue preço/pagamento do lote e recebe ingresso com QR code
+- A opção continua aparecendo depois da inscrição (inclusive para inscrever mais de um filho)
+- Painel adm, aba Dados, exportações e Meus ingressos mostram criança/responsável
+- Limite por pessoa passa a contar só as inscrições do adulto
+- Migration 20261109205252 já aplicada no Supabase
+---
+ src/components/events/ChildRegistration.tsx   | 352 ++++++++++++++++++
+ src/components/events/EventData.tsx           |  60 ++-
+ src/components/events/EventForm.tsx           |  16 +-
+ src/components/events/EventRegistration.tsx   |  13 +-
+ src/components/events/MyTickets.tsx           |   5 +
+ src/integrations/supabase/types.ts            |  27 ++
+ src/lib/event-data.ts                         |  25 +-
+ src/lib/events.ts                             |  35 ++
+ .../_authenticated/painel.evento.$id.tsx      |  26 +-
+ src/test/child-registration.test.tsx          | 292 +++++++++++++++
+ src/test/event-data.test.ts                   |  22 ++
+ src/test/event-registration-consent.test.tsx  |   2 +
+ ...0261109205252_event_child_registration.sql | 195 ++++++++++
+ 13 files changed, 1040 insertions(+), 30 deletions(-)
+ create mode 100644 src/components/events/ChildRegistration.tsx
+ create mode 100644 src/test/child-registration.test.tsx
+ create mode 100644 supabase/migrations/20261109205252_event_child_registration.sql
+
+diff --git a/src/components/events/ChildRegistration.tsx b/src/components/events/ChildRegistration.tsx
+new file mode 100644
+index 0000000..4e12549
+--- /dev/null
++++ b/src/components/events/ChildRegistration.tsx
+@@ -0,0 +1,352 @@
++import { useEffect, useState } from "react";
++import { Link } from "@tanstack/react-router";
++import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
++import { toast } from "sonner";
++import { Baby, CheckCircle2, Info } from "lucide-react";
++import { supabase } from "@/integrations/supabase/client";
++import { useAccess } from "@/hooks/use-access";
++import { Button } from "@/components/ui/button";
++import { Input } from "@/components/ui/input";
++import { Label } from "@/components/ui/label";
++import { Badge } from "@/components/ui/badge";
++import { Checkbox } from "@/components/ui/checkbox";
++import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
++import {
++  Select,
++  SelectContent,
++  SelectItem,
++  SelectTrigger,
++  SelectValue,
++} from "@/components/ui/select";
++import {
++  CHILD_MAX_AGE,
++  DEFAULT_CHILD_NOTICE,
++  eventError,
++  fmtDate,
++  formatCpf,
++  isValidCpf,
++  lotBlockReason,
++  moneyBR,
++  parseChildAge,
++  registrationIsOpen,
++  type PublicEventDetail,
++} from "@/lib/events";
++
++/**
++ * "Inscrever meu filho": opção do evento (liga/desliga na edição do evento).
++ * Fica sempre visível para quem está logado, mesmo depois de o responsável (ou outro filho) já ter sido inscrito.
++ * Cada criança ocupa uma vaga do lote e recebe um ingresso próprio com QR code.
++ */
++export function ChildRegistration({ detail }: { detail: PublicEventDetail }) {
++  if (!detail.event.allow_child_registration || !registrationIsOpen(detail.event)) return null;
++  return <ChildRegistrationBox detail={detail} />;
++}
++
++function ChildRegistrationBox({ detail }: { detail: PublicEventDetail }) {
++  const { event, lots } = detail;
++  const qc = useQueryClient();
++  const { data: access } = useAccess();
++  const uid = access?.uid;
++  const notice = event.child_registration_notice?.trim() || DEFAULT_CHILD_NOTICE;
++
++  const profile = useQuery({
++    queryKey: ["event-child-profile", uid],
++    enabled: !!uid,
++    queryFn: async () => {
++      const { data } = await supabase
++        .from("members")
++        .select("id, full_name, status, approval_status")
++        .eq("user_id", uid!)
++        .maybeSingle();
++      return data;
++    },
++  });
++
++  const [open, setOpen] = useState(false);
++  const [lotId, setLotId] = useState("");
++  const [name, setName] = useState("");
++  const [cpf, setCpf] = useState("");
++  const [age, setAge] = useState("");
++  const [installments, setInstallments] = useState(1);
++  const [imageConsent, setImageConsent] = useState(false);
++  const [last, setLast] = useState<{ name: string; paid: boolean } | null>(null);
++
++  const isMember =
++    profile.data?.approval_status === "aprovado" && profile.data?.status !== "visitante";
++  const eligible = lots.filter((l) => !lotBlockReason(event, l, isMember));
++  const selected = lots.find((l) => l.id === lotId);
++  const payRequired = event.payment_enabled && (selected?.price ?? 0) > 0;
++
++  useEffect(() => {
++    if (!lotId || !eligible.some((l) => l.id === lotId)) setLotId(eligible[0]?.id ?? "");
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [lots, isMember]);
++  useEffect(() => {
++    if (!payRequired || !event.allow_installments) setInstallments(1);
++  }, [payRequired, event.allow_installments]);
++
++  const register = useMutation({
++    mutationFn: async () => {
++      if (name.trim().split(/\s+/).filter(Boolean).length < 2)
++        throw new Error("invalid_child_name");
++      const childAge = parseChildAge(age);
++      if (childAge === null) throw new Error("invalid_child_age");
++      if (!isValidCpf(cpf)) throw new Error("invalid_child_cpf");
++      if (event.require_image_consent && !imageConsent) throw new Error("image_consent_required");
++      const { error } = await supabase.rpc("register_child_for_event", {
++        _event: event.id,
++        _lot: lotId,
++        _child_name: name.trim(),
++        _child_cpf: cpf,
++        _child_age: childAge,
++        _installments: installments,
++        _image_consent: event.require_image_consent && imageConsent,
++      });
++      if (error) throw error;
++      return name.trim();
++    },
++    onSuccess: (childName) => {
++      setLast({ name: childName, paid: payRequired });
++      setName("");
++      setCpf("");
++      setAge("");
++      setImageConsent(false);
++      setInstallments(1);
++      setOpen(false);
++      qc.invalidateQueries({ queryKey: ["public-event", event.slug] });
++      qc.invalidateQueries({ queryKey: ["public-events"] });
++      qc.invalidateQueries({ queryKey: ["my-registrations"] });
++    },
++    onError: (e) => {
++      toast.error(eventError(e));
++      qc.invalidateQueries({ queryKey: ["public-event", event.slug] });
++    },
++  });
++
++  // Só aparece para quem já está logado e tem cadastro (o formulário principal cuida de quem ainda não tem).
++  if (!uid || profile.isLoading || !profile.data) return null;
++
++  const noLots = eligible.length === 0;
++
++  return (
++    <div className="rounded-2xl border bg-card p-6 shadow-soft">
++      <div className="flex items-start gap-3">
++        <Baby className="mt-1 h-6 w-6 shrink-0 text-primary" aria-hidden />
++        <div className="min-w-0 flex-1">
++          <h3 className="text-xl text-foreground">Inscrever meu filho</h3>
++          <p className="mt-1 text-sm text-muted-foreground">
++            Para crianças de 0 a {CHILD_MAX_AGE} anos. Você pode inscrever mais de um filho.
++          </p>
++        </div>
++      </div>
++
++      <div
++        className="mt-4 flex items-start gap-2 rounded-lg border border-amber-300/60 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-500/40 dark:bg-amber-950/30 dark:text-amber-100"
++        role="note"
++      >
++        <Info className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
++        <p className="whitespace-pre-line">{notice}</p>
++      </div>
++
++      {last && (
++        <div
++          className="mt-4 flex items-start gap-3 rounded-lg bg-primary-soft p-3 text-sm text-foreground"
++          role="status"
++        >
++          <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-primary" aria-hidden />
++          <div>
++            <p className="font-medium">Inscrição de {last.name} realizada!</p>
++            <p className="mt-1 text-muted-foreground">
++              {last.paid
++                ? "Faça o pagamento e avise a igreja em “Meu cadastro”. O ingresso é liberado depois que o pagamento for conferido."
++                : "O ingresso com QR code da criança já está disponível."}{" "}
++              <Link
++                to="/painel/meu-cadastro"
++                search={{ convite: undefined }}
++                className="text-primary underline"
++              >
++                Ver em Meu cadastro
++              </Link>
++            </p>
++          </div>
++        </div>
++      )}
++
++      {noLots ? (
++        <p className="mt-4 text-sm text-muted-foreground">
++          Não há lotes disponíveis para inscrever uma criança agora (esgotados, fora do período ou
++          exclusivos para membros).
++        </p>
++      ) : !open ? (
++        <Button
++          type="button"
++          className="mt-4"
++          variant={last ? "outline" : "default"}
++          onClick={() => setOpen(true)}
++        >
++          <Baby className="h-4 w-4" /> {last ? "Inscrever outro filho" : "Inscrever meu filho"}
++        </Button>
++      ) : (
++        <form
++          className="mt-5 space-y-5"
++          onSubmit={(e) => {
++            e.preventDefault();
++            register.mutate();
++          }}
++        >
++          {lots.length > 1 && (
++            <div className="space-y-2">
++              <Label>Escolha o lote</Label>
++              <RadioGroup value={lotId} onValueChange={setLotId} className="gap-2">
++                {lots.map((l) => {
++                  const blocked = lotBlockReason(event, l, isMember);
++                  return (
++                    <label
++                      key={l.id}
++                      className={`flex items-center justify-between gap-3 rounded-lg border px-4 py-3 text-sm ${blocked ? "opacity-60" : "cursor-pointer"}`}
++                    >
++                      <span className="flex items-center gap-3">
++                        <RadioGroupItem value={l.id} disabled={!!blocked} />
++                        <span>
++                          <span className="block font-medium text-foreground">{l.name}</span>
++                          <span className="block text-xs text-muted-foreground">
++                            {l.spots_left === null
++                              ? "Vagas ilimitadas"
++                              : `${l.spots_left} vagas restantes`}
++                            {l.closes_at ? ` · até ${fmtDate(l.closes_at)}` : ""}
++                          </span>
++                        </span>
++                      </span>
++                      <span className="text-right">
++                        <span className="block font-semibold text-foreground">
++                          {event.payment_enabled && l.price > 0 ? moneyBR(l.price) : "Gratuito"}
++                        </span>
++                        {blocked && <Badge variant="secondary">{blocked}</Badge>}
++                      </span>
++                    </label>
++                  );
++                })}
++              </RadioGroup>
++            </div>
++          )}
++
++          <div className="space-y-1.5">
++            <Label htmlFor="child-name">Nome completo da criança *</Label>
++            <Input
++              id="child-name"
++              required
++              maxLength={120}
++              autoComplete="off"
++              value={name}
++              onChange={(e) => setName(e.target.value)}
++            />
++          </div>
++          <div className="grid gap-4 sm:grid-cols-2">
++            <div className="space-y-1.5">
++              <Label htmlFor="child-cpf">CPF da criança *</Label>
++              <Input
++                id="child-cpf"
++                required
++                inputMode="numeric"
++                placeholder="000.000.000-00"
++                autoComplete="off"
++                value={cpf}
++                onChange={(e) => setCpf(formatCpf(e.target.value))}
++              />
++            </div>
++            <div className="space-y-1.5">
++              <Label htmlFor="child-age">Idade da criança *</Label>
++              <Input
++                id="child-age"
++                required
++                type="number"
++                inputMode="numeric"
++                min={0}
++                max={CHILD_MAX_AGE}
++                placeholder={`0 a ${CHILD_MAX_AGE}`}
++                value={age}
++                onChange={(e) => setAge(e.target.value)}
++              />
++              <p className="text-xs text-muted-foreground">Máximo de {CHILD_MAX_AGE} anos.</p>
++            </div>
++          </div>
++
++          {payRequired && event.allow_installments && event.max_installments > 1 && (
++            <div className="space-y-1.5">
++              <Label>Forma de pagamento (Pix)</Label>
++              <Select
++                value={String(installments)}
++                onValueChange={(v) => setInstallments(Number(v))}
++              >
++                <SelectTrigger>
++                  <SelectValue />
++                </SelectTrigger>
++                <SelectContent>
++                  {Array.from({ length: event.max_installments }, (_, i) => i + 1).map((n) => (
++                    <SelectItem key={n} value={String(n)}>
++                      {n === 1
++                        ? `À vista — ${moneyBR(selected?.price ?? 0)}`
++                        : `${n}x de ${moneyBR((selected?.price ?? 0) / n)}`}
++                    </SelectItem>
++                  ))}
++                </SelectContent>
++              </Select>
++            </div>
++          )}
++
++          {event.require_image_consent && (
++            <label className="flex cursor-pointer items-start gap-3 rounded-lg border bg-primary-soft/40 p-4 text-sm">
++              <Checkbox
++                className="mt-0.5"
++                checked={imageConsent}
++                onCheckedChange={(on) => setImageConsent(on === true)}
++                aria-required="true"
++              />
++              <span>
++                <span className="block font-medium text-foreground">
++                  Estou de acordo com o uso de imagem da criança *
++                </span>
++                <span className="block text-xs text-muted-foreground">
++                  Como responsável, autorizo o uso da imagem (fotos e vídeos) da criança registrada
++                  neste evento.
++                </span>
++              </span>
++            </label>
++          )}
++
++          <p className="text-xs text-muted-foreground">
++            Os dados da criança (nome, CPF e idade) são usados só para controlar a vaga e a entrada
++            no evento.
++          </p>
++
++          <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4">
++            <p className="text-sm text-muted-foreground">
++              Valor da inscrição da criança:{" "}
++              <strong className="text-lg text-foreground">
++                {payRequired ? moneyBR(selected?.price ?? 0) : "Gratuito"}
++              </strong>
++            </p>
++            <div className="flex gap-2">
++              <Button
++                type="button"
++                variant="ghost"
++                onClick={() => setOpen(false)}
++                disabled={register.isPending}
++              >
++                Cancelar
++              </Button>
++              <Button
++                type="submit"
++                disabled={
++                  register.isPending || !lotId || (event.require_image_consent && !imageConsent)
++                }
++              >
++                Inscrever criança
++              </Button>
++            </div>
++          </div>
++        </form>
++      )}
++    </div>
++  );
++}
+diff --git a/src/components/events/EventData.tsx b/src/components/events/EventData.tsx
+index e9a283b..ef23dda 100644
+--- a/src/components/events/EventData.tsx
++++ b/src/components/events/EventData.tsx
+@@ -31,7 +31,13 @@ import {
+ import { downloadSheets } from "@/lib/export";
+ import { ageFrom, dateBR } from "@/lib/church";
+ import { fmtDateTime, REGISTRATION_STATUS } from "@/lib/events";
+-import { MEMBER_RELIGION, RELIGIONS, religionLabel, summarizePeople } from "@/lib/event-data";
++import {
++  MEMBER_RELIGION,
++  RELIGIONS,
++  registrationAge,
++  religionLabel,
++  summarizePeople,
++} from "@/lib/event-data";
+ 
+ type Row = Tables<"event_registrations"> & { event_lots: { name: string } | null };
+ 
+@@ -115,6 +121,8 @@ export function EventData({ eventId, title }: { eventId: string; title: string }
+         rows: [
+           [
+             "Nome",
++            "Tipo",
++            "Responsável",
+             "CPF",
+             "Telefone",
+             "E-mail",
+@@ -128,12 +136,14 @@ export function EventData({ eventId, title }: { eventId: string; title: string }
+           ],
+           ...people.map((r) => [
+             r.attendee_name,
++            r.is_child ? "Criança" : "Adulto",
++            r.is_child ? (r.guardian_name ?? "") : "",
+             r.attendee_cpf ?? "",
+             r.attendee_phone ?? "",
+             r.attendee_email ?? "",
+             dateBR(r.attendee_birth_date),
+-            ageFrom(r.attendee_birth_date) ?? "",
+-            religionLabel(r.attendee_religion),
++            registrationAge(r) ?? "",
++            r.is_child ? "" : religionLabel(r.attendee_religion),
+             r.attendee_institution ?? "",
+             r.event_lots?.name ?? "",
+             REGISTRATION_STATUS[r.status] ?? r.status,
+@@ -174,6 +184,13 @@ export function EventData({ eventId, title }: { eventId: string; title: string }
+           </div>
+         ))}
+       </div>
++      {sum.children > 0 && (
++        <p className="-mt-3 text-xs text-muted-foreground">
++          Inclui {sum.children} {sum.children === 1 ? "inscrição de filho(a)" : "inscrições de filhos"}.
++          As crianças entram na idade e nas faixas etárias, mas não nas contagens de religião e
++          instituição.
++        </p>
++      )}
+       {sum.ageStats.count < sum.total && (
+         <p className="-mt-3 text-xs text-muted-foreground">
+           A idade considera {sum.ageStats.count} de {sum.total} inscritos (os demais não têm data de
+@@ -315,12 +332,17 @@ export function EventData({ eventId, title }: { eventId: string; title: string }
+               )}
+               {list.map((r) => (
+                 <tr key={r.id} className="border-b last:border-0">
+-                  <td className="p-4 font-medium text-foreground">{r.attendee_name}</td>
+-                  <td className="p-4 text-muted-foreground">
+-                    {ageFrom(r.attendee_birth_date) ?? "—"}
++                  <td className="p-4 font-medium text-foreground">
++                    {r.attendee_name}
++                    {r.is_child && (
++                      <Badge variant="outline" className="ml-2">
++                        Criança
++                      </Badge>
++                    )}
+                   </td>
++                  <td className="p-4 text-muted-foreground">{registrationAge(r) ?? "—"}</td>
+                   <td className="p-4 text-muted-foreground">
+-                    {religionLabel(r.attendee_religion)}
++                    {r.is_child ? "—" : religionLabel(r.attendee_religion)}
+                   </td>
+                   <td className="p-4 text-muted-foreground">{r.attendee_institution || "—"}</td>
+                   <td className="p-4 text-muted-foreground">{r.attendee_phone || "—"}</td>
+@@ -350,14 +372,22 @@ export function EventData({ eventId, title }: { eventId: string; title: string }
+                     ["Telefone", open.attendee_phone || "—"],
+                     ["E-mail", open.attendee_email || "—"],
+                     ["CPF", open.attendee_cpf || "—"],
+-                    [
+-                      "Data de nascimento",
+-                      open.attendee_birth_date
+-                        ? `${dateBR(open.attendee_birth_date)} (${ageFrom(open.attendee_birth_date)} anos)`
+-                        : "—",
+-                    ],
+-                    ["Religião", religionLabel(open.attendee_religion)],
+-                    ["Instituição", open.attendee_institution || "—"],
++                    ...(open.is_child
++                      ? ([
++                          ["Inscrição", "Criança (filho/a)"],
++                          ["Responsável", open.guardian_name || "—"],
++                          ["Idade", open.child_age == null ? "—" : `${open.child_age} anos`],
++                        ] as const)
++                      : ([
++                          [
++                            "Data de nascimento",
++                            open.attendee_birth_date
++                              ? `${dateBR(open.attendee_birth_date)} (${ageFrom(open.attendee_birth_date)} anos)`
++                              : "—",
++                          ],
++                          ["Religião", religionLabel(open.attendee_religion)],
++                          ["Instituição", open.attendee_institution || "—"],
++                        ] as const)),
+                     ["Lote", `${open.event_lots?.name ?? "—"} × ${open.quantity}`],
+                     ["Inscrito em", fmtDateTime(open.created_at)],
+                   ] as const
+diff --git a/src/components/events/EventForm.tsx b/src/components/events/EventForm.tsx
+index 14751b3..ccaf4ad 100644
+--- a/src/components/events/EventForm.tsx
++++ b/src/components/events/EventForm.tsx
+@@ -11,7 +11,7 @@ import { Switch } from "@/components/ui/switch";
+ import { Textarea } from "@/components/ui/textarea";
+ import { Checkbox } from "@/components/ui/checkbox";
+ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+-import { eventError, fromLocalInput, slugify, toLocalInput } from "@/lib/events";
++import { DEFAULT_CHILD_NOTICE, eventError, fromLocalInput, slugify, toLocalInput } from "@/lib/events";
+ import { compressImage, fileExt } from "@/lib/images";
+ import type { Tables } from "@/integrations/supabase/types";
+ 
+@@ -41,6 +41,8 @@ export type EventDraft = {
+   limit_per_person: boolean;
+   max_per_person: string;
+   require_image_consent: boolean;
++  allow_child_registration: boolean;
++  child_registration_notice: string;
+ };
+ 
+ const SINGLE_LOT = "Ingresso";
+@@ -52,6 +54,7 @@ export const blankEvent = (): EventDraft => ({
+   card_contact_note: "Para pagar no cartão, entre em contato com a igreja.",
+   allow_installments: false, max_installments: "3", limit_per_person: false, max_per_person: "2",
+   require_image_consent: false,
++  allow_child_registration: false, child_registration_notice: DEFAULT_CHILD_NOTICE,
+ });
+ 
+ export function draftFrom(
+@@ -76,6 +79,8 @@ export function draftFrom(
+     allow_installments: e.allow_installments, max_installments: String(Math.max(2, e.max_installments)),
+     limit_per_person: e.limit_per_person, max_per_person: String(e.max_per_person ?? 2),
+     require_image_consent: e.require_image_consent,
++    allow_child_registration: e.allow_child_registration,
++    child_registration_notice: e.child_registration_notice ?? DEFAULT_CHILD_NOTICE,
+   };
+ }
+ 
+@@ -98,6 +103,7 @@ function validate(d: EventDraft) {
+       return "Informe como pagar: link, chave Pix, QR code ou pagamento no cartão.";
+     if (d.allow_installments && !(Number(d.max_installments) >= 2 && Number(d.max_installments) <= 12)) return "O parcelamento deve ter entre 2 e 12 parcelas.";
+   }
++  if (d.allow_child_registration && d.child_registration_notice.length > 500) return "O aviso da inscrição de filho pode ter até 500 caracteres.";
+   if (d.limit_per_person && !(Number.isInteger(Number(d.max_per_person)) && Number(d.max_per_person) >= 1)) return "Informe quantas inscrições cada pessoa pode fazer.";
+   return null;
+ }
+@@ -115,6 +121,8 @@ async function saveEvent(d: EventDraft, userId: string | null | undefined, qrFil
+     max_installments: d.payment_enabled && d.allow_installments ? Number(d.max_installments) : 1,
+     limit_per_person: d.limit_per_person, max_per_person: d.limit_per_person ? Number(d.max_per_person) : null,
+     require_image_consent: d.require_image_consent,
++    allow_child_registration: d.allow_child_registration,
++    child_registration_notice: d.allow_child_registration ? d.child_registration_notice.trim() || null : null,
+   };
+ 
+   let eventId = d.id;
+@@ -250,6 +258,12 @@ export function EventForm({ initial, onSaved }: { initial: EventDraft; onSaved:
+           <Field label="Quantas inscrições cada pessoa pode fazer?"><Input type="number" min={1} value={d.max_per_person} onChange={(e) => set({ max_per_person: e.target.value })} className="max-w-32" /></Field>
+         )}
+         <Toggle checked={d.require_image_consent} onChange={(v) => set({ require_image_consent: v })} title="Exigir autorização de uso de imagem" help="Quem se inscrever precisa marcar “Estou de acordo com meu uso de imagem”. Sem o aceite, a inscrição não é feita." />
++        <Toggle checked={d.allow_child_registration} onChange={(v) => set({ allow_child_registration: v })} title="Permitir “Inscrever meu filho”" help="O responsável inscreve crianças de 0 a 13 anos (nome, CPF e idade). Cada criança ocupa uma vaga do lote e recebe um ingresso com QR code. A opção continua aparecendo mesmo depois de o responsável já ter se inscrito." />
++        {d.allow_child_registration && (
++          <Field label="Aviso na inscrição de filho" hint="Aparece em destaque antes do formulário da criança. Pode editar à vontade (até 500 caracteres).">
++            <Textarea rows={3} maxLength={500} value={d.child_registration_notice} onChange={(e) => set({ child_registration_notice: e.target.value })} />
++          </Field>
++        )}
+       </section>
+ 
+       <section className="space-y-4">
+diff --git a/src/components/events/EventRegistration.tsx b/src/components/events/EventRegistration.tsx
+index 29a0f59..5164549 100644
+--- a/src/components/events/EventRegistration.tsx
++++ b/src/components/events/EventRegistration.tsx
+@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
+ import { Badge } from "@/components/ui/badge";
+ import { Checkbox } from "@/components/ui/checkbox";
+ import { PrivacyConsent } from "@/components/auth/PrivacyConsent";
++import { ChildRegistration } from "@/components/events/ChildRegistration";
+ import { recordPrivacyConsent, recordSensitiveConsent } from "@/lib/privacy";
+ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+ import { RELIGIONS } from "@/lib/event-data";
+@@ -22,7 +23,17 @@ import {
+ 
+ const Box = ({ children }: { children: React.ReactNode }) => <div className="rounded-2xl border bg-card p-6 shadow-soft">{children}</div>;
+ 
++/** Inscrição do adulto + (se o evento permitir) "Inscrever meu filho", que continua aparecendo depois da inscrição. */
+ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
++  return (
++    <div className="space-y-6">
++      <EventRegistrationMain detail={detail} />
++      <ChildRegistration detail={detail} />
++    </div>
++  );
++}
++
++function EventRegistrationMain({ detail }: { detail: PublicEventDetail }) {
+   const { event, lots } = detail;
+   const qc = useQueryClient();
+   const { data: access, isLoading: loadingAccess } = useAccess();
+@@ -46,7 +57,7 @@ export function EventRegistration({ detail }: { detail: PublicEventDetail }) {
+     queryKey: ["event-my-regs", uid, event.id],
+     enabled: !!uid,
+     queryFn: async () => {
+-      const { data } = await supabase.from("event_registrations").select("id").eq("event_id", event.id).eq("user_id", uid!).neq("status", "cancelled");
++      const { data } = await supabase.from("event_registrations").select("id").eq("event_id", event.id).eq("user_id", uid!).eq("is_child", false).neq("status", "cancelled");
+       return data ?? [];
+     },
+   });
+diff --git a/src/components/events/MyTickets.tsx b/src/components/events/MyTickets.tsx
+index 85e90b4..08643e8 100644
+--- a/src/components/events/MyTickets.tsx
++++ b/src/components/events/MyTickets.tsx
+@@ -194,6 +194,11 @@ export function MyTickets({ uid }: { uid: string }) {
+                     <CalendarDays className="h-4 w-4" /> {r.events ? fmtDateTime(r.events.starts_at) : ""}
+                     {r.events?.location ? ` · ${r.events.location}` : ""}
+                   </p>
++                  {r.is_child && (
++                    <p className="mt-1 text-sm font-medium text-foreground">
++                      Ingresso de {r.attendee_name} <Badge variant="outline" className="ml-1">Filho(a)</Badge>
++                    </p>
++                  )}
+                   <p className="mt-1 text-sm text-muted-foreground">
+                     {r.event_lots?.name} · {r.quantity} {r.quantity === 1 ? "ingresso" : "ingressos"}
+                     {r.total > 0 ? ` · ${moneyBR(r.total)}` : ""}
+diff --git a/src/integrations/supabase/types.ts b/src/integrations/supabase/types.ts
+index 6292aee..8e43edf 100644
+--- a/src/integrations/supabase/types.ts
++++ b/src/integrations/supabase/types.ts
+@@ -324,12 +324,15 @@ export type Database = {
+           attendee_phone: string | null
+           attendee_religion: string | null
+           cancelled_at: string | null
++          child_age: number | null
+           created_at: string
+           event_id: string
++          guardian_name: string | null
+           id: string
+           image_consent: boolean
+           image_consent_at: string | null
+           installments: number
++          is_child: boolean
+           lot_id: string
+           member_id: string | null
+           quantity: number
+@@ -350,12 +353,15 @@ export type Database = {
+           attendee_phone?: string | null
+           attendee_religion?: string | null
+           cancelled_at?: string | null
++          child_age?: number | null
+           created_at?: string
+           event_id: string
++          guardian_name?: string | null
+           id?: string
+           image_consent?: boolean
+           image_consent_at?: string | null
+           installments?: number
++          is_child?: boolean
+           lot_id: string
+           member_id?: string | null
+           quantity: number
+@@ -376,12 +382,15 @@ export type Database = {
+           attendee_phone?: string | null
+           attendee_religion?: string | null
+           cancelled_at?: string | null
++          child_age?: number | null
+           created_at?: string
+           event_id?: string
++          guardian_name?: string | null
+           id?: string
+           image_consent?: boolean
+           image_consent_at?: string | null
+           installments?: number
++          is_child?: boolean
+           lot_id?: string
+           member_id?: string | null
+           quantity?: number
+@@ -477,8 +486,10 @@ export type Database = {
+       events: {
+         Row: {
+           accepts_card: boolean
++          allow_child_registration: boolean
+           allow_installments: boolean
+           audience: string
++          child_registration_notice: string | null
+           created_at: string
+           created_by: string | null
+           description: string | null
+@@ -500,8 +511,10 @@ export type Database = {
+         }
+         Insert: {
+           accepts_card?: boolean
++          allow_child_registration?: boolean
+           allow_installments?: boolean
+           audience?: string
++          child_registration_notice?: string | null
+           created_at?: string
+           created_by?: string | null
+           description?: string | null
+@@ -523,8 +536,10 @@ export type Database = {
+         }
+         Update: {
+           accepts_card?: boolean
++          allow_child_registration?: boolean
+           allow_installments?: boolean
+           audience?: string
++          child_registration_notice?: string | null
+           created_at?: string
+           created_by?: string | null
+           description?: string | null
+@@ -1247,6 +1262,18 @@ export type Database = {
+           title: string
+         }[]
+       }
++      register_child_for_event: {
++        Args: {
++          _child_age: number
++          _child_cpf: string
++          _child_name: string
++          _event: string
++          _image_consent?: boolean
++          _installments?: number
++          _lot: string
++        }
++        Returns: string
++      }
+       register_for_event: {
+         Args: {
+           _cpf: string
+diff --git a/src/lib/event-data.ts b/src/lib/event-data.ts
+index 6dd7076..717c7cd 100644
+--- a/src/lib/event-data.ts
++++ b/src/lib/event-data.ts
+@@ -28,11 +28,19 @@ export const AGE_BANDS = [
+ ] as const;
+ 
+ export type Person = {
++  /** Inscrição de filho(a): idade informada pelo responsável e sem religião/instituição. */
++  is_child?: boolean | null;
++  child_age?: number | null;
+   attendee_birth_date?: string | null;
+   attendee_religion?: string | null;
+   attendee_institution?: string | null;
+ };
+ 
++/** Idade da inscrição: a informada pelo responsável (filho/a) ou a calculada pela data de nascimento. */
++export function registrationAge(r: Person): number | null {
++  return r.is_child ? (r.child_age ?? null) : ageFrom(r.attendee_birth_date);
++}
++
+ const round1 = (n: number) => Math.round(n * 10) / 10;
+ const norm = (s: string) =>
+   s
+@@ -48,8 +56,11 @@ export function summarizePeople(
+   ageOf: (b?: string | null) => number | null = ageFrom,
+ ) {
+   const total = people.length;
++  // Religião e instituição são perguntas feitas ao adulto: crianças ficam fora dessas contagens.
++  const adults = people.filter((p) => !p.is_child);
++  const children = total - adults.length;
+   const ages = people
+-    .map((p) => ageOf(p.attendee_birth_date))
++    .map((p) => (p.is_child ? (p.child_age ?? null) : ageOf(p.attendee_birth_date)))
+     .filter((a): a is number => a !== null)
+     .sort((a, b) => a - b);
+   const mid = Math.floor(ages.length / 2);
+@@ -70,17 +81,19 @@ export function summarizePeople(
+   }));
+ 
+   const rel = new Map<string, number>();
+-  for (const p of people)
++  for (const p of adults)
+     rel.set(p.attendee_religion ?? "", (rel.get(p.attendee_religion ?? "") ?? 0) + 1);
+   const religions = [...RELIGIONS.map((r) => r.value as string), MEMBER_RELIGION.value, ""]
+     .map((value) => ({ value, label: religionLabel(value || null), count: rel.get(value) ?? 0 }))
+     .filter(
+-      (r) => r.count > 0 || (r.value !== "" && r.value !== MEMBER_RELIGION.value && total > 0),
++      (r) =>
++        r.count > 0 ||
++        (r.value !== "" && r.value !== MEMBER_RELIGION.value && adults.length > 0),
+     )
+-    .map((r) => ({ ...r, pct: total ? round1((r.count / total) * 100) : 0 }));
++    .map((r) => ({ ...r, pct: adults.length ? round1((r.count / adults.length) * 100) : 0 }));
+ 
+   const inst = new Map<string, { name: string; count: number }>();
+-  for (const p of people) {
++  for (const p of adults) {
+     const name = (p.attendee_institution ?? "").trim();
+     if (!name) continue;
+     const k = norm(name);
+@@ -92,5 +105,5 @@ export function summarizePeople(
+     (a, b) => b.count - a.count || a.name.localeCompare(b.name, "pt-BR"),
+   );
+ 
+-  return { total, ageStats, bands, religions, institutions };
++  return { total, children, ageStats, bands, religions, institutions };
+ }
+diff --git a/src/lib/events.ts b/src/lib/events.ts
+index 7fc3fa3..d8b6c9b 100644
+--- a/src/lib/events.ts
++++ b/src/lib/events.ts
+@@ -77,6 +77,12 @@ const ERRORS: Record<string, string> = {
+   invalid_birth_date: "Data de nascimento inválida. Confira o dia, mês e ano.",
+   invalid_institution: "Informe a instituição da qual você participa (ou escreva \"Nenhuma\").",
+   invalid_religion: "Escolha a sua religião na lista.",
++  child_registration_disabled: "Este evento não está com a inscrição de filhos ativa.",
++  invalid_child_name: "Digite o nome completo da criança.",
++  invalid_child_age: "A idade da criança deve ser de 0 a 13 anos.",
++  invalid_child_cpf: "CPF da criança inválido. Confira os números.",
++  child_cpf_same_as_guardian: "O CPF da criança não pode ser o mesmo do responsável.",
++  child_already_registered: "Esta criança já está inscrita neste evento.",
+   cannot_cancel: "Esta inscrição não pode mais ser cancelada por aqui. Fale com a igreja.",
+   payment_closed: "Este pagamento não pode mais ser alterado.",
+   invalid_proof: "Arquivo de comprovante inválido.",
+@@ -88,6 +94,7 @@ const ERRORS: Record<string, string> = {
+ export function eventError(e: unknown) {
+   const msg = e instanceof Error ? e.message : typeof e === "object" && e && "message" in e ? String((e as { message: unknown }).message) : "";
+   if (msg.includes("events_slug_key")) return "Já existe um evento com esse endereço (slug). Mude o nome ou o endereço.";
++  if (msg.includes("event_registrations_child_cpf_key")) return ERRORS["child_already_registered"]!;
+   return ERRORS[msg] ?? (msg || "Algo deu errado. Tente novamente.");
+ }
+ 
+@@ -135,6 +142,8 @@ export type PublicEvent = {
+   limit_per_person: boolean;
+   max_per_person: number | null;
+   require_image_consent: boolean;
++  allow_child_registration: boolean;
++  child_registration_notice: string | null;
+ };
+ export type PublicEventDetail = { event: PublicEvent; lots: PublicLot[] };
+ export const asEventDetail = (j: Json | null) => (j ? (j as unknown as PublicEventDetail) : null);
+@@ -143,3 +152,29 @@ export const lotIsOpen = (l: PublicLot, now = new Date()) =>
+   (!l.opens_at || new Date(l.opens_at) <= now) && (!l.closes_at || new Date(l.closes_at) >= now);
+ export const registrationIsOpen = (e: Pick<PublicEvent, "registration_opens_at" | "registration_closes_at">, now = new Date()) =>
+   (!e.registration_opens_at || new Date(e.registration_opens_at) <= now) && (!e.registration_closes_at || new Date(e.registration_closes_at) >= now);
++
++/** Idade máxima aceita na inscrição de filho(a). */
++export const CHILD_MAX_AGE = 13;
++
++/** Aviso padrão mostrado na inscrição de filho(a) quando a igreja não escreve outro. */
++export const DEFAULT_CHILD_NOTICE = "Só faça a inscrição da criança se ela for ocupar uma cadeira.";
++
++/** Idade da criança: número inteiro de 0 a 13 (vazio ou fora disso = inválido). */
++export function parseChildAge(v: string): number | null {
++  if (!/^\d{1,2}$/.test(v.trim())) return null;
++  const n = Number(v);
++  return n >= 0 && n <= CHILD_MAX_AGE ? n : null;
++}
++
++/** Motivo pelo qual o lote não aceita a inscrição deste responsável (null = pode escolher). */
++export function lotBlockReason(
++  event: Pick<PublicEvent, "audience">,
++  lot: PublicLot,
++  isMember: boolean,
++  now = new Date(),
++): string | null {
++  if (event.audience === "members" && !isMember && !lot.public_access) return "Só para membros";
++  if (!lotIsOpen(lot, now)) return "Fora do período";
++  if (lot.spots_left === 0) return "Esgotado";
++  return null;
++}
+diff --git a/src/routes/_authenticated/painel.evento.$id.tsx b/src/routes/_authenticated/painel.evento.$id.tsx
+index 2277fd4..fdc71d7 100644
+--- a/src/routes/_authenticated/painel.evento.$id.tsx
++++ b/src/routes/_authenticated/painel.evento.$id.tsx
+@@ -14,7 +14,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
+ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+ import { EventData } from "@/components/events/EventData";
+-import { religionLabel } from "@/lib/event-data";
++import { registrationAge, religionLabel } from "@/lib/event-data";
+ import { EventForm, draftFrom } from "@/components/events/EventForm";
+ import { QrScanner, type ScanFeedbackKind } from "@/components/events/QrScanner";
+ import { formatShortCode } from "@/lib/images";
+@@ -273,9 +273,9 @@ function Registrations({ eventId, title, onChange }: { eventId: string; title: s
+   const open = (regs.data ?? []).find((r) => r.id === openId) ?? null;
+ 
+   function exportXls() {
+-    const head = ["Nome", "CPF", "Data de nascimento", "Idade", "Religião", "Instituição", "Telefone", "E-mail", "Lote", "Quantidade", "Total (R$)", "Parcelas pagas", "Situação", "Uso de imagem", "Inscrito em"];
++    const head = ["Nome", "Tipo", "Responsável", "CPF", "Data de nascimento", "Idade", "Religião", "Instituição", "Telefone", "E-mail", "Lote", "Quantidade", "Total (R$)", "Parcelas pagas", "Situação", "Uso de imagem", "Inscrito em"];
+     const rows = list.map((r) => [
+-      r.attendee_name, r.attendee_cpf ?? "", dateBR(r.attendee_birth_date), ageFrom(r.attendee_birth_date) ?? "", religionLabel(r.attendee_religion), r.attendee_institution ?? "", r.attendee_phone ?? "", r.attendee_email ?? "", r.event_lots?.name ?? "", r.quantity, Number(r.total),
++      r.attendee_name, r.is_child ? "Criança" : "Adulto", r.is_child ? (r.guardian_name ?? "") : "", r.attendee_cpf ?? "", dateBR(r.attendee_birth_date), registrationAge(r) ?? "", r.is_child ? "" : religionLabel(r.attendee_religion), r.attendee_institution ?? "", r.attendee_phone ?? "", r.attendee_email ?? "", r.event_lots?.name ?? "", r.quantity, Number(r.total),
+       `${(r.event_payments ?? []).filter((p) => p.status === "paid").length}/${(r.event_payments ?? []).length}`,
+       REGISTRATION_STATUS[r.status] ?? r.status, r.image_consent ? `Autorizado em ${fmtDateTime(r.image_consent_at)}` : "Não solicitado/sem aceite", fmtDateTime(r.created_at),
+     ]);
+@@ -316,7 +316,10 @@ function Registrations({ eventId, title, onChange }: { eventId: string; title: s
+               const claimed = pays.filter((p) => p.status === "claimed").length;
+               return (
+                 <tr key={r.id} className="border-b last:border-0">
+-                  <td className="p-4"><p className="font-medium text-foreground">{r.attendee_name}</p><p className="text-xs text-muted-foreground">{r.attendee_phone}</p></td>
++                  <td className="p-4">
++                    <p className="font-medium text-foreground">{r.attendee_name}{r.is_child && <Badge variant="outline" className="ml-2">Criança</Badge>}</p>
++                    <p className="text-xs text-muted-foreground">{r.is_child ? `Filho(a) de ${r.guardian_name ?? "—"}${r.child_age != null ? ` · ${r.child_age} anos` : ""}` : r.attendee_phone}</p>
++                  </td>
+                   <td className="p-4 text-muted-foreground">{r.event_lots?.name} × {r.quantity}</td>
+                   <td className="p-4 text-foreground">{r.total > 0 ? moneyBR(r.total) : "Gratuito"}</td>
+                   <td className="p-4 text-muted-foreground">
+@@ -368,9 +371,18 @@ function RegistrationDetail({ reg, onChange }: { reg: RegRow; onChange: () => vo
+       <div className="space-y-5 text-sm">
+         <div className="grid gap-1 text-muted-foreground">
+           <p>{reg.event_lots?.name} × {reg.quantity} · {reg.total > 0 ? moneyBR(reg.total) : "Gratuito"}</p>
+-          <p>CPF: {reg.attendee_cpf || "—"} · Tel.: {reg.attendee_phone || "—"}</p>
+-          <p>Nascimento: {dateBR(reg.attendee_birth_date)}{ageFrom(reg.attendee_birth_date) !== null ? ` (${ageFrom(reg.attendee_birth_date)} anos)` : ""}</p>
+-          <p>Religião: {religionLabel(reg.attendee_religion)} · Instituição: {reg.attendee_institution || "—"}</p>
++          <p>CPF{reg.is_child ? " da criança" : ""}: {reg.attendee_cpf || "—"} · Tel.{reg.is_child ? " do responsável" : ""}: {reg.attendee_phone || "—"}</p>
++          {reg.is_child ? (
++            <>
++              <p>Inscrição de criança · Responsável: {reg.guardian_name || "—"}</p>
++              <p>Idade: {reg.child_age != null ? `${reg.child_age} anos` : "—"}</p>
++            </>
++          ) : (
++            <>
++              <p>Nascimento: {dateBR(reg.attendee_birth_date)}{ageFrom(reg.attendee_birth_date) !== null ? ` (${ageFrom(reg.attendee_birth_date)} anos)` : ""}</p>
++              <p>Religião: {religionLabel(reg.attendee_religion)} · Instituição: {reg.attendee_institution || "—"}</p>
++            </>
++          )}
+           <p>{reg.attendee_email}</p>
+           <p>Uso de imagem: {reg.image_consent ? `autorizado em ${fmtDateTime(reg.image_consent_at)}` : "sem aceite registrado"}</p>
+           <p>Inscrito em {fmtDateTime(reg.created_at)}{reg.released_manually ? " · ingresso liberado manualmente" : ""}</p>
+diff --git a/src/test/child-registration.test.tsx b/src/test/child-registration.test.tsx
+new file mode 100644
+index 0000000..9ff07fd
+--- /dev/null
++++ b/src/test/child-registration.test.tsx
+@@ -0,0 +1,292 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
++import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
++
++const h = vi.hoisted(() => ({
++  toastError: vi.fn(),
++  rpc: vi.fn(),
++  profile: null as null | Record<string, unknown>,
++}));
++
++vi.mock("@tanstack/react-router", () => ({
++  Link: ({ children, to, ...rest }: { children: React.ReactNode; to: string }) => (
++    <a href={to} {...rest}>
++      {children}
++    </a>
++  ),
++}));
++vi.mock("sonner", () => ({ toast: { error: h.toastError, success: vi.fn() } }));
++vi.mock("@/hooks/use-access", () => ({
++  useAccess: () => ({ data: { uid: "u1" }, isLoading: false }),
++}));
++vi.mock("@/integrations/supabase/client", () => ({
++  supabase: {
++    rpc: h.rpc,
++    auth: { getUser: () => Promise.resolve({ data: { user: { user_metadata: {} } } }) },
++    from: (table: string) => {
++      if (table === "members") {
++        const chain = {
++          select: () => chain,
++          eq: () => chain,
++          maybeSingle: () => Promise.resolve({ data: h.profile }),
++        };
++        return chain;
++      }
++      const chain = {
++        select: () => chain,
++        eq: () => chain,
++        neq: () => Promise.resolve({ data: [] }),
++      };
++      return chain;
++    },
++  },
++}));
++
++import { ChildRegistration } from "@/components/events/ChildRegistration";
++import { EventRegistration } from "@/components/events/EventRegistration";
++import {
++  DEFAULT_CHILD_NOTICE,
++  parseChildAge,
++  lotBlockReason,
++  type PublicEventDetail,
++} from "@/lib/events";
++
++vi.stubGlobal(
++  "ResizeObserver",
++  class {
++    observe() {}
++    unobserve() {}
++    disconnect() {}
++  },
++);
++Element.prototype.hasPointerCapture = () => false;
++Element.prototype.setPointerCapture = () => {};
++Element.prototype.releasePointerCapture = () => {};
++Element.prototype.scrollIntoView = () => {};
++
++const VALID_CPF = "529.982.247-25";
++const member = {
++  id: "m1",
++  full_name: "Ana Responsável",
++  cpf: "11144477735",
++  phone: "1",
++  birth_date: "1985-01-01",
++  status: "membro",
++  approval_status: "aprovado",
++};
++
++function makeDetail(over: Partial<PublicEventDetail["event"]> = {}): PublicEventDetail {
++  return {
++    event: {
++      id: "ev1",
++      slug: "retiro",
++      title: "Retiro",
++      description: null,
++      location: null,
++      starts_at: "2099-01-01T10:00:00Z",
++      ends_at: null,
++      registration_opens_at: null,
++      registration_closes_at: null,
++      audience: "public",
++      payment_enabled: false,
++      accepts_card: false,
++      allow_installments: false,
++      max_installments: 1,
++      limit_per_person: false,
++      max_per_person: null,
++      require_image_consent: false,
++      allow_child_registration: true,
++      child_registration_notice: null,
++      ...over,
++    },
++    lots: [
++      {
++        id: "lot1",
++        name: "Geral",
++        price: 0,
++        capacity: null,
++        spots_left: null,
++        public_access: true,
++        opens_at: null,
++        closes_at: null,
++      },
++    ],
++  };
++}
++
++function renderChild(detail = makeDetail()) {
++  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
++  return render(
++    <QueryClientProvider client={qc}>
++      <ChildRegistration detail={detail} />
++    </QueryClientProvider>,
++  );
++}
++
++beforeEach(() => {
++  vi.clearAllMocks();
++  h.profile = member;
++  h.rpc.mockResolvedValue({ data: "reg1", error: null });
++});
++afterEach(cleanup);
++
++async function openForm() {
++  fireEvent.click(await screen.findByRole("button", { name: /Inscrever meu filho/ }));
++  return {
++    name: (await screen.findByLabelText(/Nome completo da criança/)) as HTMLInputElement,
++    cpf: screen.getByLabelText(/CPF da criança/) as HTMLInputElement,
++    age: screen.getByLabelText(/Idade da criança/) as HTMLInputElement,
++  };
++}
++
++describe("inscrever meu filho", () => {
++  it("não aparece quando a opção está desativada no evento", async () => {
++    renderChild(makeDetail({ allow_child_registration: false }));
++    await new Promise((r) => setTimeout(r, 20));
++    expect(screen.queryByText(/Inscrever meu filho/)).toBeNull();
++  });
++
++  it("mostra o aviso padrão e, quando editado, o aviso da igreja", async () => {
++    const { unmount } = renderChild();
++    expect(await screen.findByText(DEFAULT_CHILD_NOTICE)).toBeTruthy();
++    unmount();
++    renderChild(
++      makeDetail({ child_registration_notice: "Só inscreva se for sentar em cadeira própria." }),
++    );
++    expect(await screen.findByText("Só inscreva se for sentar em cadeira própria.")).toBeTruthy();
++  });
++
++  it("pede nome, CPF e idade e envia ao banco", async () => {
++    renderChild();
++    const f = await openForm();
++    fireEvent.change(f.name, { target: { value: "Maria Souza" } });
++    fireEvent.change(f.cpf, { target: { value: VALID_CPF } });
++    fireEvent.change(f.age, { target: { value: "7" } });
++    fireEvent.click(screen.getByRole("button", { name: "Inscrever criança" }));
++    await waitFor(() =>
++      expect(h.rpc).toHaveBeenCalledWith(
++        "register_child_for_event",
++        expect.objectContaining({
++          _event: "ev1",
++          _lot: "lot1",
++          _child_name: "Maria Souza",
++          _child_cpf: VALID_CPF,
++          _child_age: 7,
++        }),
++      ),
++    );
++  });
++
++  it("a opção continua aparecendo depois de inscrever (outro filho)", async () => {
++    renderChild();
++    const f = await openForm();
++    fireEvent.change(f.name, { target: { value: "Maria Souza" } });
++    fireEvent.change(f.cpf, { target: { value: VALID_CPF } });
++    fireEvent.change(f.age, { target: { value: "7" } });
++    fireEvent.click(screen.getByRole("button", { name: "Inscrever criança" }));
++    expect(await screen.findByText(/Inscrição de Maria Souza realizada/)).toBeTruthy();
++    expect(screen.getByRole("button", { name: /Inscrever outro filho/ })).toBeTruthy();
++  });
++
++  it("limita a idade a 13 anos: com 14 não envia", async () => {
++    renderChild();
++    const f = await openForm();
++    fireEvent.change(f.name, { target: { value: "Pedro Souza" } });
++    fireEvent.change(f.cpf, { target: { value: VALID_CPF } });
++    fireEvent.change(f.age, { target: { value: "14" } });
++    // O navegador já barra pelo atributo max=13 do campo…
++    expect(f.age.validity.rangeOverflow).toBe(true);
++    // …e, se essa trava fosse contornada, a validação do código também recusa.
++    fireEvent.submit(f.age.closest("form")!);
++    await waitFor(() =>
++      expect(h.toastError).toHaveBeenCalledWith(expect.stringMatching(/0 a 13 anos/)),
++    );
++    expect(h.rpc).not.toHaveBeenCalled();
++  });
++
++  it("recusa CPF inválido e nome de uma palavra só", async () => {
++    renderChild();
++    const f = await openForm();
++    fireEvent.change(f.name, { target: { value: "Pedro" } });
++    fireEvent.change(f.cpf, { target: { value: VALID_CPF } });
++    fireEvent.change(f.age, { target: { value: "5" } });
++    fireEvent.click(screen.getByRole("button", { name: "Inscrever criança" }));
++    await waitFor(() =>
++      expect(h.toastError).toHaveBeenCalledWith(expect.stringMatching(/nome completo da criança/)),
++    );
++    fireEvent.change(f.name, { target: { value: "Pedro Souza" } });
++    fireEvent.change(f.cpf, { target: { value: "111.111.111-11" } });
++    fireEvent.click(screen.getByRole("button", { name: "Inscrever criança" }));
++    await waitFor(() =>
++      expect(h.toastError).toHaveBeenCalledWith(expect.stringMatching(/CPF da criança inválido/)),
++    );
++    expect(h.rpc).not.toHaveBeenCalled();
++  });
++
++  it("quando o evento exige uso de imagem, o botão fica bloqueado até o responsável aceitar", async () => {
++    renderChild(makeDetail({ require_image_consent: true }));
++    const f = await openForm();
++    fireEvent.change(f.name, { target: { value: "Maria Souza" } });
++    fireEvent.change(f.cpf, { target: { value: VALID_CPF } });
++    fireEvent.change(f.age, { target: { value: "7" } });
++    const submit = screen.getByRole("button", { name: "Inscrever criança" }) as HTMLButtonElement;
++    expect(submit.disabled).toBe(true);
++    fireEvent.click(screen.getByRole("checkbox"));
++    await waitFor(() => expect(submit.disabled).toBe(false));
++    fireEvent.click(submit);
++    await waitFor(() =>
++      expect(h.rpc).toHaveBeenCalledWith(
++        "register_child_for_event",
++        expect.objectContaining({ _image_consent: true }),
++      ),
++    );
++  });
++
++  it("aparece junto da inscrição do adulto na página do evento", async () => {
++    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
++    render(
++      <QueryClientProvider client={qc}>
++        <EventRegistration detail={makeDetail()} />
++      </QueryClientProvider>,
++    );
++    expect(await screen.findByRole("button", { name: "Inscrever-se" })).toBeTruthy();
++    expect(await screen.findByRole("button", { name: /Inscrever meu filho/ })).toBeTruthy();
++  });
++});
++
++describe("regras auxiliares", () => {
++  it("parseChildAge aceita só 0 a 13", () => {
++    expect(parseChildAge("0")).toBe(0);
++    expect(parseChildAge("13")).toBe(13);
++    expect(parseChildAge("14")).toBeNull();
++    expect(parseChildAge("")).toBeNull();
++    expect(parseChildAge("-1")).toBeNull();
++    expect(parseChildAge("7,5")).toBeNull();
++  });
++
++  it("lotBlockReason respeita público, período e vagas", () => {
++    const base = {
++      id: "l",
++      name: "L",
++      price: 0,
++      capacity: null,
++      spots_left: null,
++      public_access: true,
++      opens_at: null,
++      closes_at: null,
++    };
++    expect(lotBlockReason({ audience: "public" }, base, false)).toBeNull();
++    expect(lotBlockReason({ audience: "members" }, { ...base, public_access: false }, false)).toBe(
++      "Só para membros",
++    );
++    expect(
++      lotBlockReason({ audience: "members" }, { ...base, public_access: false }, true),
++    ).toBeNull();
++    expect(lotBlockReason({ audience: "public" }, { ...base, spots_left: 0 }, true)).toBe(
++      "Esgotado",
++    );
++    expect(
++      lotBlockReason({ audience: "public" }, { ...base, closes_at: "2000-01-01T00:00:00Z" }, true),
++    ).toBe("Fora do período");
++  });
++});
+diff --git a/src/test/event-data.test.ts b/src/test/event-data.test.ts
+index b324344..fdcf4ec 100644
+--- a/src/test/event-data.test.ts
++++ b/src/test/event-data.test.ts
+@@ -82,3 +82,25 @@ describe("summarizePeople", () => {
+     expect(religionLabel(null)).toBe("Não informado");
+   });
+ });
++
++describe("inscrições de filho(a) nos dados do evento", () => {
++  it("usa a idade informada, conta as crianças e deixa religião/instituição só para adultos", () => {
++    const s = summarizePeople(
++      [
++        { attendee_birth_date: "1990-01-01", attendee_religion: "catolico", attendee_institution: "Igreja X" },
++        { is_child: true, child_age: 6, attendee_religion: null, attendee_institution: null },
++        { is_child: true, child_age: 12 },
++      ],
++      (b) => (b ? 30 : null),
++    );
++    expect(s.total).toBe(3);
++    expect(s.children).toBe(2);
++    expect(s.ageStats.count).toBe(3);
++    expect(s.ageStats.min).toBe(6);
++    expect(s.ageStats.max).toBe(30);
++    expect(s.bands.find((b) => b.label === "0–12")?.count).toBe(2);
++    expect(s.religions.find((r) => r.value === "catolico")?.pct).toBe(100);
++    expect(s.religions.find((r) => r.value === "")).toBeUndefined();
++    expect(s.institutions).toEqual([{ name: "Igreja X", count: 1 }]);
++  });
++});
+diff --git a/src/test/event-registration-consent.test.tsx b/src/test/event-registration-consent.test.tsx
+index e488044..c3d14c5 100644
+--- a/src/test/event-registration-consent.test.tsx
++++ b/src/test/event-registration-consent.test.tsx
+@@ -87,6 +87,8 @@ const detail: PublicEventDetail = {
+     limit_per_person: false,
+     max_per_person: null,
+     require_image_consent: false,
++    allow_child_registration: false,
++    child_registration_notice: null,
+   },
+   lots: [
+     {
+diff --git a/supabase/migrations/20261109205252_event_child_registration.sql b/supabase/migrations/20261109205252_event_child_registration.sql
+new file mode 100644
+index 0000000..8615944
+--- /dev/null
++++ b/supabase/migrations/20261109205252_event_child_registration.sql
+@@ -0,0 +1,195 @@
++-- Inscrição de filho(a) em eventos.
++-- Já aplicada no projeto Aava do Supabase em 09/11/2026 (versão 20261109205252). Este arquivo serve só para manter
++-- o repositório em sincronia com o histórico remoto. Não precisa rodar de novo (é idempotente, mas as funções já estão no banco).
++--
++-- A criança ocupa uma vaga/ingresso próprio (mesmo lote, preço e fluxo de pagamento), com ingresso e QR code em
++-- nome da criança, ligada ao responsável (user_id/member_id do responsável).
++
++alter table public.events
++  add column if not exists allow_child_registration boolean not null default false,
++  add column if not exists child_registration_notice text;
++
++alter table public.event_registrations
++  add column if not exists is_child boolean not null default false,
++  add column if not exists child_age integer,
++  add column if not exists guardian_name text;
++
++alter table public.event_registrations drop constraint if exists event_registrations_child_age_check;
++alter table public.event_registrations add constraint event_registrations_child_age_check
++  check ((is_child and child_age between 0 and 13) or (not is_child and child_age is null));
++
++-- Uma mesma criança (CPF) não pode ter duas inscrições ativas no mesmo evento.
++create unique index if not exists event_registrations_child_cpf_key
++  on public.event_registrations (event_id, attendee_cpf)
++  where is_child and status <> 'cancelled';
++
++-- Inscrição de filho(a): o responsável precisa estar logado e com cadastro (membro ou visitante).
++create or replace function public.register_child_for_event(
++  _event uuid, _lot uuid, _child_name text, _child_cpf text, _child_age integer,
++  _installments integer default 1, _image_consent boolean default false
++)
++returns uuid
++language plpgsql
++security definer
++set search_path to 'public'
++as $function$
++declare
++  uid uuid := auth.uid();
++  ev public.events%rowtype; lt public.event_lots%rowtype; m public.members%rowtype;
++  is_member boolean; d text; gd text; v_name text; total numeric; reg uuid; pay_required boolean;
++  n int; base numeric; i int; consent boolean;
++begin
++  if uid is null then raise exception 'login_required'; end if;
++  select * into ev from public.events where id = _event and published;
++  if not found then raise exception 'event_not_found'; end if;
++  if not ev.allow_child_registration then raise exception 'child_registration_disabled'; end if;
++  if now() < coalesce(ev.registration_opens_at, '-infinity') or now() > coalesce(ev.registration_closes_at, 'infinity') then
++    raise exception 'registration_closed';
++  end if;
++  -- O responsável autoriza o uso de imagem da criança quando o evento exige
++  consent := ev.require_image_consent and coalesce(_image_consent, false);
++  if ev.require_image_consent and not consent then raise exception 'image_consent_required'; end if;
++
++  select * into lt from public.event_lots where id = _lot and event_id = _event for update;
++  if not found then raise exception 'lot_not_found'; end if;
++  if (lt.opens_at is not null and now() < lt.opens_at) or (lt.closes_at is not null and now() > lt.closes_at) then
++    raise exception 'lot_closed';
++  end if;
++  select * into m from public.members where user_id = uid;
++  if not found then raise exception 'profile_required'; end if;
++  is_member := m.approval_status = 'aprovado' and m.status <> 'visitante';
++  if ev.audience = 'members' and not is_member and not lt.public_access then raise exception 'members_only'; end if;
++
++  v_name := regexp_replace(btrim(coalesce(_child_name, '')), '\s+', ' ', 'g');
++  if coalesce(array_length(string_to_array(v_name, ' '), 1), 0) < 2 or length(v_name) > 120 then
++    raise exception 'invalid_child_name';
++  end if;
++  if _child_age is null or _child_age < 0 or _child_age > 13 then raise exception 'invalid_child_age'; end if;
++  d := regexp_replace(coalesce(_child_cpf, ''), '\D', '', 'g');
++  if not public.is_valid_cpf(d) then raise exception 'invalid_child_cpf'; end if;
++  gd := regexp_replace(coalesce(m.cpf, ''), '\D', '', 'g');
++  if gd <> '' and d = gd then raise exception 'child_cpf_same_as_guardian'; end if;
++  if exists (select 1 from public.event_registrations r
++              where r.event_id = _event and r.is_child and r.status <> 'cancelled' and r.attendee_cpf = d) then
++    raise exception 'child_already_registered';
++  end if;
++
++  if lt.capacity is not null and public.lot_taken(lt.id) + 1 > lt.capacity then raise exception 'sold_out'; end if;
++
++  pay_required := ev.payment_enabled and lt.price > 0;
++  total := lt.price;
++  n := case when pay_required and coalesce(_installments, 1) > 1 then _installments else 1 end;
++  if n > 1 and (not ev.allow_installments or n > ev.max_installments) then raise exception 'invalid_installments'; end if;
++
++  insert into public.event_registrations (event_id, lot_id, user_id, member_id, attendee_name, attendee_cpf, attendee_phone, attendee_email,
++                                          quantity, unit_price, total, installments, status, image_consent, image_consent_at,
++                                          is_child, child_age, guardian_name)
++  values (_event, _lot, uid, m.id, v_name, d, m.phone, coalesce(m.email, (select u.email from auth.users u where u.id = uid)),
++          1, lt.price, total, n, case when pay_required then 'pending' else 'confirmed' end,
++          consent, case when consent then now() end,
++          true, _child_age, m.full_name)
++  returning id into reg;
++
++  if pay_required then
++    base := round(total / n, 2);
++    for i in 1..n loop
++      insert into public.event_payments (registration_id, installment_no, amount)
++      values (reg, i, case when i = n then total - base * (n - 1) else base end);
++    end loop;
++  else
++    perform public.issue_event_tickets(reg);
++  end if;
++  return reg;
++end $function$;
++
++revoke all on function public.register_child_for_event(uuid, uuid, text, text, integer, integer, boolean) from public, anon;
++grant execute on function public.register_child_for_event(uuid, uuid, text, text, integer, integer, boolean) to authenticated, service_role;
++
++-- O limite de inscrições por pessoa continua valendo só para as inscrições do próprio adulto:
++-- as vagas dos filhos não entram na conta (cada criança tem CPF próprio e ocupa vaga do lote).
++create or replace function public.register_for_event(
++  _event uuid, _lot uuid, _quantity integer, _cpf text,
++  _installments integer default 1, _image_consent boolean default false,
++  _institution text default null, _religion text default null
++)
++returns uuid
++language plpgsql
++security definer
++set search_path to 'public'
++as $function$
++declare
++  uid uuid := auth.uid();
++  ev public.events%rowtype; lt public.event_lots%rowtype; m public.members%rowtype;
++  is_member boolean; d text; used int; total numeric; reg uuid; pay_required boolean; n int; base numeric; i int;
++  consent boolean; v_institution text; v_religion text;
++begin
++  if uid is null then raise exception 'login_required'; end if;
++  select * into ev from public.events where id = _event and published;
++  if not found then raise exception 'event_not_found'; end if;
++  if now() < coalesce(ev.registration_opens_at, '-infinity') or now() > coalesce(ev.registration_closes_at, 'infinity') then
++    raise exception 'registration_closed';
++  end if;
++  -- Autorização de uso de imagem: obrigatória quando o evento exige
++  consent := ev.require_image_consent and coalesce(_image_consent, false);
++  if ev.require_image_consent and not consent then raise exception 'image_consent_required'; end if;
++
++  select * into lt from public.event_lots where id = _lot and event_id = _event for update;
++  if not found then raise exception 'lot_not_found'; end if;
++  if (lt.opens_at is not null and now() < lt.opens_at) or (lt.closes_at is not null and now() > lt.closes_at) then
++    raise exception 'lot_closed';
++  end if;
++  select * into m from public.members where user_id = uid;
++  if not found then raise exception 'profile_required'; end if;
++  is_member := m.approval_status = 'aprovado' and m.status <> 'visitante';
++  -- Questionário só para visitantes; membros ficam resumidos como "Membro da igreja"
++  if is_member then
++    v_institution := 'Membro da igreja';
++    v_religion := 'membro_igreja';
++  else
++    if nullif(btrim(coalesce(_institution, '')), '') is null or length(btrim(_institution)) > 120 then raise exception 'invalid_institution'; end if;
++    if _religion is null or _religion not in ('evangelico', 'catolico', 'espirita', 'matriz_africana', 'outros') then raise exception 'invalid_religion'; end if;
++    v_institution := btrim(_institution);
++    v_religion := _religion;
++  end if;
++  if ev.audience = 'members' and not is_member and not lt.public_access then raise exception 'members_only'; end if;
++  if _quantity is null or _quantity < 1 or _quantity > 10 then raise exception 'invalid_quantity'; end if;
++
++  d := regexp_replace(coalesce(nullif(btrim(_cpf), ''), m.cpf, ''), '\D', '', 'g');
++  if ev.limit_per_person then
++    if not public.is_valid_cpf(d) then raise exception 'invalid_cpf'; end if;
++    select coalesce(sum(r.quantity), 0) into used from public.event_registrations r
++      where r.event_id = _event and r.status <> 'cancelled' and not r.is_child
++        and (r.user_id = uid or regexp_replace(coalesce(r.attendee_cpf, ''), '\D', '', 'g') = d);
++    if used + _quantity > coalesce(ev.max_per_person, 1) then raise exception 'limit_exceeded'; end if;
++  elsif d <> '' and not public.is_valid_cpf(d) then
++    raise exception 'invalid_cpf';
++  end if;
++
++  if lt.capacity is not null and public.lot_taken(lt.id) + _quantity > lt.capacity then raise exception 'sold_out'; end if;
++
++  pay_required := ev.payment_enabled and lt.price > 0;
++  total := lt.price * _quantity;
++  n := case when pay_required and coalesce(_installments, 1) > 1 then _installments else 1 end;
++  if n > 1 and (not ev.allow_installments or n > ev.max_installments) then raise exception 'invalid_installments'; end if;
++
++  insert into public.event_registrations (event_id, lot_id, user_id, member_id, attendee_name, attendee_cpf, attendee_phone, attendee_email,
++                                          attendee_institution, attendee_religion, quantity, unit_price, total, installments, status, image_consent, image_consent_at)
++  values (_event, _lot, uid, m.id, m.full_name, nullif(d, ''), m.phone, coalesce(m.email, (select u.email from auth.users u where u.id = uid)),
++          v_institution, v_religion, _quantity, lt.price, total, n, case when pay_required then 'pending' else 'confirmed' end,
++          consent, case when consent then now() end)
++  returning id into reg;
++
++  if pay_required then
++    base := round(total / n, 2);
++    for i in 1..n loop
++      insert into public.event_payments (registration_id, installment_no, amount)
++      values (reg, i, case when i = n then total - base * (n - 1) else base end);
++    end loop;
++  else
++    perform public.issue_event_tickets(reg);
++  end if;
++  return reg;
++end $function$;
++
++revoke all on function public.register_for_event(uuid, uuid, integer, text, integer, boolean, text, text) from public, anon;
++grant execute on function public.register_for_event(uuid, uuid, integer, text, integer, boolean, text, text) to authenticated, service_role;
+-- 
+2.43.0
+
