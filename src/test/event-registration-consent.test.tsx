@@ -87,6 +87,8 @@ const detail: PublicEventDetail = {
     limit_per_person: false,
     max_per_person: null,
     require_image_consent: false,
+    allow_child_registration: false,
+    child_registration_notice: null,
   },
   lots: [
     {

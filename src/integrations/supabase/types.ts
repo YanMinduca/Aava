@@ -324,12 +324,15 @@ export type Database = {
           attendee_phone: string | null
           attendee_religion: string | null
           cancelled_at: string | null
+          child_age: number | null
           created_at: string
           event_id: string
+          guardian_name: string | null
           id: string
           image_consent: boolean
           image_consent_at: string | null
           installments: number
+          is_child: boolean
           lot_id: string
           member_id: string | null
           quantity: number
@@ -350,12 +353,15 @@ export type Database = {
           attendee_phone?: string | null
           attendee_religion?: string | null
           cancelled_at?: string | null
+          child_age?: number | null
           created_at?: string
           event_id: string
+          guardian_name?: string | null
           id?: string
           image_consent?: boolean
           image_consent_at?: string | null
           installments?: number
+          is_child?: boolean
           lot_id: string
           member_id?: string | null
           quantity: number
@@ -376,12 +382,15 @@ export type Database = {
           attendee_phone?: string | null
           attendee_religion?: string | null
           cancelled_at?: string | null
+          child_age?: number | null
           created_at?: string
           event_id?: string
+          guardian_name?: string | null
           id?: string
           image_consent?: boolean
           image_consent_at?: string | null
           installments?: number
+          is_child?: boolean
           lot_id?: string
           member_id?: string | null
           quantity?: number
@@ -477,8 +486,10 @@ export type Database = {
       events: {
         Row: {
           accepts_card: boolean
+          allow_child_registration: boolean
           allow_installments: boolean
           audience: string
+          child_registration_notice: string | null
           created_at: string
           created_by: string | null
           description: string | null
@@ -500,8 +511,10 @@ export type Database = {
         }
         Insert: {
           accepts_card?: boolean
+          allow_child_registration?: boolean
           allow_installments?: boolean
           audience?: string
+          child_registration_notice?: string | null
           created_at?: string
           created_by?: string | null
           description?: string | null
@@ -523,8 +536,10 @@ export type Database = {
         }
         Update: {
           accepts_card?: boolean
+          allow_child_registration?: boolean
           allow_installments?: boolean
           audience?: string
+          child_registration_notice?: string | null
           created_at?: string
           created_by?: string | null
           description?: string | null
@@ -1246,6 +1261,18 @@ export type Database = {
           starts_at: string
           title: string
         }[]
+      }
+      register_child_for_event: {
+        Args: {
+          _child_age: number
+          _child_cpf: string
+          _child_name: string
+          _event: string
+          _image_consent?: boolean
+          _installments?: number
+          _lot: string
+        }
+        Returns: string
       }
       register_for_event: {
         Args: {

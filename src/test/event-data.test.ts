@@ -82,3 +82,25 @@ describe("summarizePeople", () => {
     expect(religionLabel(null)).toBe("Não informado");
   });
 });
+
+describe("inscrições de filho(a) nos dados do evento", () => {
+  it("usa a idade informada, conta as crianças e deixa religião/instituição só para adultos", () => {
+    const s = summarizePeople(
+      [
+        { attendee_birth_date: "1990-01-01", attendee_religion: "catolico", attendee_institution: "Igreja X" },
+        { is_child: true, child_age: 6, attendee_religion: null, attendee_institution: null },
+        { is_child: true, child_age: 12 },
+      ],
+      (b) => (b ? 30 : null),
+    );
+    expect(s.total).toBe(3);
+    expect(s.children).toBe(2);
+    expect(s.ageStats.count).toBe(3);
+    expect(s.ageStats.min).toBe(6);
+    expect(s.ageStats.max).toBe(30);
+    expect(s.bands.find((b) => b.label === "0–12")?.count).toBe(2);
+    expect(s.religions.find((r) => r.value === "catolico")?.pct).toBe(100);
+    expect(s.religions.find((r) => r.value === "")).toBeUndefined();
+    expect(s.institutions).toEqual([{ name: "Igreja X", count: 1 }]);
+  });
+});
