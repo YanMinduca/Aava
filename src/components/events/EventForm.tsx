@@ -13,6 +13,10 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { DEFAULT_CHILD_NOTICE, eventError, fromLocalInput, slugify, toLocalInput } from "@/lib/events";
 import { compressImage, fileExt } from "@/lib/images";
+import { EVENT_MEDIA_BUCKET, checkMediaFile, mediaExt, parseInstagramUrl, type EventMediaType } from "@/lib/event-media";
+import { purgeStorageTrash } from "@/lib/storage-trash";
+import { uuid } from "@/lib/uuid";
+import { EventThumb } from "@/components/events/EventMedia";
 import type { Tables } from "@/integrations/supabase/types";
 
 export type LotDraft = { id?: string; name: string; price: string; capacity: string; public_access: boolean; opens_at: string; closes_at: string };
@@ -41,8 +45,15 @@ export type EventDraft = {
   limit_per_person: boolean;
   max_per_person: string;
   require_image_consent: boolean;
+  ask_religion: boolean;
   allow_child_registration: boolean;
   child_registration_notice: string;
+  /** Mídia de divulgação: "" = nenhuma. media_path é o arquivo já salvo; media_url é o link do Instagram. */
+  media_type: "" | EventMediaType;
+  media_path: string;
+  media_url: string;
+  /** Tipo que estava salvo ao abrir o formulário (só para saber se o arquivo salvo ainda vale). Não é gravado. */
+  media_stored_type: string;
 };
 
 const SINGLE_LOT = "Ingresso";
@@ -53,8 +64,9 @@ export const blankEvent = (): EventDraft => ({
   payment_enabled: false, payment_link: "", pix_key: "", pix_qr_path: "", accepts_card: false,
   card_contact_note: "Para pagar no cartão, entre em contato com a igreja.",
   allow_installments: false, max_installments: "3", limit_per_person: false, max_per_person: "2",
-  require_image_consent: false,
+  require_image_consent: false, ask_religion: true,
   allow_child_registration: false, child_registration_notice: DEFAULT_CHILD_NOTICE,
+  media_type: "", media_path: "", media_url: "", media_stored_type: "",
 });
 
 export function draftFrom(
@@ -78,13 +90,15 @@ export function draftFrom(
     card_contact_note: info?.card_contact_note ?? "Para pagar no cartão, entre em contato com a igreja.",
     allow_installments: e.allow_installments, max_installments: String(Math.max(2, e.max_installments)),
     limit_per_person: e.limit_per_person, max_per_person: String(e.max_per_person ?? 2),
-    require_image_consent: e.require_image_consent,
+    require_image_consent: e.require_image_consent, ask_religion: e.ask_religion,
     allow_child_registration: e.allow_child_registration,
     child_registration_notice: e.child_registration_notice ?? DEFAULT_CHILD_NOTICE,
+    media_type: e.media_type === "image" || e.media_type === "video" || e.media_type === "instagram" ? e.media_type : "",
+    media_path: e.media_path ?? "", media_url: e.media_url ?? "", media_stored_type: e.media_type ?? "",
   };
 }
 
-function validate(d: EventDraft) {
+function validate(d: EventDraft, mediaFile: File | null) {
   if (!d.title.trim()) return "Informe o nome do evento.";
   if (!d.starts_at) return "Informe a data e hora do evento.";
   if (d.ends_at && new Date(d.ends_at) < new Date(d.starts_at)) return "O término não pode ser antes do início.";
@@ -103,12 +117,41 @@ function validate(d: EventDraft) {
       return "Informe como pagar: link, chave Pix, QR code ou pagamento no cartão.";
     if (d.allow_installments && !(Number(d.max_installments) >= 2 && Number(d.max_installments) <= 12)) return "O parcelamento deve ter entre 2 e 12 parcelas.";
   }
+  if (d.media_type === "instagram" && !parseInstagramUrl(d.media_url))
+    return "Cole o link de um post ou reel do Instagram (começa com https://www.instagram.com/p/ ou /reel/).";
+  if (d.media_type === "image" || d.media_type === "video") {
+    const stored = !!d.media_path && d.media_stored_type === d.media_type;
+    if (!mediaFile && !stored) return d.media_type === "image" ? "Escolha a foto do evento ou marque “Nenhuma” em mídia." : "Escolha o vídeo do evento ou marque “Nenhuma” em mídia.";
+    if (mediaFile) {
+      const problem = checkMediaFile(d.media_type, mediaFile);
+      if (problem) return problem;
+    }
+  }
   if (d.allow_child_registration && d.child_registration_notice.length > 500) return "O aviso da inscrição de filho pode ter até 500 caracteres.";
   if (d.limit_per_person && !(Number.isInteger(Number(d.max_per_person)) && Number(d.max_per_person) >= 1)) return "Informe quantas inscrições cada pessoa pode fazer.";
   return null;
 }
 
-async function saveEvent(d: EventDraft, userId: string | null | undefined, qrFile: File | null) {
+/** Envia a foto/vídeo do evento (antes de gravar o evento, para não deixar evento pela metade se o envio falhar). */
+async function uploadEventMedia(type: "image" | "video", file: File) {
+  const blob = type === "image" ? await compressImage(file, { maxSide: 1600, quality: 0.82 }) : file;
+  const path = `${uuid()}.${mediaExt(type, blob)}`;
+  const { error } = await supabase.storage.from(EVENT_MEDIA_BUCKET).upload(path, blob, { contentType: blob.type || file.type });
+  if (error) throw new Error(type === "image" ? "Não foi possível enviar a foto do evento." : "Não foi possível enviar o vídeo do evento.");
+  return path;
+}
+
+async function saveEvent(d: EventDraft, userId: string | null | undefined, qrFile: File | null, mediaFile: File | null) {
+  let media_type: string | null = null;
+  let media_path: string | null = null;
+  let media_url: string | null = null;
+  if (d.media_type === "instagram") {
+    media_type = "instagram";
+    media_url = parseInstagramUrl(d.media_url)!.canonical;
+  } else if (d.media_type === "image" || d.media_type === "video") {
+    media_type = d.media_type;
+    media_path = mediaFile ? await uploadEventMedia(d.media_type, mediaFile) : d.media_path;
+  }
   const lots = (d.useLots ? d.lots : d.lots.slice(0, 1).map((l) => ({ ...l, name: SINGLE_LOT }))).map((l, i) => ({
     ...l, position: i, price: Number(l.price.replace(",", ".")) || 0, capacity: l.capacity === "" ? null : Number(l.capacity),
   }));
@@ -120,9 +163,10 @@ async function saveEvent(d: EventDraft, userId: string | null | undefined, qrFil
     allow_installments: d.payment_enabled && d.allow_installments,
     max_installments: d.payment_enabled && d.allow_installments ? Number(d.max_installments) : 1,
     limit_per_person: d.limit_per_person, max_per_person: d.limit_per_person ? Number(d.max_per_person) : null,
-    require_image_consent: d.require_image_consent,
+    require_image_consent: d.require_image_consent, ask_religion: d.ask_religion,
     allow_child_registration: d.allow_child_registration,
     child_registration_notice: d.allow_child_registration ? d.child_registration_notice.trim() || null : null,
+    media_type, media_path, media_url,
   };
 
   let eventId = d.id;
@@ -201,17 +245,19 @@ export function EventForm({ initial, onSaved }: { initial: EventDraft; onSaved: 
   const { data: access } = useAccess();
   const [d, setD] = useState<EventDraft>(initial);
   const [qrFile, setQrFile] = useState<File | null>(null);
+  const [mediaFile, setMediaFile] = useState<File | null>(null);
   const [sameCap, setSameCap] = useState("");
   const set = (p: Partial<EventDraft>) => setD((x) => ({ ...x, ...p }));
   const setLot = (i: number, p: Partial<LotDraft>) => setD((x) => ({ ...x, lots: x.lots.map((l, j) => (j === i ? { ...l, ...p } : l)) }));
 
   const save = useMutation({
     mutationFn: async () => {
-      const problem = validate(d);
+      const problem = validate(d, mediaFile);
       if (problem) throw new Error(problem);
-      return saveEvent(d, access?.uid, qrFile);
+      return saveEvent(d, access?.uid, qrFile, mediaFile);
     },
     onSuccess: (id) => {
+      void purgeStorageTrash(); // foto/vídeo trocado ou removido sai do armazenamento
       toast.success("Evento salvo");
       qc.invalidateQueries({ queryKey: ["admin-events"] });
       qc.invalidateQueries({ queryKey: ["admin-event"] });
@@ -243,6 +289,56 @@ export function EventForm({ initial, onSaved }: { initial: EventDraft; onSaved: 
       </section>
 
       <section className="space-y-4">
+        <h3 className="text-lg text-foreground">Foto, vídeo ou post do Instagram</h3>
+        <p className="-mt-2 text-sm text-muted-foreground">
+          Aparece como miniatura do evento (página inicial, lista de eventos e painel) e, no computador, acima da descrição na página de inscrição. No celular, a página de inscrição não mostra.
+        </p>
+        <Field label="O que mostrar">
+          <Select value={d.media_type || "none"} onValueChange={(v) => { setMediaFile(null); set({ media_type: v === "none" ? "" : (v as EventMediaType) }); }}>
+            <SelectTrigger><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="none">Nenhuma</SelectItem>
+              <SelectItem value="image">Foto</SelectItem>
+              <SelectItem value="video">Vídeo</SelectItem>
+              <SelectItem value="instagram">Post do Instagram</SelectItem>
+            </SelectContent>
+          </Select>
+        </Field>
+        {(d.media_type === "image" || d.media_type === "video") && (
+          <div className="space-y-3 rounded-xl border p-4">
+            {!!d.media_path && d.media_stored_type === d.media_type && !mediaFile && (
+              <EventThumb event={{ media_type: d.media_type, media_path: d.media_path }} className="max-w-xs rounded-lg" />
+            )}
+            <Field
+              label={d.media_type === "image" ? "Foto do evento" : "Vídeo do evento"}
+              hint={d.media_type === "image" ? "JPG, PNG ou WebP (até 15 MB). A foto é reduzida automaticamente antes de enviar." : "MP4 ou WebM, até 50 MB. Vídeos de iPhone (.mov) também funcionam, mas MP4 abre em mais aparelhos."}
+            >
+              <Input
+                type="file"
+                accept={d.media_type === "image" ? "image/jpeg,image/png,image/webp" : "video/mp4,video/webm,video/quicktime"}
+                onChange={(e) => {
+                  const f = e.target.files?.[0] ?? null;
+                  const t = d.media_type;
+                  if (f && (t === "image" || t === "video")) {
+                    const problem = checkMediaFile(t, f);
+                    if (problem) { toast.error(problem); e.target.value = ""; return; }
+                  }
+                  setMediaFile(f);
+                }}
+              />
+            </Field>
+            {mediaFile && <p className="text-xs text-muted-foreground">Novo arquivo: {mediaFile.name} ({(mediaFile.size / 1024 / 1024).toFixed(1)} MB). Ele substitui o atual quando você salvar.</p>}
+            {!!d.media_path && d.media_stored_type === d.media_type && !mediaFile && <p className="text-xs text-muted-foreground">Esta é a mídia atual. Envie outro arquivo para trocar, ou marque “Nenhuma” para tirar.</p>}
+          </div>
+        )}
+        {d.media_type === "instagram" && (
+          <Field label="Link do post ou reel" hint="Cole o endereço do post (instagram.com/p/… ou instagram.com/reel/…). O post precisa ser público.">
+            <Input type="url" inputMode="url" placeholder="https://www.instagram.com/p/..." value={d.media_url} onChange={(e) => set({ media_url: e.target.value })} />
+          </Field>
+        )}
+      </section>
+
+      <section className="space-y-4">
         <h3 className="text-lg text-foreground">Quem pode se inscrever</h3>
         <Field label="Público do evento">
           <Select value={d.audience} onValueChange={(v) => set({ audience: v as "public" | "members" })}>
@@ -258,6 +354,7 @@ export function EventForm({ initial, onSaved }: { initial: EventDraft; onSaved: 
           <Field label="Quantas inscrições cada pessoa pode fazer?"><Input type="number" min={1} value={d.max_per_person} onChange={(e) => set({ max_per_person: e.target.value })} className="max-w-32" /></Field>
         )}
         <Toggle checked={d.require_image_consent} onChange={(v) => set({ require_image_consent: v })} title="Exigir autorização de uso de imagem" help="Quem se inscrever precisa marcar “Estou de acordo com meu uso de imagem”. Sem o aceite, a inscrição não é feita." />
+        <Toggle checked={d.ask_religion} onChange={(v) => set({ ask_religion: v })} title="Perguntar a religião" help="Visitantes escolhem a religião e autorizam o uso desse dado sensível ao se inscrever. Membros nunca são perguntados. Desligado, a pergunta (e o aceite) não aparecem e nada de religião é guardado nas inscrições novas." />
         <Toggle checked={d.allow_child_registration} onChange={(v) => set({ allow_child_registration: v })} title="Permitir “Inscrever meu filho”" help="O responsável inscreve crianças de 0 a 13 anos (nome, CPF e idade). Cada criança ocupa uma vaga do lote e recebe um ingresso com QR code. A opção continua aparecendo mesmo depois de o responsável já ter se inscrito." />
         {d.allow_child_registration && (
           <Field label="Aviso na inscrição de filho" hint="Aparece em destaque antes do formulário da criança. Pode editar à vontade (até 500 caracteres).">
@@ -325,7 +422,7 @@ export function EventForm({ initial, onSaved }: { initial: EventDraft; onSaved: 
         )}
       </section>
 
-      <Button type="submit" size="lg" className="w-full sm:w-auto" disabled={save.isPending}>{d.id ? "Salvar alterações" : "Criar evento"}</Button>
+      <Button type="submit" size="lg" className="w-full sm:w-auto" disabled={save.isPending}>{save.isPending ? "Salvando..." : d.id ? "Salvar alterações" : "Criar evento"}</Button>
     </form>
   );
 }

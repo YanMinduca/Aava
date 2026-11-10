@@ -113,7 +113,7 @@ export function MyTickets({ uid }: { uid: string }) {
     queryFn: async () => {
       const { data, error } = await supabase
         .from("event_registrations")
-        .select("*, events(title, slug, starts_at, location), event_lots(name), event_payments(*), event_tickets(*)")
+        .select("*, events(title, slug, starts_at, location), event_lots(name), event_payments(*), event_tickets(*), event_ticket_removals(*)")
         .eq("user_id", uid)
         .order("created_at", { ascending: false });
       if (error) throw error;
@@ -207,6 +207,19 @@ export function MyTickets({ uid }: { uid: string }) {
                 <Badge variant={r.status === "confirmed" ? "default" : "secondary"}>{REGISTRATION_STATUS[r.status] ?? r.status}</Badge>
               </div>
 
+              {(r.event_ticket_removals ?? []).length > 0 && (
+                <div className="mt-4 rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm">
+                  <p className="font-medium text-foreground">Ingressos removidos pela igreja</p>
+                  <ul className="mt-1 space-y-1 text-muted-foreground">
+                    {[...(r.event_ticket_removals ?? [])].sort((a, b) => b.removed_at.localeCompare(a.removed_at)).map((x) => (
+                      <li key={x.id}>
+                        {fmtDateTime(x.removed_at)} — {x.tickets_removed} {x.tickets_removed === 1 ? "ingresso" : "ingressos"}: {x.reason}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
               {r.status === "pending" && (
                 <div className="mt-5 space-y-4">
                   <PaymentInstructions eventId={r.event_id} />
@@ -245,7 +258,7 @@ export function MyTickets({ uid }: { uid: string }) {
               {r.status === "confirmed" && (
                 <div className="mt-5 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
                   {tickets.map((t) => (
-                    <TicketCard key={t.id} ticket={t} total={r.quantity} />
+                    <TicketCard key={t.id} ticket={t} total={tickets.length} />
                   ))}
                 </div>
               )}

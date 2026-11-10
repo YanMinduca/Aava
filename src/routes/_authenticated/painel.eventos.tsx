@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { EventForm, blankEvent } from "@/components/events/EventForm";
+import { EventThumb } from "@/components/events/EventMedia";
 import { fmtDateTime } from "@/lib/events";
 import { siteMeta } from "@/lib/site-query";
 
@@ -52,7 +53,8 @@ function EventsAdmin() {
       )}
       <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         {(events.data ?? []).map((e) => (
-          <Link key={e.id} to="/painel/evento/$id" params={{ id: e.id }} className="rounded-2xl border bg-card p-5 transition-colors hover:border-primary">
+          <Link key={e.id} to="/painel/evento/$id" params={{ id: e.id }} className="overflow-hidden rounded-2xl border bg-card p-5 transition-colors hover:border-primary">
+            <EventThumb event={e} className="-mx-5 -mt-5 mb-4 w-[calc(100%+2.5rem)]" />
             <div className="flex flex-wrap gap-2">
               <Badge variant={e.published ? "default" : "secondary"}>{e.published ? "Publicado" : "Rascunho"}</Badge>
               {e.audience === "members" && <Badge variant="outline">Só membros</Badge>}

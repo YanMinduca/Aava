@@ -426,6 +426,60 @@ export type Database = {
           },
         ]
       }
+      event_ticket_removals: {
+        Row: {
+          event_id: string
+          holder_names: string[]
+          id: string
+          reason: string
+          refund_due: number
+          registration_cancelled: boolean
+          registration_id: string
+          removed_at: string
+          removed_by: string | null
+          tickets_removed: number
+        }
+        Insert: {
+          event_id: string
+          holder_names?: string[]
+          id?: string
+          reason: string
+          refund_due?: number
+          registration_cancelled?: boolean
+          registration_id: string
+          removed_at?: string
+          removed_by?: string | null
+          tickets_removed: number
+        }
+        Update: {
+          event_id?: string
+          holder_names?: string[]
+          id?: string
+          reason?: string
+          refund_due?: number
+          registration_cancelled?: boolean
+          registration_id?: string
+          removed_at?: string
+          removed_by?: string | null
+          tickets_removed?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "event_ticket_removals_event_id_fkey"
+            columns: ["event_id"]
+            isOneToOne: false
+            referencedRelation: "events"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "event_ticket_removals_registration_id_fkey"
+            columns: ["registration_id"]
+            isOneToOne: false
+            referencedRelation: "event_registrations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       event_tickets: {
         Row: {
           checked_in_at: string | null
@@ -436,6 +490,7 @@ export type Database = {
           holder_name: string
           id: string
           registration_id: string
+          removal_id: string | null
           seq: number
           short_code: string
           status: string
@@ -449,6 +504,7 @@ export type Database = {
           holder_name: string
           id?: string
           registration_id: string
+          removal_id?: string | null
           seq: number
           short_code?: string
           status?: string
@@ -462,6 +518,7 @@ export type Database = {
           holder_name?: string
           id?: string
           registration_id?: string
+          removal_id?: string | null
           seq?: number
           short_code?: string
           status?: string
@@ -481,6 +538,13 @@ export type Database = {
             referencedRelation: "event_registrations"
             referencedColumns: ["id"]
           },
+          {
+            foreignKeyName: "event_tickets_removal_id_fkey"
+            columns: ["removal_id"]
+            isOneToOne: false
+            referencedRelation: "event_ticket_removals"
+            referencedColumns: ["id"]
+          },
         ]
       }
       events: {
@@ -488,6 +552,7 @@ export type Database = {
           accepts_card: boolean
           allow_child_registration: boolean
           allow_installments: boolean
+          ask_religion: boolean
           audience: string
           child_registration_notice: string | null
           created_at: string
@@ -499,6 +564,9 @@ export type Database = {
           location: string | null
           max_installments: number
           max_per_person: number | null
+          media_path: string | null
+          media_type: string | null
+          media_url: string | null
           payment_enabled: boolean
           published: boolean
           registration_closes_at: string | null
@@ -513,6 +581,7 @@ export type Database = {
           accepts_card?: boolean
           allow_child_registration?: boolean
           allow_installments?: boolean
+          ask_religion?: boolean
           audience?: string
           child_registration_notice?: string | null
           created_at?: string
@@ -524,6 +593,9 @@ export type Database = {
           location?: string | null
           max_installments?: number
           max_per_person?: number | null
+          media_path?: string | null
+          media_type?: string | null
+          media_url?: string | null
           payment_enabled?: boolean
           published?: boolean
           registration_closes_at?: string | null
@@ -538,6 +610,7 @@ export type Database = {
           accepts_card?: boolean
           allow_child_registration?: boolean
           allow_installments?: boolean
+          ask_religion?: boolean
           audience?: string
           child_registration_notice?: string | null
           created_at?: string
@@ -549,6 +622,9 @@ export type Database = {
           location?: string | null
           max_installments?: number
           max_per_person?: number | null
+          media_path?: string | null
+          media_type?: string | null
+          media_url?: string | null
           payment_enabled?: boolean
           published?: boolean
           registration_closes_at?: string | null
@@ -1251,6 +1327,9 @@ export type Database = {
           ends_at: string | null
           id: string
           location: string | null
+          media_path: string | null
+          media_type: string | null
+          media_url: string | null
           min_price: number | null
           payment_enabled: boolean
           registration_closes_at: string | null
@@ -1288,6 +1367,15 @@ export type Database = {
         Returns: string
       }
       release_event_registration: { Args: { _reg: string }; Returns: undefined }
+      remove_event_tickets: {
+        Args: {
+          _quantity?: number
+          _reason: string
+          _reg: string
+          _ticket_ids?: string[]
+        }
+        Returns: Json
+      }
       set_event_payment_status: {
         Args: { _payment: string; _status: string }
         Returns: undefined

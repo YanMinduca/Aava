@@ -4,6 +4,7 @@ import { ArrowUpRight, CalendarDays, MapPin, Ticket, Users } from "lucide-react"
 import { supabase } from "@/integrations/supabase/client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { EventThumb } from "@/components/events/EventMedia";
 import { fmtDate, fmtLongDate, fmtTime, moneyBR } from "@/lib/events";
 import type { Database } from "@/integrations/supabase/types";
 
@@ -34,8 +35,10 @@ export function EventCard({ e }: { e: EventRow }) {
     <Link
       to="/eventos/$slug"
       params={{ slug: e.slug }}
-      className="group flex flex-col rounded-2xl border bg-card p-6 transition-colors hover:border-primary"
+      className="group flex flex-col overflow-hidden rounded-2xl border bg-card transition-colors hover:border-primary"
     >
+      <EventThumb event={e} />
+      <div className="flex flex-1 flex-col p-6">
       <div className="flex flex-wrap items-center gap-2">
         <Badge variant={open ? "default" : "secondary"}>{registrationLabel(e)}</Badge>
         {e.audience === "members" && <Badge variant="outline">Para membros</Badge>}
@@ -64,6 +67,7 @@ export function EventCard({ e }: { e: EventRow }) {
       <span className="mt-5 inline-flex items-center gap-1.5 text-sm font-medium text-primary">
         Ver detalhes <ArrowUpRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
       </span>
+      </div>
     </Link>
   );
 }
