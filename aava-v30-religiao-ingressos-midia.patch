@@ -1,0 +1,2010 @@
+From cefb6a857de278dc7a0bf1bf18c5f196fe15002b Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 10 Nov 2026 07:44:22 +0000
+Subject: [PATCH] =?UTF-8?q?feat(eventos):=20pedir=20religi=C3=A3o=20opcion?=
+ =?UTF-8?q?al,=20remover=20ingressos=20com=20observa=C3=A7=C3=A3o=20e=20m?=
+ =?UTF-8?q?=C3=ADdia=20do=20evento?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Evento ganha o interruptor ask_religion (padrão ligado): desligado, a inscrição de visitante não pergunta religião nem pede o aceite sensível, e a aba Dados esconde religião
+- Nova RPC remove_event_tickets: remove 1 ou mais ingressos com observação obrigatória (visível para o inscrito), libera vagas, recalcula parcelas e registra valor a devolver; remover todos cancela a inscrição
+- Mídia do evento (foto, vídeo ou post do Instagram): thumbnail nos cards e no painel, e acima da descrição na página de inscrição só no computador
+- 3 migrations novas (20261110010000, 20261110010100, 20261110010200) a aplicar ANTES do deploy do código
+---
+ src/components/events/EventData.tsx           |  26 +-
+ src/components/events/EventForm.tsx           | 113 ++++++++-
+ src/components/events/EventMedia.tsx          | 147 +++++++++++
+ src/components/events/EventRegistration.tsx   |  15 +-
+ src/components/events/EventsList.tsx          |   6 +-
+ src/components/events/MyTickets.tsx           |  17 +-
+ src/components/events/TicketRemoval.tsx       | 234 ++++++++++++++++++
+ src/integrations/supabase/types.ts            |  88 +++++++
+ src/lib/event-media.ts                        |  71 ++++++
+ src/lib/event-removal.ts                      |  46 ++++
+ src/lib/events.ts                             |  12 +
+ .../_authenticated/painel.evento.$id.tsx      |  26 +-
+ src/routes/_authenticated/painel.eventos.tsx  |   4 +-
+ src/routes/eventos.$slug.tsx                  |   2 +
+ src/test/event-media.test.ts                  |  88 +++++++
+ src/test/event-registration-consent.test.tsx  |  29 +++
+ src/test/storage-and-tickets.test.tsx         |   2 +-
+ src/test/ticket-removal.test.tsx              | 127 ++++++++++
+ .../20261110010000_event_ask_religion.sql     |  99 ++++++++
+ .../migrations/20261110010100_event_media.sql |  93 +++++++
+ .../20261110010200_event_ticket_removal.sql   | 172 +++++++++++++
+ 21 files changed, 1378 insertions(+), 39 deletions(-)
+ create mode 100644 src/components/events/EventMedia.tsx
+ create mode 100644 src/components/events/TicketRemoval.tsx
+ create mode 100644 src/lib/event-media.ts
+ create mode 100644 src/lib/event-removal.ts
+ create mode 100644 src/test/event-media.test.ts
+ create mode 100644 src/test/ticket-removal.test.tsx
+ create mode 100644 supabase/migrations/20261110010000_event_ask_religion.sql
+ create mode 100644 supabase/migrations/20261110010100_event_media.sql
+ create mode 100644 supabase/migrations/20261110010200_event_ticket_removal.sql
+
+diff --git a/src/components/events/EventData.tsx b/src/components/events/EventData.tsx
+index ef23dda..375c1ac 100644
+--- a/src/components/events/EventData.tsx
++++ b/src/components/events/EventData.tsx
+@@ -45,7 +45,7 @@ const COLORS = ["#2563eb", "#16a34a", "#9333ea", "#ea580c", "#0d9488", "#64748b"
+ const fmtAge = (n: number | null | undefined) => (n == null ? "—" : String(n).replace(".", ","));
+ 
+ /** Aba "Dados": médias, gráficos, relatório em Excel e consulta pessoa a pessoa. */
+-export function EventData({ eventId, title }: { eventId: string; title: string }) {
++export function EventData({ eventId, title, askReligion = true }: { eventId: string; title: string; askReligion?: boolean }) {
+   const [search, setSearch] = useState("");
+   const [religionFilter, setReligionFilter] = useState("todas");
+   const [openId, setOpenId] = useState<string | null>(null);
+@@ -101,13 +101,17 @@ export function EventData({ eventId, title }: { eventId: string; title: string }
+           ["Inscrições com data de nascimento", a.count],
+         ],
+       },
+-      {
+-        name: "Religiões",
+-        rows: [
+-          ["Religião", "Inscritos", "% do total"],
+-          ...sum.religions.map((r) => [r.label, r.count, r.pct]),
+-        ],
+-      },
++      ...(askReligion
++        ? [
++            {
++              name: "Religiões",
++              rows: [
++                ["Religião", "Inscritos", "% do total"],
++                ...sum.religions.map((r) => [r.label, r.count, r.pct]),
++              ],
++            },
++          ]
++        : []),
+       {
+         name: "Faixas etárias",
+         rows: [["Faixa (anos)", "Inscritos"], ...sum.bands.map((b) => [b.label, b.count])],
+@@ -198,7 +202,8 @@ export function EventData({ eventId, title }: { eventId: string; title: string }
+         </p>
+       )}
+ 
+-      <div className="grid gap-6 lg:grid-cols-2">
++      <div className={`grid gap-6 ${askReligion ? "lg:grid-cols-2" : ""}`}>
++        {askReligion && (
+         <div className="rounded-2xl border bg-card p-5">
+           <p className="font-semibold text-foreground">Religiões</p>
+           <div className="mt-2 h-64">
+@@ -238,6 +243,7 @@ export function EventData({ eventId, title }: { eventId: string; title: string }
+             ))}
+           </ul>
+         </div>
++        )}
+ 
+         <div className="rounded-2xl border bg-card p-5">
+           <p className="font-semibold text-foreground">Faixas etárias</p>
+@@ -291,6 +297,7 @@ export function EventData({ eventId, title }: { eventId: string; title: string }
+               className="w-64"
+             />
+           </div>
++          {askReligion && (
+           <div className="space-y-1.5">
+             <Label>Religião</Label>
+             <Select value={religionFilter} onValueChange={setReligionFilter}>
+@@ -309,6 +316,7 @@ export function EventData({ eventId, title }: { eventId: string; title: string }
+               </SelectContent>
+             </Select>
+           </div>
++          )}
+         </div>
+         <div className="mt-3 overflow-x-auto rounded-2xl border bg-card">
+           <table className="w-full text-sm">
+diff --git a/src/components/events/EventForm.tsx b/src/components/events/EventForm.tsx
+index ccaf4ad..6c9619b 100644
+--- a/src/components/events/EventForm.tsx
++++ b/src/components/events/EventForm.tsx
+@@ -13,6 +13,10 @@ import { Checkbox } from "@/components/ui/checkbox";
+ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+ import { DEFAULT_CHILD_NOTICE, eventError, fromLocalInput, slugify, toLocalInput } from "@/lib/events";
+ import { compressImage, fileExt } from "@/lib/images";
++import { EVENT_MEDIA_BUCKET, checkMediaFile, mediaExt, parseInstagramUrl, type EventMediaType } from "@/lib/event-media";
++import { purgeStorageTrash } from "@/lib/storage-trash";
++import { uuid } from "@/lib/uuid";
++import { EventThumb } from "@/components/events/EventMedia";
+ import type { Tables } from "@/integrations/supabase/types";
+ 
+ export type LotDraft = { id?: string; name: string; price: string; capacity: string; public_access: boolean; opens_at: string; closes_at: string };
+@@ -41,8 +45,15 @@ export type EventDraft = {
+   limit_per_person: boolean;
+   max_per_person: string;
+   require_image_consent: boolean;
++  ask_religion: boolean;
+   allow_child_registration: boolean;
+   child_registration_notice: string;
++  /** Mídia de divulgação: "" = nenhuma. media_path é o arquivo já salvo; media_url é o link do Instagram. */
++  media_type: "" | EventMediaType;
++  media_path: string;
++  media_url: string;
++  /** Tipo que estava salvo ao abrir o formulário (só para saber se o arquivo salvo ainda vale). Não é gravado. */
++  media_stored_type: string;
+ };
+ 
+ const SINGLE_LOT = "Ingresso";
+@@ -53,8 +64,9 @@ export const blankEvent = (): EventDraft => ({
+   payment_enabled: false, payment_link: "", pix_key: "", pix_qr_path: "", accepts_card: false,
+   card_contact_note: "Para pagar no cartão, entre em contato com a igreja.",
+   allow_installments: false, max_installments: "3", limit_per_person: false, max_per_person: "2",
+-  require_image_consent: false,
++  require_image_consent: false, ask_religion: true,
+   allow_child_registration: false, child_registration_notice: DEFAULT_CHILD_NOTICE,
++  media_type: "", media_path: "", media_url: "", media_stored_type: "",
+ });
+ 
+ export function draftFrom(
+@@ -78,13 +90,15 @@ export function draftFrom(
+     card_contact_note: info?.card_contact_note ?? "Para pagar no cartão, entre em contato com a igreja.",
+     allow_installments: e.allow_installments, max_installments: String(Math.max(2, e.max_installments)),
+     limit_per_person: e.limit_per_person, max_per_person: String(e.max_per_person ?? 2),
+-    require_image_consent: e.require_image_consent,
++    require_image_consent: e.require_image_consent, ask_religion: e.ask_religion,
+     allow_child_registration: e.allow_child_registration,
+     child_registration_notice: e.child_registration_notice ?? DEFAULT_CHILD_NOTICE,
++    media_type: e.media_type === "image" || e.media_type === "video" || e.media_type === "instagram" ? e.media_type : "",
++    media_path: e.media_path ?? "", media_url: e.media_url ?? "", media_stored_type: e.media_type ?? "",
+   };
+ }
+ 
+-function validate(d: EventDraft) {
++function validate(d: EventDraft, mediaFile: File | null) {
+   if (!d.title.trim()) return "Informe o nome do evento.";
+   if (!d.starts_at) return "Informe a data e hora do evento.";
+   if (d.ends_at && new Date(d.ends_at) < new Date(d.starts_at)) return "O término não pode ser antes do início.";
+@@ -103,12 +117,41 @@ function validate(d: EventDraft) {
+       return "Informe como pagar: link, chave Pix, QR code ou pagamento no cartão.";
+     if (d.allow_installments && !(Number(d.max_installments) >= 2 && Number(d.max_installments) <= 12)) return "O parcelamento deve ter entre 2 e 12 parcelas.";
+   }
++  if (d.media_type === "instagram" && !parseInstagramUrl(d.media_url))
++    return "Cole o link de um post ou reel do Instagram (começa com https://www.instagram.com/p/ ou /reel/).";
++  if (d.media_type === "image" || d.media_type === "video") {
++    const stored = !!d.media_path && d.media_stored_type === d.media_type;
++    if (!mediaFile && !stored) return d.media_type === "image" ? "Escolha a foto do evento ou marque “Nenhuma” em mídia." : "Escolha o vídeo do evento ou marque “Nenhuma” em mídia.";
++    if (mediaFile) {
++      const problem = checkMediaFile(d.media_type, mediaFile);
++      if (problem) return problem;
++    }
++  }
+   if (d.allow_child_registration && d.child_registration_notice.length > 500) return "O aviso da inscrição de filho pode ter até 500 caracteres.";
+   if (d.limit_per_person && !(Number.isInteger(Number(d.max_per_person)) && Number(d.max_per_person) >= 1)) return "Informe quantas inscrições cada pessoa pode fazer.";
+   return null;
+ }
+ 
+-async function saveEvent(d: EventDraft, userId: string | null | undefined, qrFile: File | null) {
++/** Envia a foto/vídeo do evento (antes de gravar o evento, para não deixar evento pela metade se o envio falhar). */
++async function uploadEventMedia(type: "image" | "video", file: File) {
++  const blob = type === "image" ? await compressImage(file, { maxSide: 1600, quality: 0.82 }) : file;
++  const path = `${uuid()}.${mediaExt(type, blob)}`;
++  const { error } = await supabase.storage.from(EVENT_MEDIA_BUCKET).upload(path, blob, { contentType: blob.type || file.type });
++  if (error) throw new Error(type === "image" ? "Não foi possível enviar a foto do evento." : "Não foi possível enviar o vídeo do evento.");
++  return path;
++}
++
++async function saveEvent(d: EventDraft, userId: string | null | undefined, qrFile: File | null, mediaFile: File | null) {
++  let media_type: string | null = null;
++  let media_path: string | null = null;
++  let media_url: string | null = null;
++  if (d.media_type === "instagram") {
++    media_type = "instagram";
++    media_url = parseInstagramUrl(d.media_url)!.canonical;
++  } else if (d.media_type === "image" || d.media_type === "video") {
++    media_type = d.media_type;
++    media_path = mediaFile ? await uploadEventMedia(d.media_type, mediaFile) : d.media_path;
++  }
+   const lots = (d.useLots ? d.lots : d.lots.slice(0, 1).map((l) => ({ ...l, name: SINGLE_LOT }))).map((l, i) => ({
+     ...l, position: i, price: Number(l.price.replace(",", ".")) || 0, capacity: l.capacity === "" ? null : Number(l.capacity),
+   }));
+@@ -120,9 +163,10 @@ async function saveEvent(d: EventDraft, userId: string | null | undefined, qrFil
+     allow_installments: d.payment_enabled && d.allow_installments,
+     max_installments: d.payment_enabled && d.allow_installments ? Number(d.max_installments) : 1,
+     limit_per_person: d.limit_per_person, max_per_person: d.limit_per_person ? Number(d.max_per_person) : null,
+-    require_image_consent: d.require_image_consent,
++    require_image_consent: d.require_image_consent, ask_religion: d.ask_religion,
+     allow_child_registration: d.allow_child_registration,
+     child_registration_notice: d.allow_child_registration ? d.child_registration_notice.trim() || null : null,
++    media_type, media_path, media_url,
+   };
+ 
+   let eventId = d.id;
+@@ -201,17 +245,19 @@ export function EventForm({ initial, onSaved }: { initial: EventDraft; onSaved:
+   const { data: access } = useAccess();
+   const [d, setD] = useState<EventDraft>(initial);
+   const [qrFile, setQrFile] = useState<File | null>(null);
++  const [mediaFile, setMediaFile] = useState<File | null>(null);
+   const [sameCap, setSameCap] = useState("");
+   const set = (p: Partial<EventDraft>) => setD((x) => ({ ...x, ...p }));
+   const setLot = (i: number, p: Partial<LotDraft>) => setD((x) => ({ ...x, lots: x.lots.map((l, j) => (j === i ? { ...l, ...p } : l)) }));
+ 
+   const save = useMutation({
+     mutationFn: async () => {
+-      const problem = validate(d);
++      const problem = validate(d, mediaFile);
+       if (problem) throw new Error(problem);
+-      return saveEvent(d, access?.uid, qrFile);
++      return saveEvent(d, access?.uid, qrFile, mediaFile);
+     },
+     onSuccess: (id) => {
++      void purgeStorageTrash(); // foto/vídeo trocado ou removido sai do armazenamento
+       toast.success("Evento salvo");
+       qc.invalidateQueries({ queryKey: ["admin-events"] });
+       qc.invalidateQueries({ queryKey: ["admin-event"] });
+@@ -242,6 +288,56 @@ export function EventForm({ initial, onSaved }: { initial: EventDraft; onSaved:
+         <Toggle checked={d.published} onChange={(v) => set({ published: v })} title="Publicar evento" help="Quando publicado, aparece na página inicial e em Eventos do site." />
+       </section>
+ 
++      <section className="space-y-4">
++        <h3 className="text-lg text-foreground">Foto, vídeo ou post do Instagram</h3>
++        <p className="-mt-2 text-sm text-muted-foreground">
++          Aparece como miniatura do evento (página inicial, lista de eventos e painel) e, no computador, acima da descrição na página de inscrição. No celular, a página de inscrição não mostra.
++        </p>
++        <Field label="O que mostrar">
++          <Select value={d.media_type || "none"} onValueChange={(v) => { setMediaFile(null); set({ media_type: v === "none" ? "" : (v as EventMediaType) }); }}>
++            <SelectTrigger><SelectValue /></SelectTrigger>
++            <SelectContent>
++              <SelectItem value="none">Nenhuma</SelectItem>
++              <SelectItem value="image">Foto</SelectItem>
++              <SelectItem value="video">Vídeo</SelectItem>
++              <SelectItem value="instagram">Post do Instagram</SelectItem>
++            </SelectContent>
++          </Select>
++        </Field>
++        {(d.media_type === "image" || d.media_type === "video") && (
++          <div className="space-y-3 rounded-xl border p-4">
++            {!!d.media_path && d.media_stored_type === d.media_type && !mediaFile && (
++              <EventThumb event={{ media_type: d.media_type, media_path: d.media_path }} className="max-w-xs rounded-lg" />
++            )}
++            <Field
++              label={d.media_type === "image" ? "Foto do evento" : "Vídeo do evento"}
++              hint={d.media_type === "image" ? "JPG, PNG ou WebP (até 15 MB). A foto é reduzida automaticamente antes de enviar." : "MP4 ou WebM, até 50 MB. Vídeos de iPhone (.mov) também funcionam, mas MP4 abre em mais aparelhos."}
++            >
++              <Input
++                type="file"
++                accept={d.media_type === "image" ? "image/jpeg,image/png,image/webp" : "video/mp4,video/webm,video/quicktime"}
++                onChange={(e) => {
++                  const f = e.target.files?.[0] ?? null;
++                  const t = d.media_type;
++                  if (f && (t === "image" || t === "video")) {
++                    const problem = checkMediaFile(t, f);
++                    if (problem) { toast.error(problem); e.target.value = ""; return; }
++                  }
++                  setMediaFile(f);
++                }}
++              />
++            </Field>
++            {mediaFile && <p className="text-xs text-muted-foreground">Novo arquivo: {mediaFile.name} ({(mediaFile.size / 1024 / 1024).toFixed(1)} MB). Ele substitui o atual quando você salvar.</p>}
++            {!!d.media_path && d.media_stored_type === d.media_type && !mediaFile && <p className="text-xs text-muted-foreground">Esta é a mídia atual. Envie outro arquivo para trocar, ou marque “Nenhuma” para tirar.</p>}
++          </div>
++        )}
++        {d.media_type === "instagram" && (
++          <Field label="Link do post ou reel" hint="Cole o endereço do post (instagram.com/p/… ou instagram.com/reel/…). O post precisa ser público.">
++            <Input type="url" inputMode="url" placeholder="https://www.instagram.com/p/..." value={d.media_url} onChange={(e) => set({ media_url: e.target.value })} />
++          </Field>
++        )}
++      </section>
++
+       <section className="space-y-4">
+         <h3 className="text-lg text-foreground">Quem pode se inscrever</h3>
+         <Field label="Público do evento">
+@@ -258,6 +354,7 @@ export function EventForm({ initial, onSaved }: { initial: EventDraft; onSaved:
+           <Field label="Quantas inscrições cada pessoa pode fazer?"><Input type="number" min={1} value={d.max_per_person} onChange={(e) => set({ max_per_person: e.target.value })} className="max-w-32" /></Field>
+         )}
+         <Toggle checked={d.require_image_consent} onChange={(v) => set({ require_image_consent: v })} title="Exigir autorização de uso de imagem" help="Quem se inscrever precisa marcar “Estou de acordo com meu uso de imagem”. Sem o aceite, a inscrição não é feita." />
++        <Toggle checked={d.ask_religion} onChange={(v) => set({ ask_religion: v })} title="Perguntar a religião" help="Visitantes escolhem a religião e autorizam o uso desse dado sensível ao se inscrever. Membros nunca são perguntados. Desligado, a pergunta (e o aceite) não aparecem e nada de religião é guardado nas inscrições novas." />
+         <Toggle checked={d.allow_child_registration} onChange={(v) => set({ allow_child_registration: v })} title="Permitir “Inscrever meu filho”" help="O responsável inscreve crianças de 0 a 13 anos (nome, CPF e idade). Cada criança ocupa uma vaga do lote e recebe um ingresso com QR code. A opção continua aparecendo mesmo depois de o responsável já ter se inscrito." />
+         {d.allow_child_registration && (
+           <Field label="Aviso na inscrição de filho" hint="Aparece em destaque antes do formulário da criança. Pode editar à vontade (até 500 caracteres).">
+@@ -325,7 +422,7 @@ export function EventForm({ initial, onSaved }: { initial: EventDraft; onSaved:
+         )}
+       </section>
+ 
+-      <Button type="submit" size="lg" className="w-full sm:w-auto" disabled={save.isPending}>{d.id ? "Salvar alterações" : "Criar evento"}</Button>
++      <Button type="submit" size="lg" className="w-full sm:w-auto" disabled={save.isPending}>{save.isPending ? "Salvando..." : d.id ? "Salvar alterações" : "Criar evento"}</Button>
+     </form>
+   );
+ }
+diff --git a/src/components/events/EventMedia.tsx b/src/components/events/EventMedia.tsx
+new file mode 100644
+index 0000000..6962012
+--- /dev/null
++++ b/src/components/events/EventMedia.tsx
+@@ -0,0 +1,147 @@
++import { useEffect, useState } from "react";
++import { ExternalLink, Instagram, Play } from "lucide-react";
++import { supabase } from "@/integrations/supabase/client";
++import {
++  EVENT_MEDIA_BUCKET,
++  eventMediaFrom,
++  instagramEmbedUrl,
++  parseInstagramUrl,
++  type EventMediaFields,
++} from "@/lib/event-media";
++
++/** Endereço público do arquivo (o bucket event-media é público: a divulgação do evento é para todo mundo). */
++export const eventMediaUrl = (path: string) =>
++  supabase.storage.from(EVENT_MEDIA_BUCKET).getPublicUrl(path).data.publicUrl;
++
++/** true só quando a tela é de computador/tablet (md ou maior). No servidor e no primeiro desenho é false. */
++function useIsDesktop() {
++  const [yes, setYes] = useState(false);
++  useEffect(() => {
++    const mql = window.matchMedia("(min-width: 768px)");
++    const sync = () => setYes(mql.matches);
++    sync();
++    mql.addEventListener("change", sync);
++    return () => mql.removeEventListener("change", sync);
++  }, []);
++  return yes;
++}
++
++/**
++ * Miniatura do evento (landing, lista de eventos e painel). Foto e vídeo aparecem de verdade (o vídeo mostra o primeiro
++ * quadro). O Instagram não entrega imagem para outros sites, então ele aparece como um cartão; o post de verdade
++ * abre na página do evento. Sem mídia, não desenha nada.
++ */
++export function EventThumb({
++  event,
++  className = "",
++}: {
++  event: EventMediaFields;
++  className?: string;
++}) {
++  const media = eventMediaFrom(event);
++  if (!media) return null;
++  const box = `relative aspect-video w-full overflow-hidden bg-muted ${className}`;
++
++  if (media.type === "image") {
++    return (
++      <div className={box} data-testid="event-thumb">
++        <img
++          src={eventMediaUrl(media.path)}
++          alt=""
++          loading="lazy"
++          decoding="async"
++          className="h-full w-full object-cover"
++        />
++      </div>
++    );
++  }
++  if (media.type === "video") {
++    return (
++      <div className={box} data-testid="event-thumb">
++        <video
++          src={`${eventMediaUrl(media.path)}#t=0.1`}
++          muted
++          playsInline
++          preload="metadata"
++          aria-hidden
++          tabIndex={-1}
++          className="pointer-events-none h-full w-full object-cover"
++        />
++        <span className="pointer-events-none absolute inset-0 grid place-items-center bg-black/10">
++          <span className="grid h-12 w-12 place-items-center rounded-full bg-black/55 text-white">
++            <Play className="h-5 w-5 translate-x-0.5" aria-hidden />
++          </span>
++        </span>
++      </div>
++    );
++  }
++  return (
++    <div
++      className={`${box} grid place-items-center bg-gradient-to-br from-fuchsia-600 via-rose-500 to-amber-400 text-white`}
++      data-testid="event-thumb"
++    >
++      <div className="flex flex-col items-center gap-1.5">
++        <Instagram className="h-9 w-9" aria-hidden />
++        <span className="text-sm font-medium">Post do Instagram</span>
++      </div>
++    </div>
++  );
++}
++
++/**
++ * Mídia completa, acima da descrição na página do evento. Só aparece no computador: no celular nada é desenhado nem
++ * baixado (a caixa fica com `hidden` e o conteúdo só é montado quando a tela é larga).
++ */
++export function EventMediaFull({ event }: { event: EventMediaFields }) {
++  const media = eventMediaFrom(event);
++  const desktop = useIsDesktop();
++  if (!media) return null;
++
++  return (
++    <div className="mt-8 hidden md:block" data-testid="event-media-full">
++      {desktop && media.type === "image" && (
++        <img
++          src={eventMediaUrl(media.path)}
++          alt=""
++          decoding="async"
++          className="max-h-[28rem] w-full rounded-2xl border object-cover"
++        />
++      )}
++      {desktop && media.type === "video" && (
++        <video
++          src={eventMediaUrl(media.path)}
++          controls
++          playsInline
++          preload="metadata"
++          className="max-h-[28rem] w-full rounded-2xl border bg-black"
++        />
++      )}
++      {desktop && media.type === "instagram" && <InstagramEmbed url={media.url} />}
++    </div>
++  );
++}
++
++function InstagramEmbed({ url }: { url: string }) {
++  const post = parseInstagramUrl(url);
++  if (!post) return null;
++  return (
++    <div className="mx-auto max-w-[420px]">
++      <iframe
++        src={instagramEmbedUrl(post)}
++        title="Post do Instagram do evento"
++        loading="lazy"
++        referrerPolicy="no-referrer"
++        sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"
++        className="h-[620px] w-full rounded-2xl border bg-white"
++      />
++      <a
++        href={post.canonical}
++        target="_blank"
++        rel="noreferrer noopener"
++        className="mt-2 inline-flex items-center gap-1.5 text-sm text-primary underline"
++      >
++        <ExternalLink className="h-4 w-4" /> Abrir no Instagram
++      </a>
++    </div>
++  );
++}
+diff --git a/src/components/events/EventRegistration.tsx b/src/components/events/EventRegistration.tsx
+index 5164549..9f64144 100644
+--- a/src/components/events/EventRegistration.tsx
++++ b/src/components/events/EventRegistration.tsx
+@@ -17,7 +17,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+ import { RELIGIONS } from "@/lib/event-data";
+ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+ import {
+-  eventError, fmtDate, formatCpf, isValidBirthDate, isValidCpf, lotIsOpen, moneyBR, registrationIsOpen,
++  asksReligion, eventError, fmtDate, formatCpf, isValidBirthDate, isValidCpf, lotIsOpen, moneyBR, registrationIsOpen,
+   type PublicEventDetail, type PublicLot,
+ } from "@/lib/events";
+ 
+@@ -40,6 +40,7 @@ function EventRegistrationMain({ detail }: { detail: PublicEventDetail }) {
+   const uid = access?.uid;
+   const nextPath = `/eventos/${event.slug}`;
+   const visitorsAllowed = event.audience === "public" || lots.some((l) => l.public_access);
++  const askReligion = asksReligion(event);
+ 
+   const profile = useQuery({
+     queryKey: ["event-profile", uid],
+@@ -130,7 +131,7 @@ function EventRegistrationMain({ detail }: { detail: PublicEventDetail }) {
+       if (event.require_image_consent && !imageConsent) throw new Error("image_consent_required");
+       if (!isMember) {
+         if (!institution.trim()) throw new Error("invalid_institution");
+-        if (!religion) throw new Error("invalid_religion");
++        if (askReligion && !religion) throw new Error("invalid_religion");
+       }
+       if (!profile.data?.birth_date) {
+         if (!isValidBirthDate(birthDate)) throw new Error("invalid_birth_date");
+@@ -140,12 +141,12 @@ function EventRegistrationMain({ detail }: { detail: PublicEventDetail }) {
+       const { error } = await supabase.rpc("register_for_event", {
+         _event: event.id, _lot: lotId, _quantity: qty, _cpf: cpf, _installments: installments,
+         _image_consent: event.require_image_consent && imageConsent,
+-        ...(isMember ? {} : { _institution: institution.trim(), _religion: religion }),
++        ...(isMember ? {} : { _institution: institution.trim(), ...(askReligion ? { _religion: religion } : {}) }),
+       });
+       if (error) throw error;
+     },
+     onSuccess: () => {
+-      if (!isMember) void recordSensitiveConsent();
++      if (!isMember && askReligion) void recordSensitiveConsent();
+       setDone({ paid: payRequired });
+       qc.invalidateQueries({ queryKey: ["public-event", event.slug] });
+       qc.invalidateQueries({ queryKey: ["public-events"] });
+@@ -348,6 +349,7 @@ function EventRegistrationMain({ detail }: { detail: PublicEventDetail }) {
+               <Label>Qual instituição você participa? *</Label>
+               <Input required maxLength={120} placeholder='Ex.: igreja, escola, ONG… ou "Nenhuma"' value={institution} onChange={(e) => setInstitution(e.target.value)} />
+             </div>
++            {askReligion && (
+             <div className="space-y-1.5">
+               <Label>Qual religião você é? *</Label>
+               <Select value={religion} onValueChange={setReligion}>
+@@ -357,6 +359,8 @@ function EventRegistrationMain({ detail }: { detail: PublicEventDetail }) {
+                 </SelectContent>
+               </Select>
+             </div>
++            )}
++            {askReligion && (
+             <label className="flex cursor-pointer items-start gap-3 rounded-lg border bg-primary-soft/40 p-4 text-sm sm:col-span-2">
+               <Checkbox
+                 className="mt-0.5"
+@@ -376,6 +380,7 @@ function EventRegistrationMain({ detail }: { detail: PublicEventDetail }) {
+                 </span>
+               </span>
+             </label>
++            )}
+           </div>
+         )}
+ 
+@@ -416,7 +421,7 @@ function EventRegistrationMain({ detail }: { detail: PublicEventDetail }) {
+           <p className="text-sm text-muted-foreground">
+             Total: <strong className="text-lg text-foreground">{payRequired ? moneyBR(total) : "Gratuito"}</strong>
+           </p>
+-          <Button type="submit" size="lg" disabled={register.isPending || !lotId || (event.require_image_consent && !imageConsent) || (!isMember && (!institution.trim() || !religion || !religionConsent)) || (!profile.data.birth_date && !birthDate)}>Inscrever-se</Button>
++          <Button type="submit" size="lg" disabled={register.isPending || !lotId || (event.require_image_consent && !imageConsent) || (!isMember && (!institution.trim() || (askReligion && (!religion || !religionConsent)))) || (!profile.data.birth_date && !birthDate)}>Inscrever-se</Button>
+         </div>
+       </form>
+     </Box>
+diff --git a/src/components/events/EventsList.tsx b/src/components/events/EventsList.tsx
+index dd7ba6f..b5563f8 100644
+--- a/src/components/events/EventsList.tsx
++++ b/src/components/events/EventsList.tsx
+@@ -4,6 +4,7 @@ import { ArrowUpRight, CalendarDays, MapPin, Ticket, Users } from "lucide-react"
+ import { supabase } from "@/integrations/supabase/client";
+ import { Badge } from "@/components/ui/badge";
+ import { Button } from "@/components/ui/button";
++import { EventThumb } from "@/components/events/EventMedia";
+ import { fmtDate, fmtLongDate, fmtTime, moneyBR } from "@/lib/events";
+ import type { Database } from "@/integrations/supabase/types";
+ 
+@@ -34,8 +35,10 @@ export function EventCard({ e }: { e: EventRow }) {
+     <Link
+       to="/eventos/$slug"
+       params={{ slug: e.slug }}
+-      className="group flex flex-col rounded-2xl border bg-card p-6 transition-colors hover:border-primary"
++      className="group flex flex-col overflow-hidden rounded-2xl border bg-card transition-colors hover:border-primary"
+     >
++      <EventThumb event={e} />
++      <div className="flex flex-1 flex-col p-6">
+       <div className="flex flex-wrap items-center gap-2">
+         <Badge variant={open ? "default" : "secondary"}>{registrationLabel(e)}</Badge>
+         {e.audience === "members" && <Badge variant="outline">Para membros</Badge>}
+@@ -64,6 +67,7 @@ export function EventCard({ e }: { e: EventRow }) {
+       <span className="mt-5 inline-flex items-center gap-1.5 text-sm font-medium text-primary">
+         Ver detalhes <ArrowUpRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
+       </span>
++      </div>
+     </Link>
+   );
+ }
+diff --git a/src/components/events/MyTickets.tsx b/src/components/events/MyTickets.tsx
+index 08643e8..3a46511 100644
+--- a/src/components/events/MyTickets.tsx
++++ b/src/components/events/MyTickets.tsx
+@@ -113,7 +113,7 @@ export function MyTickets({ uid }: { uid: string }) {
+     queryFn: async () => {
+       const { data, error } = await supabase
+         .from("event_registrations")
+-        .select("*, events(title, slug, starts_at, location), event_lots(name), event_payments(*), event_tickets(*)")
++        .select("*, events(title, slug, starts_at, location), event_lots(name), event_payments(*), event_tickets(*), event_ticket_removals(*)")
+         .eq("user_id", uid)
+         .order("created_at", { ascending: false });
+       if (error) throw error;
+@@ -207,6 +207,19 @@ export function MyTickets({ uid }: { uid: string }) {
+                 <Badge variant={r.status === "confirmed" ? "default" : "secondary"}>{REGISTRATION_STATUS[r.status] ?? r.status}</Badge>
+               </div>
+ 
++              {(r.event_ticket_removals ?? []).length > 0 && (
++                <div className="mt-4 rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm">
++                  <p className="font-medium text-foreground">Ingressos removidos pela igreja</p>
++                  <ul className="mt-1 space-y-1 text-muted-foreground">
++                    {[...(r.event_ticket_removals ?? [])].sort((a, b) => b.removed_at.localeCompare(a.removed_at)).map((x) => (
++                      <li key={x.id}>
++                        {fmtDateTime(x.removed_at)} — {x.tickets_removed} {x.tickets_removed === 1 ? "ingresso" : "ingressos"}: {x.reason}
++                      </li>
++                    ))}
++                  </ul>
++                </div>
++              )}
++
+               {r.status === "pending" && (
+                 <div className="mt-5 space-y-4">
+                   <PaymentInstructions eventId={r.event_id} />
+@@ -245,7 +258,7 @@ export function MyTickets({ uid }: { uid: string }) {
+               {r.status === "confirmed" && (
+                 <div className="mt-5 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+                   {tickets.map((t) => (
+-                    <TicketCard key={t.id} ticket={t} total={r.quantity} />
++                    <TicketCard key={t.id} ticket={t} total={tickets.length} />
+                   ))}
+                 </div>
+               )}
+diff --git a/src/components/events/TicketRemoval.tsx b/src/components/events/TicketRemoval.tsx
+new file mode 100644
+index 0000000..0aacb5c
+--- /dev/null
++++ b/src/components/events/TicketRemoval.tsx
+@@ -0,0 +1,234 @@
++import { useState } from "react";
++import { useMutation } from "@tanstack/react-query";
++import { toast } from "sonner";
++import { supabase } from "@/integrations/supabase/client";
++import { Badge } from "@/components/ui/badge";
++import { Button } from "@/components/ui/button";
++import { Input } from "@/components/ui/input";
++import { Label } from "@/components/ui/label";
++import { Textarea } from "@/components/ui/textarea";
++import { Checkbox } from "@/components/ui/checkbox";
++import { eventError, fmtDateTime, moneyBR, TICKET_STATUS } from "@/lib/events";
++import { formatShortCode } from "@/lib/images";
++import {
++  normalizeReason,
++  previewRemoval,
++  removalReasonIsValid,
++  REMOVAL_REASON_MAX,
++} from "@/lib/event-removal";
++import type { Tables } from "@/integrations/supabase/types";
++
++type Reg = Pick<Tables<"event_registrations">, "id" | "status" | "quantity" | "unit_price">;
++
++/** Ingressos de uma inscrição: confere cada um e remove 1 ou mais, sempre com uma observação explicando o motivo. */
++export function TicketRemoval({
++  reg,
++  tickets,
++  removals,
++  paidSum,
++  onChange,
++}: {
++  reg: Reg;
++  tickets: Tables<"event_tickets">[];
++  removals: Tables<"event_ticket_removals">[];
++  paidSum: number;
++  onChange: () => void;
++}) {
++  const [picked, setPicked] = useState<Set<string>>(new Set());
++  const [qty, setQty] = useState(1);
++  const [open, setOpen] = useState(false);
++  const [reason, setReason] = useState("");
++
++  const sorted = [...tickets].sort((a, b) => a.seq - b.seq);
++  const issued = sorted.length > 0;
++  const reasonById = new Map(removals.map((r) => [r.id, r]));
++  const canRemove = reg.status !== "cancelled";
++  const removing = issued ? picked.size : qty;
++  const preview = previewRemoval({
++    unitPrice: Number(reg.unit_price),
++    quantity: reg.quantity,
++    removing,
++    paidSum,
++  });
++
++  const remove = useMutation({
++    mutationFn: async () => {
++      const { data, error } = await supabase.rpc("remove_event_tickets", {
++        _reg: reg.id,
++        _reason: normalizeReason(reason),
++        ...(issued ? { _ticket_ids: [...picked] } : { _quantity: qty }),
++      });
++      if (error) throw error;
++      return data as { refund_due?: number } | null;
++    },
++    onSuccess: (res) => {
++      const due = Number(res?.refund_due ?? 0);
++      toast.success(
++        due > 0
++          ? `Ingresso(s) removido(s). Valor a devolver: ${moneyBR(due)}.`
++          : "Ingresso(s) removido(s).",
++      );
++      setPicked(new Set());
++      setQty(1);
++      setReason("");
++      setOpen(false);
++      onChange();
++    },
++    onError: (e) => toast.error(eventError(e)),
++  });
++
++  const toggle = (id: string, on: boolean) =>
++    setPicked((p) => {
++      const n = new Set(p);
++      if (on) n.add(id);
++      else n.delete(id);
++      return n;
++    });
++
++  return (
++    <div className="space-y-3">
++      <p className="font-medium text-foreground">Ingressos ({reg.quantity})</p>
++
++      {issued ? (
++        <ul className="divide-y rounded-xl border">
++          {sorted.map((t) => {
++            const removal = t.removal_id ? reasonById.get(t.removal_id) : undefined;
++            const removable = canRemove && t.status === "valid";
++            return (
++              <li key={t.id} className="flex items-start gap-3 p-3">
++                {canRemove && (
++                  <Checkbox
++                    className="mt-1"
++                    aria-label={`Remover o ingresso de ${t.holder_name}`}
++                    disabled={!removable}
++                    checked={picked.has(t.id)}
++                    onCheckedChange={(on) => toggle(t.id, on === true)}
++                  />
++                )}
++                <div className="min-w-0 flex-1">
++                  <p className="font-medium text-foreground">{t.holder_name}</p>
++                  <p className="font-mono text-xs tracking-widest text-muted-foreground">
++                    {formatShortCode(t.short_code)}
++                  </p>
++                  <Badge variant={t.status === "valid" ? "outline" : "secondary"} className="mt-1">
++                    {removal ? "Removido" : (TICKET_STATUS[t.status] ?? t.status)}
++                  </Badge>
++                  {t.status === "checked_in" && canRemove && (
++                    <span className="ml-2 text-xs text-muted-foreground">
++                      desfaça a presença no check-in para poder remover
++                    </span>
++                  )}
++                  {removal && (
++                    <p className="mt-1 text-xs text-muted-foreground">
++                      Motivo: {removal.reason} · {fmtDateTime(removal.removed_at)}
++                    </p>
++                  )}
++                </div>
++              </li>
++            );
++          })}
++        </ul>
++      ) : (
++        <p className="text-muted-foreground">
++          {reg.quantity} {reg.quantity === 1 ? "ingresso" : "ingressos"}, ainda não emitidos (saem
++          depois do pagamento).
++        </p>
++      )}
++
++      {removals.length > 0 && (
++        <div className="rounded-xl border bg-muted/40 p-3 text-xs text-muted-foreground">
++          <p className="font-medium text-foreground">Histórico de remoções</p>
++          <ul className="mt-1 space-y-1">
++            {[...removals]
++              .sort((a, b) => b.removed_at.localeCompare(a.removed_at))
++              .map((r) => (
++                <li key={r.id}>
++                  {fmtDateTime(r.removed_at)} — {r.tickets_removed}{" "}
++                  {r.tickets_removed === 1 ? "ingresso" : "ingressos"}
++                  {r.registration_cancelled ? " (inscrição cancelada)" : ""}: {r.reason}
++                  {Number(r.refund_due) > 0 ? ` · a devolver ${moneyBR(r.refund_due)}` : ""}
++                </li>
++              ))}
++          </ul>
++        </div>
++      )}
++
++      {canRemove && !open && (
++        <Button
++          type="button"
++          variant="outline"
++          disabled={issued ? picked.size === 0 : false}
++          onClick={() => setOpen(true)}
++        >
++          {issued ? `Remover selecionados (${picked.size})` : "Remover ingressos"}
++        </Button>
++      )}
++
++      {canRemove && open && (
++        <div className="space-y-3 rounded-xl border border-destructive/30 p-4">
++          {!issued && (
++            <div className="space-y-1.5">
++              <Label htmlFor={`rm-qty-${reg.id}`}>Quantos ingressos remover?</Label>
++              <Input
++                id={`rm-qty-${reg.id}`}
++                type="number"
++                min={1}
++                max={reg.quantity}
++                value={qty}
++                onChange={(e) =>
++                  setQty(Math.max(1, Math.min(reg.quantity, Number(e.target.value) || 1)))
++                }
++                className="max-w-28"
++              />
++            </div>
++          )}
++          <div className="space-y-1.5">
++            <Label htmlFor={`rm-reason-${reg.id}`}>
++              Observação: por que o ingresso está sendo removido? *
++            </Label>
++            <Textarea
++              id={`rm-reason-${reg.id}`}
++              rows={3}
++              maxLength={REMOVAL_REASON_MAX}
++              value={reason}
++              onChange={(e) => setReason(e.target.value)}
++              placeholder="Ex.: pessoa desistiu, inscrição duplicada, pagamento não identificado…"
++            />
++            <p className="text-xs text-muted-foreground">
++              Fica registrada e a pessoa inscrita vê esta observação em “Meu cadastro”.
++            </p>
++          </div>
++          <p className="text-sm text-foreground" data-testid="removal-summary">
++            {preview.cancelsRegistration
++              ? "Como todos os ingressos serão removidos, a inscrição inteira será cancelada."
++              : `A inscrição fica com ${preview.newQuantity} ${preview.newQuantity === 1 ? "ingresso" : "ingressos"}${Number(reg.unit_price) > 0 ? ` (${moneyBR(preview.newTotal)})` : ""}. As vagas removidas voltam para o lote.`}
++            {preview.refundDue > 0 && (
++              <span className="block font-medium">
++                Já pago a devolver: {moneyBR(preview.refundDue)} (a devolução é feita fora do
++                sistema).
++              </span>
++            )}
++          </p>
++          <div className="flex flex-wrap gap-2">
++            <Button
++              type="button"
++              variant="destructive"
++              disabled={remove.isPending || !removalReasonIsValid(reason) || removing < 1}
++              onClick={() => remove.mutate()}
++            >
++              Confirmar remoção
++            </Button>
++            <Button
++              type="button"
++              variant="ghost"
++              disabled={remove.isPending}
++              onClick={() => setOpen(false)}
++            >
++              Voltar
++            </Button>
++          </div>
++        </div>
++      )}
++    </div>
++  );
++}
+diff --git a/src/integrations/supabase/types.ts b/src/integrations/supabase/types.ts
+index 8e43edf..eb9b01e 100644
+--- a/src/integrations/supabase/types.ts
++++ b/src/integrations/supabase/types.ts
+@@ -426,6 +426,60 @@ export type Database = {
+           },
+         ]
+       }
++      event_ticket_removals: {
++        Row: {
++          event_id: string
++          holder_names: string[]
++          id: string
++          reason: string
++          refund_due: number
++          registration_cancelled: boolean
++          registration_id: string
++          removed_at: string
++          removed_by: string | null
++          tickets_removed: number
++        }
++        Insert: {
++          event_id: string
++          holder_names?: string[]
++          id?: string
++          reason: string
++          refund_due?: number
++          registration_cancelled?: boolean
++          registration_id: string
++          removed_at?: string
++          removed_by?: string | null
++          tickets_removed: number
++        }
++        Update: {
++          event_id?: string
++          holder_names?: string[]
++          id?: string
++          reason?: string
++          refund_due?: number
++          registration_cancelled?: boolean
++          registration_id?: string
++          removed_at?: string
++          removed_by?: string | null
++          tickets_removed?: number
++        }
++        Relationships: [
++          {
++            foreignKeyName: "event_ticket_removals_event_id_fkey"
++            columns: ["event_id"]
++            isOneToOne: false
++            referencedRelation: "events"
++            referencedColumns: ["id"]
++          },
++          {
++            foreignKeyName: "event_ticket_removals_registration_id_fkey"
++            columns: ["registration_id"]
++            isOneToOne: false
++            referencedRelation: "event_registrations"
++            referencedColumns: ["id"]
++          },
++        ]
++      }
+       event_tickets: {
+         Row: {
+           checked_in_at: string | null
+@@ -436,6 +490,7 @@ export type Database = {
+           holder_name: string
+           id: string
+           registration_id: string
++          removal_id: string | null
+           seq: number
+           short_code: string
+           status: string
+@@ -449,6 +504,7 @@ export type Database = {
+           holder_name: string
+           id?: string
+           registration_id: string
++          removal_id?: string | null
+           seq: number
+           short_code?: string
+           status?: string
+@@ -462,6 +518,7 @@ export type Database = {
+           holder_name?: string
+           id?: string
+           registration_id?: string
++          removal_id?: string | null
+           seq?: number
+           short_code?: string
+           status?: string
+@@ -481,6 +538,13 @@ export type Database = {
+             referencedRelation: "event_registrations"
+             referencedColumns: ["id"]
+           },
++          {
++            foreignKeyName: "event_tickets_removal_id_fkey"
++            columns: ["removal_id"]
++            isOneToOne: false
++            referencedRelation: "event_ticket_removals"
++            referencedColumns: ["id"]
++          },
+         ]
+       }
+       events: {
+@@ -488,6 +552,7 @@ export type Database = {
+           accepts_card: boolean
+           allow_child_registration: boolean
+           allow_installments: boolean
++          ask_religion: boolean
+           audience: string
+           child_registration_notice: string | null
+           created_at: string
+@@ -499,6 +564,9 @@ export type Database = {
+           location: string | null
+           max_installments: number
+           max_per_person: number | null
++          media_path: string | null
++          media_type: string | null
++          media_url: string | null
+           payment_enabled: boolean
+           published: boolean
+           registration_closes_at: string | null
+@@ -513,6 +581,7 @@ export type Database = {
+           accepts_card?: boolean
+           allow_child_registration?: boolean
+           allow_installments?: boolean
++          ask_religion?: boolean
+           audience?: string
+           child_registration_notice?: string | null
+           created_at?: string
+@@ -524,6 +593,9 @@ export type Database = {
+           location?: string | null
+           max_installments?: number
+           max_per_person?: number | null
++          media_path?: string | null
++          media_type?: string | null
++          media_url?: string | null
+           payment_enabled?: boolean
+           published?: boolean
+           registration_closes_at?: string | null
+@@ -538,6 +610,7 @@ export type Database = {
+           accepts_card?: boolean
+           allow_child_registration?: boolean
+           allow_installments?: boolean
++          ask_religion?: boolean
+           audience?: string
+           child_registration_notice?: string | null
+           created_at?: string
+@@ -549,6 +622,9 @@ export type Database = {
+           location?: string | null
+           max_installments?: number
+           max_per_person?: number | null
++          media_path?: string | null
++          media_type?: string | null
++          media_url?: string | null
+           payment_enabled?: boolean
+           published?: boolean
+           registration_closes_at?: string | null
+@@ -1251,6 +1327,9 @@ export type Database = {
+           ends_at: string | null
+           id: string
+           location: string | null
++          media_path: string | null
++          media_type: string | null
++          media_url: string | null
+           min_price: number | null
+           payment_enabled: boolean
+           registration_closes_at: string | null
+@@ -1288,6 +1367,15 @@ export type Database = {
+         Returns: string
+       }
+       release_event_registration: { Args: { _reg: string }; Returns: undefined }
++      remove_event_tickets: {
++        Args: {
++          _quantity?: number
++          _reason: string
++          _reg: string
++          _ticket_ids?: string[]
++        }
++        Returns: Json
++      }
+       set_event_payment_status: {
+         Args: { _payment: string; _status: string }
+         Returns: undefined
+diff --git a/src/lib/event-media.ts b/src/lib/event-media.ts
+new file mode 100644
+index 0000000..b490ab0
+--- /dev/null
++++ b/src/lib/event-media.ts
+@@ -0,0 +1,71 @@
++/** Mídia de divulgação do evento: foto, vídeo (arquivo) ou post do Instagram (link). Sem dependência do Supabase (testável). */
++
++export const EVENT_MEDIA_BUCKET = "event-media";
++
++export type EventMediaType = "image" | "video" | "instagram";
++
++export type EventMedia =
++  | { type: "image" | "video"; path: string; url: null }
++  | { type: "instagram"; path: null; url: string };
++
++/** Campos de mídia como vêm do banco (tabela events e RPCs públicas). */
++export type EventMediaFields = {
++  media_type?: string | null;
++  media_path?: string | null;
++  media_url?: string | null;
++};
++
++/** Vídeo: até 50 MB (limite do bucket). Foto: reduzida no navegador antes do envio. */
++export const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
++export const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
++export const VIDEO_TYPES = ["video/mp4", "video/webm", "video/quicktime"];
++
++/** Devolve a mídia só quando os campos estão coerentes; qualquer coisa estranha vira "sem mídia". */
++export function eventMediaFrom(e: EventMediaFields | null | undefined): EventMedia | null {
++  if (!e?.media_type) return null;
++  if ((e.media_type === "image" || e.media_type === "video") && e.media_path) {
++    return { type: e.media_type, path: e.media_path, url: null };
++  }
++  if (e.media_type === "instagram" && e.media_url && parseInstagramUrl(e.media_url)) {
++    return { type: "instagram", path: null, url: e.media_url };
++  }
++  return null;
++}
++
++export type InstagramPost = { kind: "p" | "reel" | "tv"; code: string; canonical: string };
++
++const IG_RE =
++  /^https:\/\/(?:www\.)?instagram\.com\/(?:[A-Za-z0-9._]+\/)?(p|reel|reels|tv)\/([A-Za-z0-9_-]{5,})\/?(?:[?#].*)?$/;
++
++/**
++ * Lê o link de um post, reel ou IGTV do Instagram. Só aceita https://instagram.com (com ou sem www).
++ * O iframe do site é sempre montado a partir do código extraído, nunca com o texto digitado.
++ */
++export function parseInstagramUrl(input: string | null | undefined): InstagramPost | null {
++  const m = IG_RE.exec((input ?? "").trim());
++  if (!m) return null;
++  const kind = m[1] === "reels" ? "reel" : (m[1] as "p" | "reel" | "tv");
++  const code = m[2]!;
++  return { kind, code, canonical: `https://www.instagram.com/${kind}/${code}/` };
++}
++
++export const instagramEmbedUrl = (post: InstagramPost) => `${post.canonical}embed`;
++
++/** Confere o arquivo escolhido para o evento; devolve a mensagem de erro ou null. */
++export function checkMediaFile(type: "image" | "video", file: File): string | null {
++  if (type === "image") {
++    if (!file.type.startsWith("image/")) return "Escolha um arquivo de imagem (JPG, PNG ou WebP).";
++    if (file.size > MAX_IMAGE_BYTES) return "A foto deve ter até 15 MB.";
++    return null;
++  }
++  if (!VIDEO_TYPES.includes(file.type)) return "Envie o vídeo em MP4 ou WebM.";
++  if (file.size > MAX_VIDEO_BYTES) return "O vídeo deve ter até 50 MB.";
++  return null;
++}
++
++/** Extensão do arquivo de mídia a partir do tipo (o nome original do arquivo não é usado no caminho). */
++export function mediaExt(type: "image" | "video", blob: Blob): string {
++  if (type === "image")
++    return blob.type === "image/png" ? "png" : blob.type === "image/webp" ? "webp" : "jpg";
++  return blob.type === "video/webm" ? "webm" : blob.type === "video/quicktime" ? "mov" : "mp4";
++}
+diff --git a/src/lib/event-removal.ts b/src/lib/event-removal.ts
+new file mode 100644
+index 0000000..5bc0105
+--- /dev/null
++++ b/src/lib/event-removal.ts
+@@ -0,0 +1,46 @@
++/** Remoção de ingressos de uma inscrição. Espelha a regra da função remove_event_tickets (a do banco é a que vale). */
++
++export const REMOVAL_REASON_MIN = 3;
++export const REMOVAL_REASON_MAX = 500;
++
++export const normalizeReason = (s: string) => s.replace(/\s+/g, " ").trim();
++export const removalReasonIsValid = (s: string) => {
++  const n = normalizeReason(s).length;
++  return n >= REMOVAL_REASON_MIN && n <= REMOVAL_REASON_MAX;
++};
++
++export type RemovalPreview = {
++  /** Remover todos os ingressos cancela a inscrição inteira. */
++  cancelsRegistration: boolean;
++  newQuantity: number;
++  newTotal: number;
++  /** Já pago que passa do novo total (a igreja devolve por fora do sistema). */
++  refundDue: number;
++};
++
++const cents = (n: number) => Math.round(n * 100) / 100;
++
++export function previewRemoval(input: {
++  unitPrice: number;
++  quantity: number;
++  removing: number;
++  paidSum: number;
++}): RemovalPreview {
++  const { unitPrice, quantity, removing, paidSum } = input;
++  if (removing >= quantity) {
++    return {
++      cancelsRegistration: true,
++      newQuantity: 0,
++      newTotal: 0,
++      refundDue: cents(Math.max(paidSum, 0)),
++    };
++  }
++  const newQuantity = quantity - removing;
++  const newTotal = cents(unitPrice * newQuantity);
++  return {
++    cancelsRegistration: false,
++    newQuantity,
++    newTotal,
++    refundDue: cents(Math.max(paidSum - newTotal, 0)),
++  };
++}
+diff --git a/src/lib/events.ts b/src/lib/events.ts
+index d8b6c9b..b32b044 100644
+--- a/src/lib/events.ts
++++ b/src/lib/events.ts
+@@ -83,6 +83,10 @@ const ERRORS: Record<string, string> = {
+   invalid_child_cpf: "CPF da criança inválido. Confira os números.",
+   child_cpf_same_as_guardian: "O CPF da criança não pode ser o mesmo do responsável.",
+   child_already_registered: "Esta criança já está inscrita neste evento.",
++  invalid_removal_reason: "Escreva a observação explicando por que o ingresso foi removido (3 a 500 caracteres).",
++  invalid_removal_selection: "Escolha pelo menos um ingresso para remover.",
++  ticket_not_removable: "Só dá para remover ingressos válidos. Um ingresso já cancelado ou removido não pode ser removido de novo.",
++  ticket_checked_in: "Este ingresso já teve a presença confirmada. Desfaça a presença no check-in antes de removê-lo.",
+   cannot_cancel: "Esta inscrição não pode mais ser cancelada por aqui. Fale com a igreja.",
+   payment_closed: "Este pagamento não pode mais ser alterado.",
+   invalid_proof: "Arquivo de comprovante inválido.",
+@@ -144,8 +148,16 @@ export type PublicEvent = {
+   require_image_consent: boolean;
+   allow_child_registration: boolean;
+   child_registration_notice: string | null;
++  /** Pergunta a religião dos visitantes na inscrição. Ausente (banco antigo) = pergunta, como sempre foi. */
++  ask_religion?: boolean;
++  /** Mídia de divulgação (foto, vídeo ou post do Instagram). */
++  media_type?: string | null;
++  media_path?: string | null;
++  media_url?: string | null;
+ };
+ export type PublicEventDetail = { event: PublicEvent; lots: PublicLot[] };
++/** O evento pergunta a religião dos visitantes? (só `false` explícito desliga) */
++export const asksReligion = (e: Pick<PublicEvent, "ask_religion">) => e.ask_religion !== false;
+ export const asEventDetail = (j: Json | null) => (j ? (j as unknown as PublicEventDetail) : null);
+ 
+ export const lotIsOpen = (l: PublicLot, now = new Date()) =>
+diff --git a/src/routes/_authenticated/painel.evento.$id.tsx b/src/routes/_authenticated/painel.evento.$id.tsx
+index fdc71d7..a1d0719 100644
+--- a/src/routes/_authenticated/painel.evento.$id.tsx
++++ b/src/routes/_authenticated/painel.evento.$id.tsx
+@@ -16,6 +16,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+ import { EventData } from "@/components/events/EventData";
+ import { registrationAge, religionLabel } from "@/lib/event-data";
+ import { EventForm, draftFrom } from "@/components/events/EventForm";
++import { TicketRemoval } from "@/components/events/TicketRemoval";
+ import { QrScanner, type ScanFeedbackKind } from "@/components/events/QrScanner";
+ import { formatShortCode } from "@/lib/images";
+ import { playRead, playWarning, unlockAudio } from "@/lib/sounds";
+@@ -33,7 +34,7 @@ export const Route = createFileRoute("/_authenticated/painel/evento/$id")({
+ 
+ type Stats = {
+   registrations: number; tickets_total: number; checked_in: number;
+-  expected_total: number; paid_total: number; claimed_total: number;
++  expected_total: number; paid_total: number; claimed_total: number; refund_due_total?: number;
+   lots: { name: string; capacity: number | null; sold: number }[];
+ };
+ 
+@@ -131,7 +132,7 @@ function EventAdmin() {
+ 
+         <TabsContent value="resumo"><Summary stats={stats.data} loading={stats.isLoading} /></TabsContent>
+         {canVerify && <TabsContent value="inscricoes"><Registrations eventId={id} title={e.title} onChange={refreshAll} /></TabsContent>}
+-        {canVerify && <TabsContent value="dados"><EventData eventId={id} title={e.title} /></TabsContent>}
++        {canVerify && <TabsContent value="dados"><EventData eventId={id} title={e.title} askReligion={e.ask_religion} /></TabsContent>}
+         {canCheckin && <TabsContent value="checkin"><CheckIn eventId={id} onChange={refreshAll} /></TabsContent>}
+         {canManage && (
+           <TabsContent value="editar">
+@@ -204,6 +205,7 @@ function Summary({ stats, loading }: { stats: Stats | undefined; loading: boolea
+           ) : (
+             <>
+               <p className="text-sm text-muted-foreground">Pago {moneyBR(stats.paid_total)} de {moneyBR(stats.expected_total)} ({paidPct}%)</p>
++              {(stats.refund_due_total ?? 0) > 0 && <p className="text-sm font-medium text-foreground">A devolver (ingressos removidos): {moneyBR(stats.refund_due_total ?? 0)}</p>}
+               <div className="mt-2 h-44">
+                 <ResponsiveContainer>
+                   <BarChart data={payData} layout="vertical" margin={{ left: 0, right: 16 }}>
+@@ -255,7 +257,7 @@ function Registrations({ eventId, title, onChange }: { eventId: string; title: s
+     queryFn: async () => {
+       const { data, error } = await supabase
+         .from("event_registrations")
+-        .select("*, event_lots(name), event_payments(*), event_tickets(*)")
++        .select("*, event_lots(name), event_payments(*), event_tickets(*), event_ticket_removals(*)")
+         .eq("event_id", eventId)
+         .order("created_at", { ascending: false });
+       if (error) throw error;
+@@ -317,7 +319,7 @@ function Registrations({ eventId, title, onChange }: { eventId: string; title: s
+               return (
+                 <tr key={r.id} className="border-b last:border-0">
+                   <td className="p-4">
+-                    <p className="font-medium text-foreground">{r.attendee_name}{r.is_child && <Badge variant="outline" className="ml-2">Criança</Badge>}</p>
++                    <p className="font-medium text-foreground">{r.attendee_name}{r.is_child && <Badge variant="outline" className="ml-2">Criança</Badge>}{(r.event_ticket_removals ?? []).length > 0 && <Badge variant="outline" className="ml-2">{(r.event_ticket_removals ?? []).reduce((a, x) => a + x.tickets_removed, 0)} removido(s)</Badge>}</p>
+                     <p className="text-xs text-muted-foreground">{r.is_child ? `Filho(a) de ${r.guardian_name ?? "—"}${r.child_age != null ? ` · ${r.child_age} anos` : ""}` : r.attendee_phone}</p>
+                   </td>
+                   <td className="p-4 text-muted-foreground">{r.event_lots?.name} × {r.quantity}</td>
+@@ -348,6 +350,7 @@ type RegRow = Tables<"event_registrations"> & {
+   event_lots: { name: string } | null;
+   event_payments: Tables<"event_payments">[] | null;
+   event_tickets: Tables<"event_tickets">[] | null;
++  event_ticket_removals: Tables<"event_ticket_removals">[] | null;
+ };
+ 
+ function RegistrationDetail({ reg, onChange }: { reg: RegRow; onChange: () => void }) {
+@@ -410,14 +413,13 @@ function RegistrationDetail({ reg, onChange }: { reg: RegRow; onChange: () => vo
+           </div>
+         )}
+ 
+-        {tickets.length > 0 && (
+-          <div>
+-            <p className="font-medium text-foreground">Ingressos</p>
+-            <ul className="mt-2 space-y-1 text-muted-foreground">
+-              {tickets.map((t) => <li key={t.id}>{t.holder_name} — {TICKET_STATUS[t.status] ?? t.status}</li>)}
+-            </ul>
+-          </div>
+-        )}
++        <TicketRemoval
++          reg={reg}
++          tickets={tickets}
++          removals={reg.event_ticket_removals ?? []}
++          paidSum={pays.filter((p) => p.status === "paid").reduce((a, p) => a + Number(p.amount), 0)}
++          onChange={() => { void purgeStorageTrash(); onChange(); }}
++        />
+ 
+         <div className="flex flex-wrap gap-2 border-t pt-4">
+           {reg.status === "pending" && (
+diff --git a/src/routes/_authenticated/painel.eventos.tsx b/src/routes/_authenticated/painel.eventos.tsx
+index e427a89..81d7790 100644
+--- a/src/routes/_authenticated/painel.eventos.tsx
++++ b/src/routes/_authenticated/painel.eventos.tsx
+@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
+ import { Button } from "@/components/ui/button";
+ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+ import { EventForm, blankEvent } from "@/components/events/EventForm";
++import { EventThumb } from "@/components/events/EventMedia";
+ import { fmtDateTime } from "@/lib/events";
+ import { siteMeta } from "@/lib/site-query";
+ 
+@@ -52,7 +53,8 @@ function EventsAdmin() {
+       )}
+       <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+         {(events.data ?? []).map((e) => (
+-          <Link key={e.id} to="/painel/evento/$id" params={{ id: e.id }} className="rounded-2xl border bg-card p-5 transition-colors hover:border-primary">
++          <Link key={e.id} to="/painel/evento/$id" params={{ id: e.id }} className="overflow-hidden rounded-2xl border bg-card p-5 transition-colors hover:border-primary">
++            <EventThumb event={e} className="-mx-5 -mt-5 mb-4 w-[calc(100%+2.5rem)]" />
+             <div className="flex flex-wrap gap-2">
+               <Badge variant={e.published ? "default" : "secondary"}>{e.published ? "Publicado" : "Rascunho"}</Badge>
+               {e.audience === "members" && <Badge variant="outline">Só membros</Badge>}
+diff --git a/src/routes/eventos.$slug.tsx b/src/routes/eventos.$slug.tsx
+index c6562d1..91212a5 100644
+--- a/src/routes/eventos.$slug.tsx
++++ b/src/routes/eventos.$slug.tsx
+@@ -6,6 +6,7 @@ import { SiteLayout } from "@/components/site/SiteLayout";
+ import { PageError } from "@/components/site/PageError";
+ import { Markdown } from "@/components/site/Markdown";
+ import { EventRegistration } from "@/components/events/EventRegistration";
++import { EventMediaFull } from "@/components/events/EventMedia";
+ import { Badge } from "@/components/ui/badge";
+ import { asEventDetail, fmtDate, fmtLongDate, fmtTime, moneyBR } from "@/lib/events";
+ import { siteMeta } from "@/lib/site-query";
+@@ -66,6 +67,7 @@ function EventPage() {
+                   {data.event.registration_closes_at ? ` até ${fmtDate(data.event.registration_closes_at)}` : ""}
+                 </p>
+               )}
++              <EventMediaFull event={data.event} />
+               {data.event.description && <Markdown className="mt-8 text-base leading-relaxed text-muted-foreground">{data.event.description}</Markdown>}
+ 
+               {data.lots.length > 0 && (
+diff --git a/src/test/event-media.test.ts b/src/test/event-media.test.ts
+new file mode 100644
+index 0000000..3b0a726
+--- /dev/null
++++ b/src/test/event-media.test.ts
+@@ -0,0 +1,88 @@
++import { describe, expect, it } from "vitest";
++import {
++  checkMediaFile,
++  eventMediaFrom,
++  instagramEmbedUrl,
++  parseInstagramUrl,
++} from "@/lib/event-media";
++import { previewRemoval, removalReasonIsValid } from "@/lib/event-removal";
++import { asksReligion } from "@/lib/events";
++
++describe("post do Instagram", () => {
++  it("aceita post, reel e link com parâmetros, e monta o link canônico", () => {
++    expect(parseInstagramUrl("https://www.instagram.com/p/Cabc123XYZ/")?.canonical).toBe(
++      "https://www.instagram.com/p/Cabc123XYZ/",
++    );
++    expect(parseInstagramUrl("https://instagram.com/reel/Cabc123XYZ/?igsh=abc")?.kind).toBe("reel");
++    expect(parseInstagramUrl("https://www.instagram.com/igreja/p/Cabc123XYZ")?.code).toBe(
++      "Cabc123XYZ",
++    );
++    expect(instagramEmbedUrl(parseInstagramUrl("https://instagram.com/p/Cabc123XYZ")!)).toBe(
++      "https://www.instagram.com/p/Cabc123XYZ/embed",
++    );
++  });
++  it("recusa outros sites, http e javascript:", () => {
++    for (const u of [
++      "",
++      "http://instagram.com/p/Cabc123XYZ/",
++      "https://evil.com/p/Cabc123XYZ/",
++      "https://instagram.com.evil.com/p/Cabc123XYZ/",
++      "javascript:alert(1)",
++      "https://www.instagram.com/igreja/",
++    ]) {
++      expect(parseInstagramUrl(u)).toBeNull();
++    }
++  });
++});
++
++describe("mídia do evento", () => {
++  it("só devolve mídia coerente", () => {
++    expect(eventMediaFrom({ media_type: "image", media_path: "a.jpg" })).toEqual({
++      type: "image",
++      path: "a.jpg",
++      url: null,
++    });
++    expect(eventMediaFrom({ media_type: "image", media_path: null })).toBeNull();
++    expect(eventMediaFrom({ media_type: "instagram", media_url: "https://evil.com/x" })).toBeNull();
++    expect(eventMediaFrom({})).toBeNull();
++  });
++  it("confere tipo e tamanho do arquivo", () => {
++    const f = (type: string, size: number) => ({ type, size }) as File;
++    expect(checkMediaFile("image", f("image/png", 1000))).toBeNull();
++    expect(checkMediaFile("image", f("video/mp4", 1000))).not.toBeNull();
++    expect(checkMediaFile("video", f("video/mp4", 51 * 1024 * 1024))).not.toBeNull();
++    expect(checkMediaFile("video", f("video/mp4", 5 * 1024 * 1024))).toBeNull();
++  });
++});
++
++describe("remoção de ingressos", () => {
++  it("remover parte reduz quantidade e total e calcula o que devolver", () => {
++    expect(previewRemoval({ unitPrice: 50, quantity: 3, removing: 1, paidSum: 0 })).toEqual({
++      cancelsRegistration: false,
++      newQuantity: 2,
++      newTotal: 100,
++      refundDue: 0,
++    });
++    expect(
++      previewRemoval({ unitPrice: 50, quantity: 3, removing: 1, paidSum: 150 }).refundDue,
++    ).toBe(50);
++  });
++  it("remover todos cancela a inscrição", () => {
++    const p = previewRemoval({ unitPrice: 50, quantity: 2, removing: 2, paidSum: 100 });
++    expect(p.cancelsRegistration).toBe(true);
++    expect(p.refundDue).toBe(100);
++  });
++  it("a observação é obrigatória (3 a 500 caracteres)", () => {
++    expect(removalReasonIsValid("  ab ")).toBe(false);
++    expect(removalReasonIsValid("Desistiu")).toBe(true);
++    expect(removalReasonIsValid("x".repeat(501))).toBe(false);
++  });
++});
++
++describe("religião no evento", () => {
++  it("só desliga com false explícito", () => {
++    expect(asksReligion({})).toBe(true);
++    expect(asksReligion({ ask_religion: true })).toBe(true);
++    expect(asksReligion({ ask_religion: false })).toBe(false);
++  });
++});
+diff --git a/src/test/event-registration-consent.test.tsx b/src/test/event-registration-consent.test.tsx
+index c3d14c5..92c69fc 100644
+--- a/src/test/event-registration-consent.test.tsx
++++ b/src/test/event-registration-consent.test.tsx
+@@ -217,3 +217,32 @@ describe("inscrição em evento: religião é dado sensível", () => {
+     expect(screen.queryByText(/Autorizo o uso da minha religião/)).toBeNull();
+   });
+ });
++
++describe("inscrição em evento: religião desligada pelo evento", () => {
++  const visitorProfile = {
++    id: "m1", full_name: "Maria", cpf: "52998224725", phone: "1", birth_date: "1990-05-10",
++    status: "visitante", approval_status: "aprovado",
++  };
++
++  it("não mostra religião nem aceite, e não envia _religion", async () => {
++    h.profile = visitorProfile;
++    detail.event.ask_religion = false;
++    try {
++      renderIt();
++      const institution = await screen.findByPlaceholderText(/Ex\.: igreja/);
++      expect(screen.queryByRole("combobox")).toBeNull();
++      expect(screen.queryByText(/Autorizo o uso da minha religião/)).toBeNull();
++      fireEvent.change(institution, { target: { value: "Escola Municipal" } });
++      const submit = screen.getByRole("button", { name: "Inscrever-se" }) as HTMLButtonElement;
++      await waitFor(() => expect(submit.disabled).toBe(false));
++      fireEvent.click(submit);
++      await waitFor(() => expect(h.rpc).toHaveBeenCalledWith("register_for_event", expect.anything()));
++      const args = h.rpc.mock.calls.find((c) => c[0] === "register_for_event")![1];
++      expect(args).not.toHaveProperty("_religion");
++      expect(args._institution).toBe("Escola Municipal");
++      expect(h.updateUser).not.toHaveBeenCalledWith({ data: expect.objectContaining({ sensitive_consent_version: PRIVACY_VERSION }) });
++    } finally {
++      delete detail.event.ask_religion;
++    }
++  });
++});
+diff --git a/src/test/storage-and-tickets.test.tsx b/src/test/storage-and-tickets.test.tsx
+index a15ea81..7df0d30 100644
+--- a/src/test/storage-and-tickets.test.tsx
++++ b/src/test/storage-and-tickets.test.tsx
+@@ -15,7 +15,7 @@ afterEach(cleanup);
+ 
+ const ticket = (over: Partial<Tables<"event_tickets">> = {}): Tables<"event_tickets"> => ({
+   id: "t1", registration_id: "r1", event_id: "e1", seq: 1, code: "a".repeat(64), short_code: "K7M29QXA", holder_name: "Maria Souza",
+-  status: "valid", checked_in_at: null, checked_in_by: null, created_at: "2026-10-18T10:00:00Z", ...over,
++  status: "valid", checked_in_at: null, checked_in_by: null, created_at: "2026-10-18T10:00:00Z", removal_id: null, ...over,
+ });
+ 
+ describe("ingresso do membro", () => {
+diff --git a/src/test/ticket-removal.test.tsx b/src/test/ticket-removal.test.tsx
+new file mode 100644
+index 0000000..84d5d7a
+--- /dev/null
++++ b/src/test/ticket-removal.test.tsx
+@@ -0,0 +1,127 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
++import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
++
++const h = vi.hoisted(() => ({ rpc: vi.fn(), toastError: vi.fn(), toastSuccess: vi.fn() }));
++vi.mock("sonner", () => ({ toast: { error: h.toastError, success: h.toastSuccess } }));
++vi.mock("@/integrations/supabase/client", () => ({ supabase: { rpc: h.rpc } }));
++
++import { TicketRemoval } from "@/components/events/TicketRemoval";
++import type { Tables } from "@/integrations/supabase/types";
++
++const ticket = (over: Partial<Tables<"event_tickets">>): Tables<"event_tickets"> => ({
++  id: "t1",
++  registration_id: "r1",
++  event_id: "e1",
++  seq: 1,
++  code: "c",
++  short_code: "K7M29QXA",
++  holder_name: "Ana Souza",
++  status: "valid",
++  checked_in_at: null,
++  checked_in_by: null,
++  created_at: "2026-11-01T10:00:00Z",
++  removal_id: null,
++  ...over,
++});
++const reg = { id: "r1", status: "confirmed", quantity: 3, unit_price: 50 };
++
++function renderIt(props: Partial<React.ComponentProps<typeof TicketRemoval>> = {}) {
++  const onChange = vi.fn();
++  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
++  render(
++    <QueryClientProvider client={qc}>
++      <TicketRemoval
++        reg={reg}
++        tickets={[
++          ticket({ id: "t1", seq: 1 }),
++          ticket({ id: "t2", seq: 2, holder_name: "Ana Souza (2)" }),
++          ticket({ id: "t3", seq: 3, holder_name: "Ana Souza (3)", status: "checked_in" }),
++        ]}
++        removals={[]}
++        paidSum={150}
++        onChange={onChange}
++        {...props}
++      />
++    </QueryClientProvider>,
++  );
++  return onChange;
++}
++
++beforeEach(() => {
++  vi.clearAllMocks();
++  h.rpc.mockResolvedValue({ data: { refund_due: 50 }, error: null });
++});
++afterEach(cleanup);
++
++describe("remoção de ingressos no painel", () => {
++  it("ingresso com presença confirmada não pode ser marcado", () => {
++    renderIt();
++    expect(
++      (screen.getByLabelText("Remover o ingresso de Ana Souza (3)") as HTMLButtonElement).disabled,
++    ).toBe(true);
++  });
++
++  it("sem observação não confirma; com observação chama a função com os ingressos escolhidos", async () => {
++    const onChange = renderIt();
++    fireEvent.click(screen.getByLabelText("Remover o ingresso de Ana Souza (2)"));
++    fireEvent.click(screen.getByRole("button", { name: /Remover selecionados \(1\)/ }));
++    const confirm = screen.getByRole("button", { name: "Confirmar remoção" }) as HTMLButtonElement;
++    expect(confirm.disabled).toBe(true);
++    expect(screen.getByTestId("removal-summary").textContent).toMatch(/2 ingressos/);
++    expect(screen.getByTestId("removal-summary").textContent).toMatch(/a devolver/);
++    fireEvent.change(screen.getByLabelText(/Observação/), {
++      target: { value: "  Pessoa   desistiu " },
++    });
++    await waitFor(() => expect(confirm.disabled).toBe(false));
++    fireEvent.click(confirm);
++    await waitFor(() =>
++      expect(h.rpc).toHaveBeenCalledWith("remove_event_tickets", {
++        _reg: "r1",
++        _reason: "Pessoa desistiu",
++        _ticket_ids: ["t2"],
++      }),
++    );
++    await waitFor(() => expect(onChange).toHaveBeenCalled());
++  });
++
++  it("inscrição ainda sem ingressos: remove por quantidade", async () => {
++    renderIt({ reg: { ...reg, status: "pending", quantity: 2 }, tickets: [], paidSum: 0 });
++    fireEvent.click(screen.getByRole("button", { name: "Remover ingressos" }));
++    fireEvent.change(screen.getByLabelText(/Quantos ingressos/), { target: { value: "2" } });
++    expect(screen.getByTestId("removal-summary").textContent).toMatch(/cancelada/);
++    fireEvent.change(screen.getByLabelText(/Observação/), { target: { value: "Duplicada" } });
++    fireEvent.click(screen.getByRole("button", { name: "Confirmar remoção" }));
++    await waitFor(() =>
++      expect(h.rpc).toHaveBeenCalledWith("remove_event_tickets", {
++        _reg: "r1",
++        _reason: "Duplicada",
++        _quantity: 2,
++      }),
++    );
++  });
++
++  it("mostra o motivo no ingresso removido e não oferece remover de novo", () => {
++    renderIt({
++      tickets: [ticket({ id: "t1", status: "cancelled", removal_id: "x1" })],
++      removals: [
++        {
++          id: "x1",
++          event_id: "e1",
++          registration_id: "r1",
++          tickets_removed: 1,
++          holder_names: [],
++          reason: "Pagamento não identificado",
++          registration_cancelled: false,
++          refund_due: 0,
++          removed_by: null,
++          removed_at: "2026-11-02T10:00:00Z",
++        },
++      ],
++    });
++    expect(screen.getAllByText(/Pagamento não identificado/).length).toBeGreaterThan(0);
++    expect(
++      (screen.getByLabelText("Remover o ingresso de Ana Souza") as HTMLButtonElement).disabled,
++    ).toBe(true);
++  });
++});
+diff --git a/supabase/migrations/20261110010000_event_ask_religion.sql b/supabase/migrations/20261110010000_event_ask_religion.sql
+new file mode 100644
+index 0000000..4c11552
+--- /dev/null
++++ b/supabase/migrations/20261110010000_event_ask_religion.sql
+@@ -0,0 +1,99 @@
++-- Evento passa a poder pedir (ou não) a religião dos visitantes na inscrição.
++-- Padrão: ligado (true), então os eventos que já existem continuam se comportando como antes.
++-- Quando desligado: a tela não mostra a pergunta nem o aceite de dado sensível, e register_for_event não exige nem
++-- grava a religião do visitante. Membros continuam registrados como "membro_igreja" (não é pergunta, vem do cadastro).
++-- A assinatura de register_for_event não muda; só o corpo. Idempotente.
++
++alter table public.events add column if not exists ask_religion boolean not null default true;
++
++create or replace function public.register_for_event(
++  _event uuid, _lot uuid, _quantity integer, _cpf text,
++  _installments integer default 1, _image_consent boolean default false,
++  _institution text default null, _religion text default null
++)
++returns uuid
++language plpgsql
++security definer
++set search_path to 'public'
++as $function$
++declare
++  uid uuid := auth.uid();
++  ev public.events%rowtype; lt public.event_lots%rowtype; m public.members%rowtype;
++  is_member boolean; d text; used int; total numeric; reg uuid; pay_required boolean; n int; base numeric; i int;
++  consent boolean; v_institution text; v_religion text;
++begin
++  if uid is null then raise exception 'login_required'; end if;
++  select * into ev from public.events where id = _event and published;
++  if not found then raise exception 'event_not_found'; end if;
++  if now() < coalesce(ev.registration_opens_at, '-infinity') or now() > coalesce(ev.registration_closes_at, 'infinity') then
++    raise exception 'registration_closed';
++  end if;
++  -- Autorização de uso de imagem: obrigatória quando o evento exige
++  consent := ev.require_image_consent and coalesce(_image_consent, false);
++  if ev.require_image_consent and not consent then raise exception 'image_consent_required'; end if;
++
++  select * into lt from public.event_lots where id = _lot and event_id = _event for update;
++  if not found then raise exception 'lot_not_found'; end if;
++  if (lt.opens_at is not null and now() < lt.opens_at) or (lt.closes_at is not null and now() > lt.closes_at) then
++    raise exception 'lot_closed';
++  end if;
++  select * into m from public.members where user_id = uid;
++  if not found then raise exception 'profile_required'; end if;
++  is_member := m.approval_status = 'aprovado' and m.status <> 'visitante';
++  -- Questionário só para visitantes; membros ficam resumidos como "Membro da igreja".
++  -- A religião só é pedida (e guardada) quando o evento está com "pedir religião" ligado.
++  if is_member then
++    v_institution := 'Membro da igreja';
++    v_religion := 'membro_igreja';
++  else
++    if nullif(btrim(coalesce(_institution, '')), '') is null or length(btrim(_institution)) > 120 then raise exception 'invalid_institution'; end if;
++    v_institution := btrim(_institution);
++    if ev.ask_religion then
++      if _religion is null or _religion not in ('evangelico', 'catolico', 'espirita', 'matriz_africana', 'outros') then raise exception 'invalid_religion'; end if;
++      v_religion := _religion;
++    else
++      v_religion := null;
++    end if;
++  end if;
++  if ev.audience = 'members' and not is_member and not lt.public_access then raise exception 'members_only'; end if;
++  if _quantity is null or _quantity < 1 or _quantity > 10 then raise exception 'invalid_quantity'; end if;
++
++  d := regexp_replace(coalesce(nullif(btrim(_cpf), ''), m.cpf, ''), '\D', '', 'g');
++  if ev.limit_per_person then
++    if not public.is_valid_cpf(d) then raise exception 'invalid_cpf'; end if;
++    select coalesce(sum(r.quantity), 0) into used from public.event_registrations r
++      where r.event_id = _event and r.status <> 'cancelled' and not r.is_child
++        and (r.user_id = uid or regexp_replace(coalesce(r.attendee_cpf, ''), '\D', '', 'g') = d);
++    if used + _quantity > coalesce(ev.max_per_person, 1) then raise exception 'limit_exceeded'; end if;
++  elsif d <> '' and not public.is_valid_cpf(d) then
++    raise exception 'invalid_cpf';
++  end if;
++
++  if lt.capacity is not null and public.lot_taken(lt.id) + _quantity > lt.capacity then raise exception 'sold_out'; end if;
++
++  pay_required := ev.payment_enabled and lt.price > 0;
++  total := lt.price * _quantity;
++  n := case when pay_required and coalesce(_installments, 1) > 1 then _installments else 1 end;
++  if n > 1 and (not ev.allow_installments or n > ev.max_installments) then raise exception 'invalid_installments'; end if;
++
++  insert into public.event_registrations (event_id, lot_id, user_id, member_id, attendee_name, attendee_cpf, attendee_phone, attendee_email,
++                                          attendee_institution, attendee_religion, quantity, unit_price, total, installments, status, image_consent, image_consent_at)
++  values (_event, _lot, uid, m.id, m.full_name, nullif(d, ''), m.phone, coalesce(m.email, (select u.email from auth.users u where u.id = uid)),
++          v_institution, v_religion, _quantity, lt.price, total, n, case when pay_required then 'pending' else 'confirmed' end,
++          consent, case when consent then now() end)
++  returning id into reg;
++
++  if pay_required then
++    base := round(total / n, 2);
++    for i in 1..n loop
++      insert into public.event_payments (registration_id, installment_no, amount)
++      values (reg, i, case when i = n then total - base * (n - 1) else base end);
++    end loop;
++  else
++    perform public.issue_event_tickets(reg);
++  end if;
++  return reg;
++end $function$;
++
++revoke all on function public.register_for_event(uuid, uuid, integer, text, integer, boolean, text, text) from public, anon;
++grant execute on function public.register_for_event(uuid, uuid, integer, text, integer, boolean, text, text) to authenticated, service_role;
+diff --git a/supabase/migrations/20261110010100_event_media.sql b/supabase/migrations/20261110010100_event_media.sql
+new file mode 100644
+index 0000000..611de78
+--- /dev/null
++++ b/supabase/migrations/20261110010100_event_media.sql
+@@ -0,0 +1,93 @@
++-- Mídia de divulgação do evento: uma foto, um vídeo (arquivo) ou um post do Instagram (link).
++-- Aparece como thumbnail do evento (landing, lista de eventos e painel) e acima da descrição na página de inscrição (só no computador).
++--
++-- media_type = 'image' | 'video'  -> media_path = caminho do arquivo no bucket público event-media
++-- media_type = 'instagram'        -> media_url  = link do post/reel (só instagram.com)
++-- Idempotente. A função public_events muda de assinatura (novas colunas), por isso é recriada.
++
++alter table public.events
++  add column if not exists media_type text,
++  add column if not exists media_path text,
++  add column if not exists media_url text;
++
++alter table public.events drop constraint if exists events_media_check;
++alter table public.events add constraint events_media_check check (
++  (media_type is null and media_path is null and media_url is null)
++  or (media_type in ('image', 'video') and media_path is not null and media_url is null)
++  or (media_type = 'instagram' and media_path is null
++      and media_url ~ '^https://(www\.)?instagram\.com/([A-Za-z0-9._]+/)?(p|reel|reels|tv)/[A-Za-z0-9_-]{5,}/?([?#].*)?$')
++);
++
++-- Bucket público: a foto/vídeo do evento é divulgação, qualquer visitante do site precisa ver.
++-- Só quem gerencia eventos envia arquivos. A exclusão passa pela lixeira de arquivos (storage_trash), como as demais.
++insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
++values ('event-media', 'event-media', true, 52428800,
++        array['image/jpeg', 'image/png', 'image/webp', 'video/mp4', 'video/webm', 'video/quicktime'])
++on conflict (id) do update
++  set public = true,
++      file_size_limit = excluded.file_size_limit,
++      allowed_mime_types = excluded.allowed_mime_types;
++
++drop policy if exists "event media insert" on storage.objects;
++create policy "event media insert" on storage.objects for insert to authenticated
++  with check (bucket_id = 'event-media' and public.has_permission(auth.uid(), 'manage_events'));
++
++-- Arquivo trocado ou evento excluído: o caminho antigo entra na lixeira de arquivos para ser apagado do armazenamento.
++drop trigger if exists trash_files on public.events;
++create trigger trash_files after delete or update of media_path on public.events
++  for each row execute function public.trash_file_trigger('event-media', 'media_path');
++
++-- O bucket novo entra nas funções que decidem se um arquivo ainda está em uso e na busca de arquivos sobrando.
++create or replace function public.storage_path_in_use(_bucket text, _path text)
++returns boolean language sql stable security definer set search_path = public as $$
++  select case _bucket
++    when 'member-photos' then exists (select 1 from public.members where photo_path = _path)
++    when 'receipts' then exists (select 1 from public.financial_transactions where receipt_path = _path)
++    when 'event-proofs' then exists (select 1 from public.event_payments where proof_path = _path)
++    when 'event-assets' then exists (select 1 from public.event_payment_info where pix_qr_path = _path)
++    when 'event-media' then exists (select 1 from public.events where media_path = _path)
++    when 'site-assets' then exists (select 1 from public.site_content where strpos(content::text, '/site-assets/' || _path) > 0)
++    else true
++  end;
++$$;
++
++create or replace function public.storage_orphans_preview()
++returns table (bucket text, path text, size bigint, created_at timestamptz)
++language plpgsql stable security definer set search_path = public as $$
++begin
++  if not public.is_church_leadership(auth.uid()) then raise exception 'Acesso negado'; end if;
++  return query
++    select o.bucket_id, o.name, coalesce((o.metadata ->> 'size')::bigint, 0), o.created_at
++    from storage.objects o
++    where o.bucket_id in ('member-photos', 'receipts', 'event-proofs', 'event-assets', 'event-media', 'site-assets')
++      and o.name not like '%.emptyFolderPlaceholder'
++      and o.created_at < now() - interval '1 day'
++      and not public.storage_path_in_use(o.bucket_id, o.name)
++    order by o.bucket_id, o.created_at;
++end $$;
++
++revoke all on function public.storage_path_in_use(text, text), public.storage_orphans_preview() from public, anon, authenticated;
++grant execute on function public.storage_orphans_preview() to authenticated;
++
++-- Lista pública de eventos agora devolve também a mídia (para a thumbnail).
++drop function if exists public.public_events();
++create function public.public_events()
++returns table (id uuid, slug text, title text, description text, location text, starts_at timestamptz, ends_at timestamptz,
++               registration_opens_at timestamptz, registration_closes_at timestamptz, audience text, payment_enabled boolean,
++               min_price numeric, spots_left int, registration_open boolean,
++               media_type text, media_path text, media_url text)
++language sql stable security definer set search_path = public as $$
++  select e.id, e.slug, e.title, e.description, e.location, e.starts_at, e.ends_at, e.registration_opens_at, e.registration_closes_at,
++         e.audience, e.payment_enabled,
++         (select min(l.price) from public.event_lots l where l.event_id = e.id),
++         case when exists (select 1 from public.event_lots l where l.event_id = e.id and l.capacity is null) then null
++              else (select coalesce(sum(greatest(l.capacity - public.lot_taken(l.id), 0)), 0)::int from public.event_lots l where l.event_id = e.id) end,
++         (coalesce(e.registration_opens_at, '-infinity') <= now() and coalesce(e.registration_closes_at, 'infinity') >= now()),
++         e.media_type, e.media_path, e.media_url
++  from public.events e
++  where e.published and coalesce(e.ends_at, e.starts_at) >= now() - interval '1 day'
++  order by e.starts_at;
++$$;
++
++revoke all on function public.public_events() from public;
++grant execute on function public.public_events() to anon, authenticated;
+diff --git a/supabase/migrations/20261110010200_event_ticket_removal.sql b/supabase/migrations/20261110010200_event_ticket_removal.sql
+new file mode 100644
+index 0000000..424bef7
+--- /dev/null
++++ b/supabase/migrations/20261110010200_event_ticket_removal.sql
+@@ -0,0 +1,172 @@
++-- Remoção de ingressos (1 ou mais) de uma inscrição, sempre com uma observação explicando o motivo.
++--
++-- A observação fica registrada em event_ticket_removals e a pessoa inscrita a enxerga em "Meu cadastro".
++-- Regras (função remove_event_tickets):
++--   * Só quem gerencia eventos ou confere pagamentos pode remover (mesma regra de cancelar inscrição).
++--   * Inscrição com ingressos emitidos: escolhem-se os ingressos (têm que estar válidos; ingresso com presença confirmada
++--     não sai: desfaça a presença antes). Inscrição ainda sem ingressos (aguardando pagamento): informa-se a quantidade.
++--   * A quantidade e o total da inscrição diminuem, então as vagas do lote voltam a ficar disponíveis (lot_taken).
++--   * Removendo todos os ingressos, a inscrição inteira é cancelada (igual a "Cancelar inscrição", mas com observação).
++--   * Parcelas ainda não pagas são recalculadas para o novo total. Se o que já foi pago passa do novo total, as parcelas
++--     pendentes saem e o excedente fica registrado em refund_due (a devolução é feita pela igreja, fora do sistema).
++-- Idempotente.
++
++create table if not exists public.event_ticket_removals (
++  id uuid primary key default gen_random_uuid(),
++  event_id uuid not null references public.events(id) on delete cascade,
++  registration_id uuid not null references public.event_registrations(id) on delete cascade,
++  tickets_removed int not null check (tickets_removed >= 1),
++  holder_names text[] not null default '{}',
++  reason text not null check (char_length(btrim(reason)) between 3 and 500),
++  registration_cancelled boolean not null default false,
++  refund_due numeric(12,2) not null default 0,
++  removed_by uuid,
++  removed_at timestamptz not null default now()
++);
++create index if not exists event_ticket_removals_reg_idx on public.event_ticket_removals (registration_id);
++create index if not exists event_ticket_removals_event_idx on public.event_ticket_removals (event_id);
++
++alter table public.event_ticket_removals enable row level security;
++drop policy if exists "event_ticket_removals read" on public.event_ticket_removals;
++create policy "event_ticket_removals read" on public.event_ticket_removals for select to authenticated using (
++  public.has_any_event_permission(auth.uid())
++  or exists (select 1 from public.event_registrations r where r.id = registration_id and r.user_id = auth.uid()));
++revoke all on public.event_ticket_removals from anon, authenticated;
++grant select on public.event_ticket_removals to authenticated;
++
++alter table public.event_tickets
++  add column if not exists removal_id uuid references public.event_ticket_removals(id) on delete set null;
++
++create or replace function public.remove_event_tickets(
++  _reg uuid, _ticket_ids uuid[], _quantity integer, _reason text
++)
++returns jsonb
++language plpgsql
++security definer
++set search_path to 'public'
++as $function$
++declare
++  uid uuid := auth.uid();
++  r public.event_registrations%rowtype;
++  v_reason text := regexp_replace(btrim(coalesce(_reason, '')), '\s+', ' ', 'g');
++  has_tickets boolean;
++  ids uuid[]; k int; found_n int;
++  names text[] := '{}';
++  new_qty int; new_total numeric; paid_sum numeric; due numeric; refund numeric;
++  unpaid uuid[]; unpaid_n int; base numeric; i int;
++  removal uuid; cancel_all boolean;
++begin
++  if uid is null then raise exception 'login_required'; end if;
++  if not (public.has_permission(uid, 'verify_event_payments') or public.has_permission(uid, 'manage_events')) then
++    raise exception 'Acesso negado';
++  end if;
++  if char_length(v_reason) < 3 or char_length(v_reason) > 500 then raise exception 'invalid_removal_reason'; end if;
++
++  select * into r from public.event_registrations where id = _reg for update;
++  if not found then raise exception 'not_found'; end if;
++  if r.status = 'cancelled' then raise exception 'registration_cancelled'; end if;
++
++  select exists (select 1 from public.event_tickets where registration_id = _reg) into has_tickets;
++
++  if has_tickets then
++    select coalesce(array_agg(distinct x), '{}') into ids from unnest(coalesce(_ticket_ids, '{}')) x;
++    k := coalesce(array_length(ids, 1), 0);
++    if k = 0 then raise exception 'invalid_removal_selection'; end if;
++    select count(*) into found_n from public.event_tickets t where t.registration_id = _reg and t.id = any (ids);
++    if found_n <> k then raise exception 'invalid_removal_selection'; end if;
++    if exists (select 1 from public.event_tickets t where t.id = any (ids) and t.status = 'checked_in') then
++      raise exception 'ticket_checked_in';
++    end if;
++    if exists (select 1 from public.event_tickets t where t.id = any (ids) and t.status <> 'valid') then
++      raise exception 'ticket_not_removable';
++    end if;
++    select coalesce(array_agg(t.holder_name order by t.seq), '{}') into names from public.event_tickets t where t.id = any (ids);
++  else
++    k := coalesce(_quantity, 0);
++  end if;
++  if k < 1 or k > r.quantity then raise exception 'invalid_removal_selection'; end if;
++
++  select coalesce(sum(p.amount), 0) into paid_sum from public.event_payments p where p.registration_id = _reg and p.status = 'paid';
++  cancel_all := k >= r.quantity;
++
++  insert into public.event_ticket_removals (event_id, registration_id, tickets_removed, holder_names, reason, registration_cancelled, removed_by)
++  values (r.event_id, _reg, k, names, v_reason, cancel_all, uid)
++  returning id into removal;
++
++  if has_tickets then
++    update public.event_tickets set status = 'cancelled', removal_id = removal where id = any (ids);
++  end if;
++
++  if cancel_all then
++    update public.event_registrations set status = 'cancelled', cancelled_at = now() where id = _reg;
++    update public.event_tickets set status = 'cancelled' where registration_id = _reg and status <> 'cancelled';
++    update public.event_payments set proof_path = null where registration_id = _reg and proof_path is not null;
++    new_qty := 0; new_total := 0;
++    refund := round(paid_sum, 2);
++  else
++    new_qty := r.quantity - k;
++    new_total := round(r.unit_price * new_qty, 2);
++    if exists (select 1 from public.event_payments where registration_id = _reg) then
++      if paid_sum >= new_total then
++        -- O que já foi pago cobre o novo total: parcelas ainda não avisadas saem. As "aguardando verificação" ficam
++        -- (a pessoa pode ter pago de verdade) para a equipe conferir ou devolver.
++        delete from public.event_payments where registration_id = _reg and status = 'pending';
++      else
++        select array_agg(p.id order by p.installment_no) into unpaid
++          from public.event_payments p where p.registration_id = _reg and p.status <> 'paid';
++        unpaid_n := coalesce(array_length(unpaid, 1), 0);
++        if unpaid_n > 0 then
++          due := new_total - paid_sum;
++          base := round(due / unpaid_n, 2);
++          for i in 1..unpaid_n loop
++            update public.event_payments
++               set amount = case when i = unpaid_n then due - base * (unpaid_n - 1) else base end
++             where id = unpaid[i];
++          end loop;
++        end if;
++      end if;
++    end if;
++    update public.event_registrations set quantity = new_qty, total = new_total where id = _reg;
++    refund := round(greatest(paid_sum - new_total, 0), 2);
++    -- Se sobraram só parcelas pagas, a inscrição que aguardava pagamento passa a estar quitada e o ingresso sai.
++    perform public.refresh_event_registration(_reg);
++  end if;
++
++  update public.event_ticket_removals set refund_due = refund where id = removal;
++
++  return jsonb_build_object('removed', k, 'registration_cancelled', cancel_all, 'new_quantity', new_qty,
++                            'new_total', new_total, 'paid', round(paid_sum, 2), 'refund_due', refund);
++end $function$;
++
++revoke all on function public.remove_event_tickets(uuid, uuid[], integer, text) from public, anon;
++grant execute on function public.remove_event_tickets(uuid, uuid[], integer, text) to authenticated, service_role;
++
++-- Resumo do evento: o "pago" de cada inscrição não passa do total dela (o excedente de quem teve ingresso removido
++-- aparece à parte, em refund_due_total), para o gráfico de pagamentos não ultrapassar 100%.
++create or replace function public.event_admin_stats(_event uuid)
++returns jsonb language plpgsql stable security definer set search_path = public as $$
++declare res jsonb;
++begin
++  if not public.has_any_event_permission(auth.uid()) then raise exception 'Acesso negado'; end if;
++  select jsonb_build_object(
++    'registrations', (select count(*) from public.event_registrations where event_id = _event and status <> 'cancelled'),
++    'tickets_total', (select count(*) from public.event_tickets where event_id = _event and status <> 'cancelled'),
++    'checked_in', (select count(*) from public.event_tickets where event_id = _event and status = 'checked_in'),
++    'expected_total', (select coalesce(sum(r.total), 0) from public.event_registrations r
++                         where r.event_id = _event and r.status <> 'cancelled' and exists (select 1 from public.event_payments p where p.registration_id = r.id)),
++    'paid_total', (select coalesce(sum(least(x.paid, x.total)), 0) from (
++                     select r.total, coalesce(sum(p.amount) filter (where p.status = 'paid'), 0) as paid
++                       from public.event_registrations r join public.event_payments p on p.registration_id = r.id
++                      where r.event_id = _event and r.status <> 'cancelled' group by r.id, r.total) x),
++    'refund_due_total', (select coalesce(sum(greatest(x.paid - x.total, 0)), 0) from (
++                     select r.total, coalesce(sum(p.amount) filter (where p.status = 'paid'), 0) as paid
++                       from public.event_registrations r join public.event_payments p on p.registration_id = r.id
++                      where r.event_id = _event and r.status <> 'cancelled' group by r.id, r.total) x),
++    'claimed_total', (select coalesce(sum(p.amount), 0) from public.event_payments p
++                        join public.event_registrations r on r.id = p.registration_id
++                        where r.event_id = _event and r.status <> 'cancelled' and p.status = 'claimed'),
++    'lots', coalesce((select jsonb_agg(jsonb_build_object('name', l.name, 'capacity', l.capacity, 'sold', public.lot_taken(l.id)) order by l.position, l.created_at)
++                        from public.event_lots l where l.event_id = _event), '[]'::jsonb)
++  ) into res;
++  return res;
++end $$;
+-- 
+2.43.0
+
