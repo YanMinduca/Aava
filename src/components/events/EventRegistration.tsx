@@ -17,7 +17,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { RELIGIONS } from "@/lib/event-data";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
-  eventError, fmtDate, formatCpf, isValidBirthDate, isValidCpf, lotIsOpen, moneyBR, registrationIsOpen,
+  asksReligion, eventError, fmtDate, formatCpf, isValidBirthDate, isValidCpf, lotIsOpen, moneyBR, registrationIsOpen,
   type PublicEventDetail, type PublicLot,
 } from "@/lib/events";
 
@@ -40,6 +40,7 @@ function EventRegistrationMain({ detail }: { detail: PublicEventDetail }) {
   const uid = access?.uid;
   const nextPath = `/eventos/${event.slug}`;
   const visitorsAllowed = event.audience === "public" || lots.some((l) => l.public_access);
+  const askReligion = asksReligion(event);
 
   const profile = useQuery({
     queryKey: ["event-profile", uid],
@@ -130,7 +131,7 @@ function EventRegistrationMain({ detail }: { detail: PublicEventDetail }) {
       if (event.require_image_consent && !imageConsent) throw new Error("image_consent_required");
       if (!isMember) {
         if (!institution.trim()) throw new Error("invalid_institution");
-        if (!religion) throw new Error("invalid_religion");
+        if (askReligion && !religion) throw new Error("invalid_religion");
       }
       if (!profile.data?.birth_date) {
         if (!isValidBirthDate(birthDate)) throw new Error("invalid_birth_date");
@@ -140,12 +141,12 @@ function EventRegistrationMain({ detail }: { detail: PublicEventDetail }) {
       const { error } = await supabase.rpc("register_for_event", {
         _event: event.id, _lot: lotId, _quantity: qty, _cpf: cpf, _installments: installments,
         _image_consent: event.require_image_consent && imageConsent,
-        ...(isMember ? {} : { _institution: institution.trim(), _religion: religion }),
+        ...(isMember ? {} : { _institution: institution.trim(), ...(askReligion ? { _religion: religion } : {}) }),
       });
       if (error) throw error;
     },
     onSuccess: () => {
-      if (!isMember) void recordSensitiveConsent();
+      if (!isMember && askReligion) void recordSensitiveConsent();
       setDone({ paid: payRequired });
       qc.invalidateQueries({ queryKey: ["public-event", event.slug] });
       qc.invalidateQueries({ queryKey: ["public-events"] });
@@ -348,6 +349,7 @@ function EventRegistrationMain({ detail }: { detail: PublicEventDetail }) {
               <Label>Qual instituição você participa? *</Label>
               <Input required maxLength={120} placeholder='Ex.: igreja, escola, ONG… ou "Nenhuma"' value={institution} onChange={(e) => setInstitution(e.target.value)} />
             </div>
+            {askReligion && (
             <div className="space-y-1.5">
               <Label>Qual religião você é? *</Label>
               <Select value={religion} onValueChange={setReligion}>
@@ -357,6 +359,8 @@ function EventRegistrationMain({ detail }: { detail: PublicEventDetail }) {
                 </SelectContent>
               </Select>
             </div>
+            )}
+            {askReligion && (
             <label className="flex cursor-pointer items-start gap-3 rounded-lg border bg-primary-soft/40 p-4 text-sm sm:col-span-2">
               <Checkbox
                 className="mt-0.5"
@@ -376,6 +380,7 @@ function EventRegistrationMain({ detail }: { detail: PublicEventDetail }) {
                 </span>
               </span>
             </label>
+            )}
           </div>
         )}
 
@@ -416,7 +421,7 @@ function EventRegistrationMain({ detail }: { detail: PublicEventDetail }) {
           <p className="text-sm text-muted-foreground">
             Total: <strong className="text-lg text-foreground">{payRequired ? moneyBR(total) : "Gratuito"}</strong>
           </p>
-          <Button type="submit" size="lg" disabled={register.isPending || !lotId || (event.require_image_consent && !imageConsent) || (!isMember && (!institution.trim() || !religion || !religionConsent)) || (!profile.data.birth_date && !birthDate)}>Inscrever-se</Button>
+          <Button type="submit" size="lg" disabled={register.isPending || !lotId || (event.require_image_consent && !imageConsent) || (!isMember && (!institution.trim() || (askReligion && (!religion || !religionConsent)))) || (!profile.data.birth_date && !birthDate)}>Inscrever-se</Button>
         </div>
       </form>
     </Box>

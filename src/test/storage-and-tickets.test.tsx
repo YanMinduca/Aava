@@ -15,7 +15,7 @@ afterEach(cleanup);
 
 const ticket = (over: Partial<Tables<"event_tickets">> = {}): Tables<"event_tickets"> => ({
   id: "t1", registration_id: "r1", event_id: "e1", seq: 1, code: "a".repeat(64), short_code: "K7M29QXA", holder_name: "Maria Souza",
-  status: "valid", checked_in_at: null, checked_in_by: null, created_at: "2026-10-18T10:00:00Z", ...over,
+  status: "valid", checked_in_at: null, checked_in_by: null, created_at: "2026-10-18T10:00:00Z", removal_id: null, ...over,
 });
 
 describe("ingresso do membro", () => {

@@ -45,7 +45,7 @@ const COLORS = ["#2563eb", "#16a34a", "#9333ea", "#ea580c", "#0d9488", "#64748b"
 const fmtAge = (n: number | null | undefined) => (n == null ? "—" : String(n).replace(".", ","));
 
 /** Aba "Dados": médias, gráficos, relatório em Excel e consulta pessoa a pessoa. */
-export function EventData({ eventId, title }: { eventId: string; title: string }) {
+export function EventData({ eventId, title, askReligion = true }: { eventId: string; title: string; askReligion?: boolean }) {
   const [search, setSearch] = useState("");
   const [religionFilter, setReligionFilter] = useState("todas");
   const [openId, setOpenId] = useState<string | null>(null);
@@ -101,13 +101,17 @@ export function EventData({ eventId, title }: { eventId: string; title: string }
           ["Inscrições com data de nascimento", a.count],
         ],
       },
-      {
-        name: "Religiões",
-        rows: [
-          ["Religião", "Inscritos", "% do total"],
-          ...sum.religions.map((r) => [r.label, r.count, r.pct]),
-        ],
-      },
+      ...(askReligion
+        ? [
+            {
+              name: "Religiões",
+              rows: [
+                ["Religião", "Inscritos", "% do total"],
+                ...sum.religions.map((r) => [r.label, r.count, r.pct]),
+              ],
+            },
+          ]
+        : []),
       {
         name: "Faixas etárias",
         rows: [["Faixa (anos)", "Inscritos"], ...sum.bands.map((b) => [b.label, b.count])],
@@ -198,7 +202,8 @@ export function EventData({ eventId, title }: { eventId: string; title: string }
         </p>
       )}
 
-      <div className="grid gap-6 lg:grid-cols-2">
+      <div className={`grid gap-6 ${askReligion ? "lg:grid-cols-2" : ""}`}>
+        {askReligion && (
         <div className="rounded-2xl border bg-card p-5">
           <p className="font-semibold text-foreground">Religiões</p>
           <div className="mt-2 h-64">
@@ -238,6 +243,7 @@ export function EventData({ eventId, title }: { eventId: string; title: string }
             ))}
           </ul>
         </div>
+        )}
 
         <div className="rounded-2xl border bg-card p-5">
           <p className="font-semibold text-foreground">Faixas etárias</p>
@@ -291,6 +297,7 @@ export function EventData({ eventId, title }: { eventId: string; title: string }
               className="w-64"
             />
           </div>
+          {askReligion && (
           <div className="space-y-1.5">
             <Label>Religião</Label>
             <Select value={religionFilter} onValueChange={setReligionFilter}>
@@ -309,6 +316,7 @@ export function EventData({ eventId, title }: { eventId: string; title: string }
               </SelectContent>
             </Select>
           </div>
+          )}
         </div>
         <div className="mt-3 overflow-x-auto rounded-2xl border bg-card">
           <table className="w-full text-sm">

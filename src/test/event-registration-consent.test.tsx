@@ -217,3 +217,32 @@ describe("inscrição em evento: religião é dado sensível", () => {
     expect(screen.queryByText(/Autorizo o uso da minha religião/)).toBeNull();
   });
 });
+
+describe("inscrição em evento: religião desligada pelo evento", () => {
+  const visitorProfile = {
+    id: "m1", full_name: "Maria", cpf: "52998224725", phone: "1", birth_date: "1990-05-10",
+    status: "visitante", approval_status: "aprovado",
+  };
+
+  it("não mostra religião nem aceite, e não envia _religion", async () => {
+    h.profile = visitorProfile;
+    detail.event.ask_religion = false;
+    try {
+      renderIt();
+      const institution = await screen.findByPlaceholderText(/Ex\.: igreja/);
+      expect(screen.queryByRole("combobox")).toBeNull();
+      expect(screen.queryByText(/Autorizo o uso da minha religião/)).toBeNull();
+      fireEvent.change(institution, { target: { value: "Escola Municipal" } });
+      const submit = screen.getByRole("button", { name: "Inscrever-se" }) as HTMLButtonElement;
+      await waitFor(() => expect(submit.disabled).toBe(false));
+      fireEvent.click(submit);
+      await waitFor(() => expect(h.rpc).toHaveBeenCalledWith("register_for_event", expect.anything()));
+      const args = h.rpc.mock.calls.find((c) => c[0] === "register_for_event")![1];
+      expect(args).not.toHaveProperty("_religion");
+      expect(args._institution).toBe("Escola Municipal");
+      expect(h.updateUser).not.toHaveBeenCalledWith({ data: expect.objectContaining({ sensitive_consent_version: PRIVACY_VERSION }) });
+    } finally {
+      delete detail.event.ask_religion;
+    }
+  });
+});

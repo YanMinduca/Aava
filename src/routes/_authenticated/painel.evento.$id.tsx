@@ -16,6 +16,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { EventData } from "@/components/events/EventData";
 import { registrationAge, religionLabel } from "@/lib/event-data";
 import { EventForm, draftFrom } from "@/components/events/EventForm";
+import { TicketRemoval } from "@/components/events/TicketRemoval";
 import { QrScanner, type ScanFeedbackKind } from "@/components/events/QrScanner";
 import { formatShortCode } from "@/lib/images";
 import { playRead, playWarning, unlockAudio } from "@/lib/sounds";
@@ -33,7 +34,7 @@ export const Route = createFileRoute("/_authenticated/painel/evento/$id")({
 
 type Stats = {
   registrations: number; tickets_total: number; checked_in: number;
-  expected_total: number; paid_total: number; claimed_total: number;
+  expected_total: number; paid_total: number; claimed_total: number; refund_due_total?: number;
   lots: { name: string; capacity: number | null; sold: number }[];
 };
 
@@ -131,7 +132,7 @@ function EventAdmin() {
 
         <TabsContent value="resumo"><Summary stats={stats.data} loading={stats.isLoading} /></TabsContent>
         {canVerify && <TabsContent value="inscricoes"><Registrations eventId={id} title={e.title} onChange={refreshAll} /></TabsContent>}
-        {canVerify && <TabsContent value="dados"><EventData eventId={id} title={e.title} /></TabsContent>}
+        {canVerify && <TabsContent value="dados"><EventData eventId={id} title={e.title} askReligion={e.ask_religion} /></TabsContent>}
         {canCheckin && <TabsContent value="checkin"><CheckIn eventId={id} onChange={refreshAll} /></TabsContent>}
         {canManage && (
           <TabsContent value="editar">
@@ -204,6 +205,7 @@ function Summary({ stats, loading }: { stats: Stats | undefined; loading: boolea
           ) : (
             <>
               <p className="text-sm text-muted-foreground">Pago {moneyBR(stats.paid_total)} de {moneyBR(stats.expected_total)} ({paidPct}%)</p>
+              {(stats.refund_due_total ?? 0) > 0 && <p className="text-sm font-medium text-foreground">A devolver (ingressos removidos): {moneyBR(stats.refund_due_total ?? 0)}</p>}
               <div className="mt-2 h-44">
                 <ResponsiveContainer>
                   <BarChart data={payData} layout="vertical" margin={{ left: 0, right: 16 }}>
@@ -255,7 +257,7 @@ function Registrations({ eventId, title, onChange }: { eventId: string; title: s
     queryFn: async () => {
       const { data, error } = await supabase
         .from("event_registrations")
-        .select("*, event_lots(name), event_payments(*), event_tickets(*)")
+        .select("*, event_lots(name), event_payments(*), event_tickets(*), event_ticket_removals(*)")
         .eq("event_id", eventId)
         .order("created_at", { ascending: false });
       if (error) throw error;
@@ -317,7 +319,7 @@ function Registrations({ eventId, title, onChange }: { eventId: string; title: s
               return (
                 <tr key={r.id} className="border-b last:border-0">
                   <td className="p-4">
-                    <p className="font-medium text-foreground">{r.attendee_name}{r.is_child && <Badge variant="outline" className="ml-2">Criança</Badge>}</p>
+                    <p className="font-medium text-foreground">{r.attendee_name}{r.is_child && <Badge variant="outline" className="ml-2">Criança</Badge>}{(r.event_ticket_removals ?? []).length > 0 && <Badge variant="outline" className="ml-2">{(r.event_ticket_removals ?? []).reduce((a, x) => a + x.tickets_removed, 0)} removido(s)</Badge>}</p>
                     <p className="text-xs text-muted-foreground">{r.is_child ? `Filho(a) de ${r.guardian_name ?? "—"}${r.child_age != null ? ` · ${r.child_age} anos` : ""}` : r.attendee_phone}</p>
                   </td>
                   <td className="p-4 text-muted-foreground">{r.event_lots?.name} × {r.quantity}</td>
@@ -348,6 +350,7 @@ type RegRow = Tables<"event_registrations"> & {
   event_lots: { name: string } | null;
   event_payments: Tables<"event_payments">[] | null;
   event_tickets: Tables<"event_tickets">[] | null;
+  event_ticket_removals: Tables<"event_ticket_removals">[] | null;
 };
 
 function RegistrationDetail({ reg, onChange }: { reg: RegRow; onChange: () => void }) {
@@ -410,14 +413,13 @@ function RegistrationDetail({ reg, onChange }: { reg: RegRow; onChange: () => vo
           </div>
         )}
 
-        {tickets.length > 0 && (
-          <div>
-            <p className="font-medium text-foreground">Ingressos</p>
-            <ul className="mt-2 space-y-1 text-muted-foreground">
-              {tickets.map((t) => <li key={t.id}>{t.holder_name} — {TICKET_STATUS[t.status] ?? t.status}</li>)}
-            </ul>
-          </div>
-        )}
+        <TicketRemoval
+          reg={reg}
+          tickets={tickets}
+          removals={reg.event_ticket_removals ?? []}
+          paidSum={pays.filter((p) => p.status === "paid").reduce((a, p) => a + Number(p.amount), 0)}
+          onChange={() => { void purgeStorageTrash(); onChange(); }}
+        />
 
         <div className="flex flex-wrap gap-2 border-t pt-4">
           {reg.status === "pending" && (

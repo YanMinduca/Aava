@@ -6,6 +6,7 @@ import { SiteLayout } from "@/components/site/SiteLayout";
 import { PageError } from "@/components/site/PageError";
 import { Markdown } from "@/components/site/Markdown";
 import { EventRegistration } from "@/components/events/EventRegistration";
+import { EventMediaFull } from "@/components/events/EventMedia";
 import { Badge } from "@/components/ui/badge";
 import { asEventDetail, fmtDate, fmtLongDate, fmtTime, moneyBR } from "@/lib/events";
 import { siteMeta } from "@/lib/site-query";
@@ -66,6 +67,7 @@ function EventPage() {
                   {data.event.registration_closes_at ? ` até ${fmtDate(data.event.registration_closes_at)}` : ""}
                 </p>
               )}
+              <EventMediaFull event={data.event} />
               {data.event.description && <Markdown className="mt-8 text-base leading-relaxed text-muted-foreground">{data.event.description}</Markdown>}
 
               {data.lots.length > 0 && (

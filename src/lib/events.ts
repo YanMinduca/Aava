@@ -83,6 +83,10 @@ const ERRORS: Record<string, string> = {
   invalid_child_cpf: "CPF da criança inválido. Confira os números.",
   child_cpf_same_as_guardian: "O CPF da criança não pode ser o mesmo do responsável.",
   child_already_registered: "Esta criança já está inscrita neste evento.",
+  invalid_removal_reason: "Escreva a observação explicando por que o ingresso foi removido (3 a 500 caracteres).",
+  invalid_removal_selection: "Escolha pelo menos um ingresso para remover.",
+  ticket_not_removable: "Só dá para remover ingressos válidos. Um ingresso já cancelado ou removido não pode ser removido de novo.",
+  ticket_checked_in: "Este ingresso já teve a presença confirmada. Desfaça a presença no check-in antes de removê-lo.",
   cannot_cancel: "Esta inscrição não pode mais ser cancelada por aqui. Fale com a igreja.",
   payment_closed: "Este pagamento não pode mais ser alterado.",
   invalid_proof: "Arquivo de comprovante inválido.",
@@ -144,8 +148,16 @@ export type PublicEvent = {
   require_image_consent: boolean;
   allow_child_registration: boolean;
   child_registration_notice: string | null;
+  /** Pergunta a religião dos visitantes na inscrição. Ausente (banco antigo) = pergunta, como sempre foi. */
+  ask_religion?: boolean;
+  /** Mídia de divulgação (foto, vídeo ou post do Instagram). */
+  media_type?: string | null;
+  media_path?: string | null;
+  media_url?: string | null;
 };
 export type PublicEventDetail = { event: PublicEvent; lots: PublicLot[] };
+/** O evento pergunta a religião dos visitantes? (só `false` explícito desliga) */
+export const asksReligion = (e: Pick<PublicEvent, "ask_religion">) => e.ask_religion !== false;
 export const asEventDetail = (j: Json | null) => (j ? (j as unknown as PublicEventDetail) : null);
 
 export const lotIsOpen = (l: PublicLot, now = new Date()) =>
