@@ -6,6 +6,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { latestLinkByMember, recentLinkSince } from "@/lib/recent-link";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 export type AccountRow = { account_id: string; account_name: string | null; account_email: string | null; member_id: string | null };
@@ -27,6 +28,25 @@ export function useAccountLinks(enabled: boolean) {
       const { data, error } = await supabase.rpc("list_accounts_for_linking");
       if (error) throw error;
       return (data ?? []) as AccountRow[];
+    },
+  });
+}
+
+/** Vínculos feitos nos últimos dias (cadastro -> data), para a marca "Cadastro recente". Lê o histórico de atividade. */
+export function useRecentLinks(enabled: boolean) {
+  return useQuery({
+    queryKey: ["member-activity", "recent-links"],
+    enabled,
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("member_activity")
+        .select("member_id, created_at")
+        .eq("kind", "account_linked")
+        .gte("created_at", recentLinkSince())
+        .order("created_at", { ascending: false })
+        .limit(500);
+      if (error) throw error;
+      return latestLinkByMember(data ?? []);
     },
   });
 }

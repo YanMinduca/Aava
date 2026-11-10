@@ -17,7 +17,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { MemberForm, MemberAvatar, emptyMember, type MemberDraft } from "@/components/members/MemberForm";
 import { APPROVAL_LABELS, MEMBER_STATUS, ageFrom, dateBR } from "@/lib/church";
 import { downloadXls } from "@/lib/export";
-import { AccountBadge, LinkAccountDialog, useAccountLinks } from "@/components/members/MemberAccountLink";
+import { AccountBadge, LinkAccountDialog, useAccountLinks, useRecentLinks } from "@/components/members/MemberAccountLink";
+import { UnlinkedAccounts } from "@/components/members/UnlinkedAccounts";
+import { isRecentLink } from "@/lib/recent-link";
 import { OptimizePhotosButton } from "@/components/members/OptimizePhotosButton";
 import { copyText } from "@/lib/clipboard";
 import { purgeStorageTrash } from "@/lib/storage-trash";
@@ -42,6 +44,11 @@ function MembersPage() {
   const [sortKey, setSortKey] = useState<SortKey>("nome_asc");
   const [linking, setLinking] = useState<{ id: string; full_name: string; user_id: string | null } | null>(null);
   const accountLinks = useAccountLinks(isFullAccess);
+  const recentLinks = useRecentLinks(can("view_members"));
+  const recentLinkAt = (id: string) => {
+    const at = recentLinks.data?.get(id);
+    return isRecentLink(at) ? at : undefined;
+  };
   const accountEmail = (userId: string | null) => (userId ? accountLinks.data?.find((a) => a.account_id === userId)?.account_email ?? null : null);
   const [editing, setEditing] = useState<MemberDraft | null>(null);
   const [notes, setNotes] = useState("");
@@ -138,10 +145,11 @@ function MembersPage() {
   const filtered = sortMembers(approved, sortKey).filter(
     (m) =>
       (statusFilter === "todos" || m.status === statusFilter) &&
-      (accountFilter === "todos" || (accountFilter === "com_conta" ? !!m.user_id : !m.user_id)) &&
+      (accountFilter === "todos" || (accountFilter === "recentes" ? !!m.user_id && !!recentLinkAt(m.id) : accountFilter === "com_conta" ? !!m.user_id : !m.user_id)) &&
       (m.full_name.toLowerCase().includes(search.toLowerCase()) || (m.cpf ?? "").includes(search) || (m.registration_number ?? "").toLowerCase().includes(search.toLowerCase())),
   );
 
+  const unlinkedAccounts = (accountLinks.data ?? []).filter((a) => !a.member_id).length;
   const withAccount = approved.filter((m) => !!m.user_id).length;
   const statusCounts = countByStatus(approved);
   // Voluntários e líderes não são status: vêm dos departamentos e dos cargos de liderança
@@ -180,6 +188,7 @@ function MembersPage() {
         <TabsList>
           <TabsTrigger value="lista">Cadastrados ({approved.length})</TabsTrigger>
           <TabsTrigger value="pendentes">Pendentes {pending.length > 0 && <Badge className="ml-2">{pending.length}</Badge>}</TabsTrigger>
+          {isFullAccess && <TabsTrigger value="sem-cadastro">Contas sem cadastro {unlinkedAccounts > 0 && <Badge variant="secondary" className="ml-2">{unlinkedAccounts}</Badge>}</TabsTrigger>}
           {can("invite_member") && <TabsTrigger value="convites">Convites</TabsTrigger>}
         </TabsList>
 
@@ -208,6 +217,7 @@ function MembersPage() {
                 <SelectItem value="todos">Com e sem conta</SelectItem>
                 <SelectItem value="com_conta">Com conta</SelectItem>
                 <SelectItem value="sem_conta">Sem conta</SelectItem>
+                <SelectItem value="recentes">Cadastro recente</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -267,6 +277,9 @@ function MembersPage() {
                           <MemberAvatar path={m.photo_path} />
                           <div>
                             <Link to="/painel/membro/$id" params={{ id: m.id }} className="font-medium text-foreground hover:text-primary hover:underline">{m.full_name}</Link>
+                            {m.user_id && recentLinkAt(m.id) && (
+                              <Badge className="ml-2" title={`Conta vinculada em ${dateBR(recentLinkAt(m.id))}`}>Cadastro recente</Badge>
+                            )}
                             <p className="text-xs text-muted-foreground">{[m.registration_number ? `Matrícula ${m.registration_number}` : "", age !== null ? `${age} anos` : "", m.baptized ? "Batizado" : ""].filter(Boolean).join(" · ")}</p>
                           </div>
                         </div>
@@ -328,6 +341,12 @@ function MembersPage() {
             </div>
           )}
         </TabsContent>
+
+        {isFullAccess && (
+          <TabsContent value="sem-cadastro">
+            <UnlinkedAccounts accounts={accountLinks.data ?? []} loading={accountLinks.isLoading} />
+          </TabsContent>
+        )}
 
         {can("invite_member") && (
           <TabsContent value="convites">
