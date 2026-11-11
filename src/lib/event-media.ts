@@ -49,7 +49,12 @@ export function parseInstagramUrl(input: string | null | undefined): InstagramPo
   return { kind, code, canonical: `https://www.instagram.com/${kind}/${code}/` };
 }
 
-export const instagramEmbedUrl = (post: InstagramPost) => `${post.canonical}embed`;
+/**
+ * O parâmetro hidecaption=true solicita ao Instagram que oculte a legenda no embed.
+ * Ele não garante a remoção de CTAs/elementos de interface injetados pelo Instagram.
+ */
+export const instagramEmbedUrl = (post: InstagramPost) =>
+  `${post.canonical}embed/?hidecaption=true`;
 
 /** Confere o arquivo escolhido para o evento; devolve a mensagem de erro ou null. */
 export function checkMediaFile(type: "image" | "video", file: File): string | null {
