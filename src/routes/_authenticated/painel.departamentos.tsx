@@ -252,7 +252,7 @@ function RolesManager() {
                 }
               ><Pencil className="h-4 w-4" /></Button>
               {!r.is_system && (
-                <Button size="icon" variant="ghost" aria-label="Excluir cargo" onClick={() => confirm(`Excluir o cargo ${r.name}? Quem tem esse cargo fica sem cargo e sem as permissões dele.`) && remove.mutate(r.id)}><Trash2 className="h-4 w-4" /></Button>
+                <Button size="icon" variant="ghost" aria-label="Excluir cargo" onClick={() => confirm(`Excluir o cargo ${r.name}? Quem tem esse cargo fica sem cargo e sem as permissões dele. Fica na lixeira por 30 dias.`) && remove.mutate(r.id)}><Trash2 className="h-4 w-4" /></Button>
               )}
             </div>
           </div>

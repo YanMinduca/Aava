@@ -71,3 +71,9 @@ em `drizzle/migrations/` como base e conferindo contra o banco real antes.
 
 `supabase/config.toml` aponta para o projeto `mzqdsfadkaviwaazdwlx`. Antes apontava para o projeto
 antigo do Lovable Cloud (`uvqdbfupjhazktkigcoa`).
+
+## Tabelas novas e a lixeira
+
+Toda tabela nova precisa ir para a lixeira geral: na migration dela, rode `select public.trash_attach_all();`
+(veja `docs/backup-e-lixeira.md`). Se ela guarda caminhos de arquivos do armazenamento, inclua o campo em
+`public.trash_files` e em `public.storage_path_in_use`.

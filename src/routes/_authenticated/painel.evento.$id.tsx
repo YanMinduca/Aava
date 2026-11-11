@@ -145,7 +145,7 @@ function EventAdmin() {
                     ? "Este evento já tem inscrições. Para tirá-lo do site, desmarque “Publicar evento” em vez de excluir."
                     : "Remove o evento e seus lotes. Só é possível enquanto não houver inscrições."}
                 </p>
-                <Button className="mt-3" variant="outline" disabled={(stats.data?.registrations ?? 0) > 0 || del.isPending} onClick={() => confirm("Excluir este evento?") && del.mutate()}>Excluir evento</Button>
+                <Button className="mt-3" variant="outline" disabled={(stats.data?.registrations ?? 0) > 0 || del.isPending} onClick={() => confirm("Excluir este evento? Fica na lixeira por 30 dias.") && del.mutate()}>Excluir evento</Button>
               </div>
             </div>
           </TabsContent>

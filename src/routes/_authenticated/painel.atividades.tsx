@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { toast } from "sonner";
 import { Loader2, Lock, Pencil, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAccess } from "@/hooks/use-access";
@@ -128,6 +129,8 @@ function ActivityLogPage() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [cleanDays, setCleanDays] = useState("90");
+  const [cleaning, setCleaning] = useState(false);
 
   // Espera o CEO terminar de digitar antes de consultar.
   useEffect(() => {
@@ -185,6 +188,21 @@ function ActivityLogPage() {
   useEffect(() => {
     if (isCeo) void load();
   }, [isCeo, load]);
+
+  // Os registros apagados vão para a Lixeira (30 dias) e depois somem de vez, para não pesar no banco.
+  const deleteLogs = async (args: { _ids?: string[]; _before?: string }, question: string) => {
+    if (!confirm(question)) return;
+    setCleaning(true);
+    const rpc = supabase.rpc as unknown as (fn: string, args: object) => Promise<{ data: number | null; error: { message: string } | null }>;
+    const { data, error: err } = await rpc.call(supabase, "delete_activity_logs", args);
+    setCleaning(false);
+    if (err) {
+      toast.error("Não foi possível apagar agora. Tente de novo.");
+      return;
+    }
+    toast.success(`${data ?? 0} ${data === 1 ? "registro enviado" : "registros enviados"} para a lixeira.`);
+    void load();
+  };
 
   const emptyText = useMemo(
     () =>
@@ -247,6 +265,33 @@ function ActivityLogPage() {
         </Button>
       </div>
 
+      <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-card p-3 text-sm">
+        <span className="text-muted-foreground">Limpar registros com mais de</span>
+        <select
+          aria-label="Idade dos registros a apagar"
+          value={cleanDays}
+          onChange={(e) => setCleanDays(e.target.value)}
+          className="rounded-md border bg-background px-2 py-1"
+        >
+          {["30", "90", "180", "365"].map((d) => <option key={d} value={d}>{d} dias</option>)}
+        </select>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={cleaning}
+          onClick={() =>
+            void deleteLogs(
+              { _before: new Date(Date.now() - Number(cleanDays) * 86400000).toISOString() },
+              `Apagar os registros com mais de ${cleanDays} dias? Eles ficam na Lixeira por 30 dias e depois somem de vez.`,
+            )
+          }
+        >
+          <Trash2 className="h-4 w-4" /> Apagar
+        </Button>
+        <span className="text-xs text-muted-foreground">Vai para a Lixeira por 30 dias.</span>
+      </div>
+
       <div role="group" aria-label="Filtrar por área" className="flex flex-wrap gap-2">
         {ENTITY_FILTERS.map((f) => (
           <button
@@ -301,6 +346,16 @@ function ActivityLogPage() {
                       <time dateTime={r.created_at}>{formatWhen(r.created_at)}</time>
                     </p>
                   </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    aria-label="Apagar este registro"
+                    disabled={cleaning}
+                    onClick={() => void deleteLogs({ _ids: [r.id] }, "Apagar este registro? Ele fica na Lixeira por 30 dias.")}
+                  >
+                    <Trash2 className="h-4 w-4" aria-hidden="true" />
+                  </Button>
                 </li>
               );
             })}

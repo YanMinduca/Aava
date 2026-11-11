@@ -5,6 +5,7 @@ import { useAccess } from "@/hooks/use-access";
 import { brl } from "@/lib/church";
 import { siteMeta } from "@/lib/site-query";
 import { EventsCard, FinanceCards, PrayerCard, VisitorsCard, VolunteerCards } from "@/components/dashboard/DashboardCards";
+import { BackupReminder } from "@/components/dashboard/BackupReminder";
 import { MyTickets } from "@/components/events/MyTickets";
 import { NextShiftCard } from "@/components/shifts/MyShifts";
 
@@ -53,6 +54,7 @@ function Overview() {
   return (
     <div>
       <h1 className="text-3xl text-foreground">Visão geral</h1>
+      <BackupReminder />
       <NextShiftCard />
       {nothing && (
         <p className="mt-4 text-muted-foreground">

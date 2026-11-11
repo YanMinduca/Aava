@@ -158,7 +158,7 @@ export function PrayerRequests({
                       aria-label="Excluir pedido"
                       disabled={remove.isPending}
                       onClick={() => {
-                        if (confirm("Excluir este pedido de oração?")) remove.mutate(r.id);
+                        if (confirm("Excluir este pedido de oração? Fica na lixeira por 30 dias.")) remove.mutate(r.id);
                       }}
                     >
                       <Trash2 />

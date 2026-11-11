@@ -221,7 +221,7 @@ function DepartmentDetail() {
         {manageAll && (
           <div className="flex gap-2 print:hidden">
             <Button variant="outline" onClick={() => { setForm({ name: dept.name, description: dept.description ?? "" }); setEditing(true); }}><Pencil className="h-4 w-4" /> Editar</Button>
-            <Button variant="outline" onClick={() => confirm(`Excluir o departamento ${dept.name}? Os vínculos dos voluntários com ele serão removidos.`) && deleteDept.mutate()}><Trash2 className="h-4 w-4" /> Excluir</Button>
+            <Button variant="outline" onClick={() => confirm(`Excluir o departamento ${dept.name}? Os vínculos dos voluntários com ele serão removidos. Fica na lixeira por 30 dias.`) && deleteDept.mutate()}><Trash2 className="h-4 w-4" /> Excluir</Button>
           </div>
         )}
       </div>

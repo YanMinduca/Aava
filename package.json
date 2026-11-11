@@ -11,7 +11,8 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "backup": "node scripts/backup.mjs"
   },
   "overrides": {
     "rolldown": "1.2.1"
@@ -55,6 +56,7 @@
     "cmdk": "^1.1.1",
     "date-fns": "^4.1.0",
     "embla-carousel-react": "^8.6.0",
+    "fflate": "^0.8.3",
     "input-otp": "^1.4.2",
     "jsqr": "^1.4.0",
     "lucide-react": "^0.575.0",

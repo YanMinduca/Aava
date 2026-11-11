@@ -292,7 +292,7 @@ function TxList({ all, year, month, onEdit, onChanged }: { all: TxWithMember[]; 
     if (data?.signedUrl) window.open(data.signedUrl, "_blank");
   }
   async function del(id: string) {
-    if (!confirm("Excluir lançamento?")) return;
+    if (!confirm("Excluir lançamento? Fica na lixeira por 30 dias.")) return;
     const { error } = await supabase.from("financial_transactions").delete().eq("id", id);
     if (error) toast.error(error.message);
     else {
@@ -437,7 +437,7 @@ function Goals({ all }: { all: Tx[] }) {
     onSuccess: () => { toast.success("Meta salva"); setD(null); qc.invalidateQueries({ queryKey: ["goals"] }); },
     onError: (e) => toast.error(e.message),
   });
-  const del = async (id: string) => { if (confirm("Excluir meta?")) { await supabase.from("financial_goals").delete().eq("id", id); qc.invalidateQueries({ queryKey: ["goals"] }); } };
+  const del = async (id: string) => { if (confirm("Excluir meta? Fica na lixeira por 30 dias.")) { await supabase.from("financial_goals").delete().eq("id", id); qc.invalidateQueries({ queryKey: ["goals"] }); } };
   const edit = (g: Goal) => setD({ id: g.id, title: g.title, target_amount: String(g.target_amount), category: g.category ?? "", start_date: g.start_date ?? "", deadline: g.deadline ?? "", recurrence: g.recurrence, responsible: g.responsible ?? "", status: g.status, manual_amount: g.manual_amount !== null ? String(g.manual_amount) : "" });
 
   return (

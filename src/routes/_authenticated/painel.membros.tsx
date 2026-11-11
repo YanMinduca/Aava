@@ -296,7 +296,7 @@ function MembersPage() {
                         {isFullAccess && <Button size="icon" variant="ghost" aria-label={m.user_id ? "Ver conta vinculada" : "Vincular conta"} title={m.user_id ? "Ver conta vinculada" : "Vincular conta"} onClick={() => setLinking({ id: m.id, full_name: m.full_name, user_id: m.user_id })}><UserRoundCheck className="h-4 w-4" /></Button>}
                         {can("edit_member") && <Button size="icon" variant="ghost" onClick={() => openEdit({ ...m })}><Pencil className="h-4 w-4" /></Button>}
                         {can("delete_member") && (
-                          <Button size="icon" variant="ghost" onClick={() => confirm(`Excluir ${m.full_name}?`) && remove.mutate(m.id)}><Trash2 className="h-4 w-4" /></Button>
+                          <Button size="icon" variant="ghost" onClick={() => confirm(`Excluir ${m.full_name}? Fica na lixeira por 30 dias.`) && remove.mutate(m.id)}><Trash2 className="h-4 w-4" /></Button>
                         )}
                       </td>
                     </tr>

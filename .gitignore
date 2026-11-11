@@ -36,3 +36,6 @@ dist-ssr
 
 # Estado local do Supabase CLI (não vai para o Git)
 supabase/.temp/
+
+# Backups dos dados (têm dados pessoais: nunca versionar)
+backups/

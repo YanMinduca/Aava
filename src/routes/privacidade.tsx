@@ -84,7 +84,8 @@ function PrivacyPolicy() {
               <>
                 <strong className="text-foreground">Contribuições (dízimos e ofertas):</strong>{" "}
                 valor, data, forma de pagamento e, quando houver, a pessoa que contribuiu. Serve
-                para o controle e a prestação de contas financeiras.
+                para o controle e a prestação de contas financeiras. Só a liderança (CEO e Pastor
+                Presidente) e quem recebeu permissão para o financeiro conseguem ver.
               </>,
               <>
                 <strong className="text-foreground">Pedidos de oração:</strong> assunto e mensagem,
@@ -140,10 +141,14 @@ function PrivacyPolicy() {
         <Section title="Por quanto tempo guardamos">
           <p>
             Guardamos seus dados enquanto você mantiver vínculo com a comunidade ou enquanto forem
-            necessários para as finalidades acima. Quando um cadastro ou uma conta é excluído, os
-            dados pessoais são apagados do sistema de forma definitiva. Alguns registros, como os
-            financeiros, podem ser mantidos pelo prazo que a lei exigir. O registro de atividades é
-            apagado automaticamente depois de 12 meses.
+            necessários para as finalidades acima. Quando um cadastro ou outro item é excluído pela
+            equipe, ele fica numa lixeira interna, visível só para a liderança, por até 30 dias (para
+            desfazer exclusões feitas por engano) e depois é apagado do sistema de forma definitiva.
+            Se você pedir a exclusão da sua conta ou dos seus dados, a equipe apaga na hora, sem
+            passar pela lixeira. Alguns registros, como os financeiros, podem ser mantidos pelo
+            prazo que a lei exigir. O registro de atividades é apagado automaticamente depois de 12
+            meses. A liderança também faz cópias de segurança (backup) dos dados, guardadas em local
+            restrito.
           </p>
         </Section>
 

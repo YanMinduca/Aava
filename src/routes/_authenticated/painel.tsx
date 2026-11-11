@@ -18,6 +18,8 @@ import {
   Bell,
   CalendarClock,
   ScrollText,
+  Trash2,
+  DatabaseBackup,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
@@ -88,6 +90,8 @@ function PanelLayout() {
     { to: "/painel/notificacoes", label: "Avisos (notificações)", icon: Bell, show: can("send_push") },
     { to: "/painel/site", label: "Editar site", icon: Settings, show: can("edit_site") },
     { to: "/painel/atividades", label: "Registro de atividades", icon: ScrollText, show: isCeo },
+    { to: "/painel/lixeira", label: "Lixeira", icon: Trash2, show: isFullAccess },
+    { to: "/painel/backup", label: "Backup", icon: DatabaseBackup, show: isFullAccess },
   ] as const;
 
   async function signOut() {

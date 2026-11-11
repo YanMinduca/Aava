@@ -6,6 +6,7 @@ import { Clock, CheckCircle2, XCircle } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { MyContributions } from "@/components/members/MyContributions";
+import { useAccess } from "@/hooks/use-access";
 import { ClaimSuggestion, ClaimedNotice } from "@/components/members/ClaimSuggestion";
 import { CpfSignupNotice } from "@/components/members/CpfSignupNotice";
 import { MemberMatchDialog } from "@/components/members/MemberMatchDialog";
@@ -26,6 +27,7 @@ export const Route = createFileRoute("/_authenticated/painel/meu-cadastro")({
 function MyProfile() {
   const { convite } = Route.useSearch();
   const qc = useQueryClient();
+  const { can } = useAccess();
   const [draft, setDraft] = useState<MemberDraft | null>(null);
   const [claimed, setClaimed] = useState(false);
   const [cpfBlocked, setCpfBlocked] = useState(false);
@@ -134,7 +136,7 @@ function MyProfile() {
         onClaimed={handleClaimed}
       />
       <MyTickets uid={me.data.uid} />
-      {row?.approval_status === "aprovado" && <MyContributions memberId={row.id} />}
+      {row?.approval_status === "aprovado" && can("view_finance") && <MyContributions memberId={row.id} />}
     </div>
   );
 }

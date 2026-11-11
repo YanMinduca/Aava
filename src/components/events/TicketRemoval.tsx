@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Trash2 } from "lucide-react";
 import { eventError, fmtDateTime, moneyBR, TICKET_STATUS } from "@/lib/events";
 import { formatShortCode } from "@/lib/images";
 import {
@@ -72,6 +73,18 @@ export function TicketRemoval({
       setQty(1);
       setReason("");
       setOpen(false);
+      onChange();
+    },
+    onError: (e) => toast.error(eventError(e)),
+  });
+
+  const deleteLog = useMutation({
+    mutationFn: async (id: string) => {
+      const { error } = await supabase.rpc("delete_ticket_removal_log", { _id: id });
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      toast.success("Registro enviado para a lixeira.");
       onChange();
     },
     onError: (e) => toast.error(eventError(e)),
@@ -142,11 +155,24 @@ export function TicketRemoval({
             {[...removals]
               .sort((a, b) => b.removed_at.localeCompare(a.removed_at))
               .map((r) => (
-                <li key={r.id}>
-                  {fmtDateTime(r.removed_at)} — {r.tickets_removed}{" "}
-                  {r.tickets_removed === 1 ? "ingresso" : "ingressos"}
-                  {r.registration_cancelled ? " (inscrição cancelada)" : ""}: {r.reason}
-                  {Number(r.refund_due) > 0 ? ` · a devolver ${moneyBR(r.refund_due)}` : ""}
+                <li key={r.id} className="flex items-start justify-between gap-2">
+                  <span>
+                    {fmtDateTime(r.removed_at)} — {r.tickets_removed}{" "}
+                    {r.tickets_removed === 1 ? "ingresso" : "ingressos"}
+                    {r.registration_cancelled ? " (inscrição cancelada)" : ""}: {r.reason}
+                    {Number(r.refund_due) > 0 ? ` · a devolver ${moneyBR(r.refund_due)}` : ""}
+                  </span>
+                  <button
+                    type="button"
+                    aria-label="Apagar este registro do histórico"
+                    disabled={deleteLog.isPending}
+                    className="shrink-0 text-muted-foreground hover:text-destructive"
+                    onClick={() =>
+                      confirm("Apagar este registro do histórico? Ele fica na lixeira por 30 dias.") && deleteLog.mutate(r.id)
+                    }
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
                 </li>
               ))}
           </ul>

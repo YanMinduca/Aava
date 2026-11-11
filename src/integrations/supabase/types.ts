@@ -1366,6 +1366,40 @@ export type Database = {
         }
         Returns: string
       }
+      backup_last: {
+        Args: never
+        Returns: { bytes: number; created_at: string; files: number; rows: number; source: string; tables: number }[]
+      }
+      backup_record: {
+        Args: { _bytes: number; _files: number; _rows: number; _source?: string; _tables: number }
+        Returns: undefined
+      }
+      backup_storage_objects: { Args: never; Returns: { bucket: string; name: string; size: number }[] }
+      backup_table_page: { Args: { _limit?: number; _offset?: number; _table: string }; Returns: Json }
+      backup_tables: { Args: never; Returns: { row_count: number; table_name: string }[] }
+      delete_activity_logs: { Args: { _before?: string; _ids?: string[] }; Returns: number }
+      delete_ticket_removal_log: { Args: { _id: string }; Returns: undefined }
+      trash_empty: { Args: never; Returns: number }
+      trash_items: {
+        Args: { _id: number }
+        Returns: { id: number; label: string | null; row_data: Json; table_name: string }[]
+      }
+      trash_list: {
+        Args: { _limit?: number; _offset?: number; _search?: string; _table?: string }
+        Returns: {
+          deleted_at: string
+          deleted_by_name: string | null
+          expires_at: string
+          id: number
+          items: number
+          label: string | null
+          table_name: string
+          total: number
+        }[]
+      }
+      trash_purge: { Args: { _ids: number[] }; Returns: number }
+      trash_restore: { Args: { _id: number }; Returns: Json }
+      trash_stats: { Args: never; Returns: Json }
       release_event_registration: { Args: { _reg: string }; Returns: undefined }
       remove_event_tickets: {
         Args: {
