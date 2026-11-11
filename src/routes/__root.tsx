@@ -12,9 +12,12 @@ import { useEffect, type ReactNode } from "react";
 import { Toaster } from "@/components/ui/sonner";
 import { supabase } from "@/integrations/supabase/client";
 import "@/lib/pwa";
+import { installStaleChunkGuard, isChunkLoadError, reloadForNewVersion } from "@/lib/stale-chunk";
 
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
+
+installStaleChunkGuard();
 
 function NotFoundComponent() {
   return (
@@ -35,9 +38,33 @@ function NotFoundComponent() {
 function ErrorComponent({ error, reset }: ErrorComponentProps) {
   console.error(error);
   const router = useRouter();
+  // Versão antiga do site aberta (arquivo que saiu do servidor num deploy): recarrega sozinho uma vez.
+  const stale = isChunkLoadError(error);
   useEffect(() => {
+    if (stale) {
+      reloadForNewVersion();
+      return;
+    }
     reportLovableError(error, { boundary: "tanstack_root_error_component" });
-  }, [error]);
+  }, [error, stale]);
+  if (stale) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background px-4">
+        <div className="max-w-md text-center">
+          <h1 className="text-xl font-semibold text-foreground">Nova versão do site</h1>
+          <p className="mt-2 text-sm text-muted-foreground">
+            O site foi atualizado enquanto esta página estava aberta. Atualizando para a versão nova…
+          </p>
+          <button
+            onClick={() => window.location.reload()}
+            className="mt-6 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground"
+          >
+            Atualizar agora
+          </button>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
       <div className="max-w-md text-center">
