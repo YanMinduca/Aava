@@ -35,7 +35,7 @@ export function eventMediaFrom(e: EventMediaFields | null | undefined): EventMed
 export type InstagramPost = { kind: "p" | "reel" | "tv"; code: string; canonical: string };
 
 const IG_RE =
-  /^https:\/\/(?:www\\.)?instagram\\.com\\/(?:[A-Za-z0-9._]+\\/)?(p|reel|reels|tv)\\/([A-Za-z0-9_-]{5,})\\/?(?:[?#].*)?$/;
+  /^https:\/\/(?:www\.)?instagram\.com\/(?:[A-Za-z0-9._]+\/)?(p|reel|reels|tv)\/([A-Za-z0-9_-]{5,})\/?(?:[?#].*)?$/;
 
 /**
  * Lê o link de um post, reel ou IGTV do Instagram. Só aceita https://instagram.com (com ou sem www).
@@ -50,8 +50,8 @@ export function parseInstagramUrl(input: string | null | undefined): InstagramPo
 }
 
 /**
- * O parâmetro oficial hidecaption=true solicita ao Instagram que omita a legenda no embed.
- * Ele não garante a remoção de CTAs/elementos de interface que o Instagram injeta no iframe.
+ * O parâmetro hidecaption=true solicita ao Instagram que oculte a legenda no embed.
+ * Ele não garante a remoção de CTAs/elementos de interface injetados pelo Instagram.
  */
 export const instagramEmbedUrl = (post: InstagramPost) =>
   `${post.canonical}embed/?hidecaption=true`;
