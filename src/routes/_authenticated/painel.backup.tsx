@@ -173,10 +173,6 @@ function BackupPage() {
             O backup tem dados pessoais e sensíveis (CPF, religião, pedidos de oração, financeiro).
             Guarde em lugar privado e não envie por WhatsApp ou e-mail.
           </li>
-          <li>
-            Senhas e contas de login não entram: elas ficam no Supabase. Para recuperar o sistema
-            todo, use também os backups do próprio Supabase.
-          </li>
           <li>Apague as cópias antigas que não precisa mais.</li>
         </ul>
       </section>
