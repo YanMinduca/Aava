@@ -1,0 +1,215 @@
+From 754041492b920110db1ebdc7ba9e24a2d0c576f1 Mon Sep 17 00:00:00 2001
+From: Yan <yan@example.com>
+Date: Wed, 11 Nov 2026 23:43:20 +0000
+Subject: [PATCH] =?UTF-8?q?fix:=20recarregar=20sozinho=20quando=20o=20site?=
+ =?UTF-8?q?=20abre=20em=20vers=C3=A3o=20antiga=20(chunk=20404=20ap=C3=B3s?=
+ =?UTF-8?q?=20deploy)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ src/lib/stale-chunk.ts       | 56 +++++++++++++++++++++++++++
+ src/routes/__root.tsx        | 29 +++++++++++++-
+ src/test/stale-chunk.test.ts | 73 ++++++++++++++++++++++++++++++++++++
+ 3 files changed, 157 insertions(+), 1 deletion(-)
+ create mode 100644 src/lib/stale-chunk.ts
+ create mode 100644 src/test/stale-chunk.test.ts
+
+diff --git a/src/lib/stale-chunk.ts b/src/lib/stale-chunk.ts
+new file mode 100644
+index 0000000..9b6e734
+--- /dev/null
++++ b/src/lib/stale-chunk.ts
+@@ -0,0 +1,56 @@
++/**
++ * Versão antiga do site aberta no navegador.
++ *
++ * A cada deploy os arquivos do site mudam de nome e os antigos saem do servidor. Quem estava com o site aberto
++ * (ou com a página antiga guardada no navegador) pede um arquivo que não existe mais (404) e vê
++ * "Esta página não carregou". Aqui detectamos esse caso e recarregamos o site sozinho, uma única vez,
++ * para pegar a versão nova.
++ */
++
++const KEY = "aava:stale-chunk-reload";
++/** Se já recarregamos há menos que isso e o erro voltou, não recarrega de novo (evita laço infinito). */
++const COOLDOWN_MS = 60_000;
++
++const CHUNK_ERROR =
++  /Failed to fetch dynamically imported module|error loading dynamically imported module|Importing a module script failed|Unable to preload CSS|Loading chunk [\w-]+ failed|ChunkLoadError/i;
++
++/** O erro é de arquivo do site que não carregou (versão antiga), e não um defeito de uma tela? */
++export function isChunkLoadError(error: unknown): boolean {
++  if (!error) return false;
++  const e = error as { name?: unknown; message?: unknown };
++  const text = `${typeof e.name === "string" ? e.name : ""} ${typeof e.message === "string" ? e.message : String(error)}`;
++  return CHUNK_ERROR.test(text);
++}
++
++function read(): number {
++  try {
++    return Number(window.sessionStorage.getItem(KEY)) || 0;
++  } catch {
++    return 0;
++  }
++}
++
++/** Já recarregamos há pouco por causa disso? */
++export function recentlyReloaded(now = Date.now()): boolean {
++  return now - read() < COOLDOWN_MS;
++}
++
++/** Recarrega o site uma vez. Devolve true se mandou recarregar, false se já tinha recarregado há pouco. */
++export function reloadForNewVersion(now = Date.now()): boolean {
++  if (typeof window === "undefined" || recentlyReloaded(now)) return false;
++  try {
++    window.sessionStorage.setItem(KEY, String(now));
++  } catch {
++    /* sem sessionStorage: segue mesmo assim; no pior caso o botão "Atualizar" resolve */
++  }
++  window.location.reload();
++  return true;
++}
++
++/** O Vite avisa (vite:preloadError) quando um arquivo da próxima tela não carrega: recarregamos antes de dar erro. */
++export function installStaleChunkGuard(): void {
++  if (typeof window === "undefined") return;
++  window.addEventListener("vite:preloadError", (event) => {
++    if (reloadForNewVersion()) event.preventDefault();
++  });
++}
+diff --git a/src/routes/__root.tsx b/src/routes/__root.tsx
+index 6c7ff77..ab16713 100644
+--- a/src/routes/__root.tsx
++++ b/src/routes/__root.tsx
+@@ -12,10 +12,13 @@ import { useEffect, type ReactNode } from "react";
+ import { Toaster } from "@/components/ui/sonner";
+ import { supabase } from "@/integrations/supabase/client";
+ import "@/lib/pwa";
++import { installStaleChunkGuard, isChunkLoadError, reloadForNewVersion } from "@/lib/stale-chunk";
+ 
+ import appCss from "../styles.css?url";
+ import { reportLovableError } from "../lib/lovable-error-reporting";
+ 
++installStaleChunkGuard();
++
+ function NotFoundComponent() {
+   return (
+     <div className="flex min-h-screen items-center justify-center bg-background px-4">
+@@ -35,9 +38,33 @@ function NotFoundComponent() {
+ function ErrorComponent({ error, reset }: ErrorComponentProps) {
+   console.error(error);
+   const router = useRouter();
++  // Versão antiga do site aberta (arquivo que saiu do servidor num deploy): recarrega sozinho uma vez.
++  const stale = isChunkLoadError(error);
+   useEffect(() => {
++    if (stale) {
++      reloadForNewVersion();
++      return;
++    }
+     reportLovableError(error, { boundary: "tanstack_root_error_component" });
+-  }, [error]);
++  }, [error, stale]);
++  if (stale) {
++    return (
++      <div className="flex min-h-screen items-center justify-center bg-background px-4">
++        <div className="max-w-md text-center">
++          <h1 className="text-xl font-semibold text-foreground">Nova versão do site</h1>
++          <p className="mt-2 text-sm text-muted-foreground">
++            O site foi atualizado enquanto esta página estava aberta. Atualizando para a versão nova…
++          </p>
++          <button
++            onClick={() => window.location.reload()}
++            className="mt-6 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground"
++          >
++            Atualizar agora
++          </button>
++        </div>
++      </div>
++    );
++  }
+   return (
+     <div className="flex min-h-screen items-center justify-center bg-background px-4">
+       <div className="max-w-md text-center">
+diff --git a/src/test/stale-chunk.test.ts b/src/test/stale-chunk.test.ts
+new file mode 100644
+index 0000000..7fa15b5
+--- /dev/null
++++ b/src/test/stale-chunk.test.ts
+@@ -0,0 +1,73 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import {
++  installStaleChunkGuard,
++  isChunkLoadError,
++  recentlyReloaded,
++  reloadForNewVersion,
++} from "@/lib/stale-chunk";
++
++const reload = vi.fn();
++
++beforeEach(() => {
++  window.sessionStorage.clear();
++  reload.mockClear();
++  Object.defineProperty(window, "location", {
++    configurable: true,
++    value: { ...window.location, reload },
++  });
++});
++afterEach(() => vi.restoreAllMocks());
++
++describe("isChunkLoadError", () => {
++  it.each([
++    "Failed to fetch dynamically imported module: https://x.vercel.app/assets/painel.backup-BZs6rQg3.js",
++    "error loading dynamically imported module: /assets/a.js",
++    "Importing a module script failed.",
++    "Unable to preload CSS for /assets/a.css",
++    "Loading chunk 12 failed.",
++  ])("reconhece: %s", (message) => {
++    expect(isChunkLoadError(new TypeError(message))).toBe(true);
++  });
++
++  it("não confunde erro comum de uma tela", () => {
++    expect(
++      isChunkLoadError(new TypeError("Cannot read properties of undefined (reading 'map')")),
++    ).toBe(false);
++    expect(isChunkLoadError(null)).toBe(false);
++    expect(isChunkLoadError(undefined)).toBe(false);
++  });
++});
++
++describe("reloadForNewVersion", () => {
++  it("recarrega uma vez e não entra em laço", () => {
++    expect(reloadForNewVersion(1_000_000)).toBe(true);
++    expect(reload).toHaveBeenCalledTimes(1);
++    expect(recentlyReloaded(1_030_000)).toBe(true);
++    expect(reloadForNewVersion(1_030_000)).toBe(false);
++    expect(reload).toHaveBeenCalledTimes(1);
++  });
++
++  it("depois de 1 minuto pode recarregar de novo", () => {
++    reloadForNewVersion(1_000_000);
++    expect(reloadForNewVersion(1_061_000)).toBe(true);
++    expect(reload).toHaveBeenCalledTimes(2);
++  });
++
++  it("funciona mesmo sem sessionStorage", () => {
++    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
++      throw new Error("bloqueado");
++    });
++    expect(reloadForNewVersion()).toBe(true);
++    expect(reload).toHaveBeenCalledTimes(1);
++  });
++});
++
++describe("installStaleChunkGuard", () => {
++  it("recarrega quando o Vite avisa que um arquivo não carregou", () => {
++    installStaleChunkGuard();
++    const ev = new Event("vite:preloadError", { cancelable: true });
++    window.dispatchEvent(ev);
++    expect(reload).toHaveBeenCalledTimes(1);
++    expect(ev.defaultPrevented).toBe(true);
++  });
++});
+-- 
+2.43.0
+
