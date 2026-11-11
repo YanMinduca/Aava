@@ -55,9 +55,12 @@ export function TicketRemoval({
   const remove = useMutation({
     mutationFn: async () => {
       const { data, error } = await supabase.rpc("remove_event_tickets", {
+        // Sempre os 4 parâmetros: o Supabase (PostgREST) só encontra a função quando o conjunto de nomes enviado
+        // é igual ao da função no banco. O que não se aplica vai vazio/zero e o banco ignora.
         _reg: reg.id,
         _reason: normalizeReason(reason),
-        ...(issued ? { _ticket_ids: [...picked] } : { _quantity: qty }),
+        _ticket_ids: issued ? [...picked] : [],
+        _quantity: issued ? 0 : qty,
       });
       if (error) throw error;
       return data as { refund_due?: number } | null;

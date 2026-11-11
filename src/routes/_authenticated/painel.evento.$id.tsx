@@ -17,6 +17,7 @@ import { EventData } from "@/components/events/EventData";
 import { registrationAge, religionLabel } from "@/lib/event-data";
 import { EventForm, draftFrom } from "@/components/events/EventForm";
 import { TicketRemoval } from "@/components/events/TicketRemoval";
+import { EventInvites } from "@/components/events/EventInvites";
 import { QrScanner, type ScanFeedbackKind } from "@/components/events/QrScanner";
 import { formatShortCode } from "@/lib/images";
 import { playRead, playWarning, unlockAudio } from "@/lib/sounds";
@@ -46,7 +47,10 @@ function EventAdmin() {
   const canManage = can("manage_events");
   const canVerify = canManage || can("verify_event_payments");
   const canCheckin = canManage || can("checkin_events");
-  const allowed = canManage || canVerify || canCheckin;
+  const canInvite = canManage || canVerify || can("issue_event_invites");
+  const allowed = canManage || canVerify || canCheckin || canInvite;
+  // Quem só tem a permissão de criar convites não vê resumo/financeiro (o banco também não libera).
+  const onlyInvite = canInvite && !canManage && !canVerify && !canCheckin;
 
   const event = useQuery({
     queryKey: ["admin-event", id],
@@ -62,7 +66,7 @@ function EventAdmin() {
   });
   const stats = useQuery({
     queryKey: ["admin-event-stats", id],
-    enabled: allowed,
+    enabled: allowed && !onlyInvite,
     queryFn: async () => {
       const { data, error } = await supabase.rpc("event_admin_stats", { _event: id });
       if (error) throw error;
@@ -121,17 +125,29 @@ function EventAdmin() {
         )}
       </div>
 
-      <Tabs defaultValue="resumo" className="mt-6">
+      <Tabs defaultValue={onlyInvite ? "convites" : "resumo"} className="mt-6">
         <TabsList className="flex-wrap">
-          <TabsTrigger value="resumo">Resumo</TabsTrigger>
+          {!onlyInvite && <TabsTrigger value="resumo">Resumo</TabsTrigger>}
           {canVerify && <TabsTrigger value="inscricoes">Inscrições</TabsTrigger>}
+          {canInvite && <TabsTrigger value="convites">Convites</TabsTrigger>}
           {canVerify && <TabsTrigger value="dados">Dados</TabsTrigger>}
           {canCheckin && <TabsTrigger value="checkin">Check-in</TabsTrigger>}
           {canManage && <TabsTrigger value="editar">Editar</TabsTrigger>}
         </TabsList>
 
-        <TabsContent value="resumo"><Summary stats={stats.data} loading={stats.isLoading} /></TabsContent>
+        {!onlyInvite && <TabsContent value="resumo"><Summary stats={stats.data} loading={stats.isLoading} /></TabsContent>}
         {canVerify && <TabsContent value="inscricoes"><Registrations eventId={id} title={e.title} onChange={refreshAll} /></TabsContent>}
+        {canInvite && (
+          <TabsContent value="convites">
+            <EventInvites
+              eventId={id}
+              eventTitle={e.title}
+              eventDate={fmtDateTime(e.starts_at)}
+              lots={data.lots.map((l) => ({ id: l.id, name: l.name }))}
+              onChange={refreshAll}
+            />
+          </TabsContent>
+        )}
         {canVerify && <TabsContent value="dados"><EventData eventId={id} title={e.title} askReligion={e.ask_religion} /></TabsContent>}
         {canCheckin && <TabsContent value="checkin"><CheckIn eventId={id} onChange={refreshAll} /></TabsContent>}
         {canManage && (
@@ -319,7 +335,7 @@ function Registrations({ eventId, title, onChange }: { eventId: string; title: s
               return (
                 <tr key={r.id} className="border-b last:border-0">
                   <td className="p-4">
-                    <p className="font-medium text-foreground">{r.attendee_name}{r.is_child && <Badge variant="outline" className="ml-2">Criança</Badge>}{(r.event_ticket_removals ?? []).length > 0 && <Badge variant="outline" className="ml-2">{(r.event_ticket_removals ?? []).reduce((a, x) => a + x.tickets_removed, 0)} removido(s)</Badge>}</p>
+                    <p className="font-medium text-foreground">{r.attendee_name}{r.is_child && <Badge variant="outline" className="ml-2">Criança</Badge>}{r.is_invite && <Badge variant="outline" className="ml-2">Convite</Badge>}{(r.event_ticket_removals ?? []).length > 0 && <Badge variant="outline" className="ml-2">{(r.event_ticket_removals ?? []).reduce((a, x) => a + x.tickets_removed, 0)} removido(s)</Badge>}</p>
                     <p className="text-xs text-muted-foreground">{r.is_child ? `Filho(a) de ${r.guardian_name ?? "—"}${r.child_age != null ? ` · ${r.child_age} anos` : ""}` : r.attendee_phone}</p>
                   </td>
                   <td className="p-4 text-muted-foreground">{r.event_lots?.name} × {r.quantity}</td>

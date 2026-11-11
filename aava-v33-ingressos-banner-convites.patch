@@ -1,0 +1,933 @@
+diff --git a/src/components/dashboard/DashboardCards.tsx b/src/components/dashboard/DashboardCards.tsx
+index 2b0c147..42f5039 100644
+--- a/src/components/dashboard/DashboardCards.tsx
++++ b/src/components/dashboard/DashboardCards.tsx
+@@ -143,7 +143,7 @@ export function FinanceCards() {
+ /** Quantidade de eventos programados e o mais próximo. */
+ export function EventsCard() {
+   const { can } = useAccess();
+-  const staff = can("manage_events") || can("verify_event_payments") || can("checkin_events");
++  const staff = can("manage_events") || can("verify_event_payments") || can("checkin_events") || can("issue_event_invites");
+   const events = useQuery({
+     queryKey: ["dashboard-events"],
+     queryFn: async () => {
+diff --git a/src/components/events/EventInvites.tsx b/src/components/events/EventInvites.tsx
+new file mode 100644
+index 0000000..cc8095e
+--- /dev/null
++++ b/src/components/events/EventInvites.tsx
+@@ -0,0 +1,273 @@
++import { useEffect, useState } from "react";
++import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
++import { toast } from "sonner";
++import { Download, QrCode, Share2, UserPlus } from "lucide-react";
++import { supabase } from "@/integrations/supabase/client";
++import { Badge } from "@/components/ui/badge";
++import { Button } from "@/components/ui/button";
++import { Input } from "@/components/ui/input";
++import { Label } from "@/components/ui/label";
++import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
++import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
++import { eventError, fmtDateTime, formatCpf, isValidCpf, cpfDigits, TICKET_STATUS } from "@/lib/events";
++import { dateBR } from "@/lib/church";
++import { formatShortCode } from "@/lib/images";
++import { dataUrlToFile, renderTicketPng, ticketFileName } from "@/lib/ticket-image";
++
++type Lot = { id: string; name: string };
++
++type Invite = {
++  registration_id: string;
++  ticket_id: string | null;
++  code: string | null;
++  short_code: string | null;
++  holder_name: string;
++  cpf_end: string;
++  birth_date: string | null;
++  lot: string;
++  registration_status: string;
++  ticket_status: string | null;
++  created_at: string;
++  created_by_me: boolean;
++};
++
++type Shown = { code: string; holderName: string; shortCode: string; lotName: string };
++
++/** Ingresso pronto para salvar/enviar: imagem com o nome do dono e o QR code. */
++function TicketImageDialog({
++  shown,
++  eventTitle,
++  eventDate,
++  onClose,
++}: {
++  shown: Shown | null;
++  eventTitle: string;
++  eventDate: string;
++  onClose: () => void;
++}) {
++  const [url, setUrl] = useState("");
++  const [failed, setFailed] = useState(false);
++
++  useEffect(() => {
++    setUrl("");
++    setFailed(false);
++    if (!shown) return;
++    let cancelled = false;
++    renderTicketPng({
++      code: shown.code,
++      holderName: shown.holderName,
++      eventTitle,
++      eventDate,
++      shortCode: shown.shortCode,
++      lotName: shown.lotName,
++    })
++      .then((u) => !cancelled && setUrl(u))
++      .catch(() => !cancelled && setFailed(true));
++    return () => {
++      cancelled = true;
++    };
++  }, [shown, eventTitle, eventDate]);
++
++  const filename = ticketFileName(shown?.holderName ?? "");
++
++  async function share() {
++    try {
++      const file = await dataUrlToFile(url, filename);
++      if (navigator.canShare?.({ files: [file] })) {
++        await navigator.share({ files: [file], title: `Ingresso — ${eventTitle}` });
++        return;
++      }
++      toast.info("Este aparelho não abre o compartilhamento. Use “Salvar imagem” e envie a foto pelo WhatsApp.");
++    } catch (e) {
++      // Fechar o menu de compartilhar não é erro.
++      if (!(e instanceof DOMException && e.name === "AbortError")) toast.error("Não foi possível compartilhar. Use “Salvar imagem”.");
++    }
++  }
++
++  return (
++    <Dialog open={!!shown} onOpenChange={(o) => !o && onClose()}>
++      <DialogContent className="max-h-[92vh] max-w-md overflow-y-auto">
++        <DialogHeader>
++          <DialogTitle>Ingresso de {shown?.holderName}</DialogTitle>
++          <DialogDescription>Salve a imagem e envie para a pessoa. O QR code é lido na entrada do evento.</DialogDescription>
++        </DialogHeader>
++        {failed ? (
++          <p className="text-sm text-destructive">Não foi possível gerar a imagem. Tente de novo.</p>
++        ) : url ? (
++          <img src={url} alt={`Ingresso de ${shown?.holderName}`} className="mx-auto w-full max-w-xs rounded-lg border" data-testid="invite-ticket-image" />
++        ) : (
++          <div className="mx-auto aspect-[900/1340] w-full max-w-xs animate-pulse rounded-lg bg-muted" />
++        )}
++        <div className="flex flex-wrap justify-center gap-2">
++          <Button asChild disabled={!url}>
++            <a href={url || undefined} download={filename} aria-disabled={!url}>
++              <Download className="h-4 w-4" /> Salvar imagem
++            </a>
++          </Button>
++          <Button type="button" variant="outline" disabled={!url} onClick={share}>
++            <Share2 className="h-4 w-4" /> Compartilhar
++          </Button>
++        </div>
++      </DialogContent>
++    </Dialog>
++  );
++}
++
++/** Aba "Convites": cria ingresso para quem não tem conta (nome, nascimento e CPF) e lista os convites do evento. */
++export function EventInvites({
++  eventId,
++  eventTitle,
++  eventDate,
++  lots,
++  onChange,
++}: {
++  eventId: string;
++  eventTitle: string;
++  eventDate: string;
++  lots: Lot[];
++  onChange: () => void;
++}) {
++  const qc = useQueryClient();
++  const [name, setName] = useState("");
++  const [birth, setBirth] = useState("");
++  const [cpf, setCpf] = useState("");
++  const [lotId, setLotId] = useState(lots[0]?.id ?? "");
++  const [shown, setShown] = useState<Shown | null>(null);
++
++  useEffect(() => {
++    if (!lotId && lots[0]) setLotId(lots[0].id);
++  }, [lots, lotId]);
++
++  const invites = useQuery({
++    queryKey: ["event-invites", eventId],
++    queryFn: async () => {
++      const { data, error } = await supabase.rpc("list_event_invites", { _event: eventId });
++      if (error) throw error;
++      return (data ?? []) as unknown as Invite[];
++    },
++  });
++
++  const cpfOk = isValidCpf(cpf);
++  const nameOk = name.trim().replace(/\s+/g, " ").length >= 3;
++  const birthOk = !!birth && birth <= new Date().toISOString().slice(0, 10) && birth >= "1900-01-01";
++  const canSubmit = nameOk && birthOk && cpfOk && !!lotId;
++
++  const create = useMutation({
++    mutationFn: async () => {
++      const { data, error } = await supabase.rpc("create_event_invite", {
++        _event: eventId,
++        _lot: lotId,
++        _name: name.trim().replace(/\s+/g, " "),
++        _birth_date: birth,
++        _cpf: cpfDigits(cpf),
++      });
++      if (error) throw error;
++      return data as unknown as { holder_name: string; code: string; short_code: string };
++    },
++    onSuccess: (res) => {
++      toast.success("Ingresso criado");
++      setShown({
++        code: res.code,
++        holderName: res.holder_name,
++        shortCode: res.short_code,
++        lotName: lots.find((l) => l.id === lotId)?.name ?? "",
++      });
++      setName("");
++      setBirth("");
++      setCpf("");
++      qc.invalidateQueries({ queryKey: ["event-invites", eventId] });
++      qc.invalidateQueries({ queryKey: ["admin-regs", eventId] });
++      onChange();
++    },
++    onError: (e) => toast.error(eventError(e)),
++  });
++
++  return (
++    <div className="mt-4 grid gap-8 lg:grid-cols-[minmax(0,26rem)_1fr]">
++      <form
++        className="space-y-4 rounded-2xl border bg-card p-5"
++        onSubmit={(e) => {
++          e.preventDefault();
++          if (canSubmit && !create.isPending) create.mutate();
++        }}
++      >
++        <div>
++          <h2 className="flex items-center gap-2 text-lg font-medium text-foreground">
++            <UserPlus className="h-5 w-5 text-primary" aria-hidden /> Criar ingresso
++          </h2>
++          <p className="mt-1 text-sm text-muted-foreground">
++            Para quem não tem conta ou e-mail. O ingresso sai em nome da pessoa, com QR code, e você salva a imagem para enviar.
++          </p>
++        </div>
++        <div className="space-y-1.5">
++          <Label htmlFor="invite-name">Nome completo</Label>
++          <Input id="invite-name" value={name} onChange={(e) => setName(e.target.value)} autoComplete="off" maxLength={120} />
++        </div>
++        <div className="space-y-1.5">
++          <Label htmlFor="invite-birth">Data de nascimento</Label>
++          <Input id="invite-birth" type="date" value={birth} onChange={(e) => setBirth(e.target.value)} max={new Date().toISOString().slice(0, 10)} />
++        </div>
++        <div className="space-y-1.5">
++          <Label htmlFor="invite-cpf">CPF</Label>
++          <Input id="invite-cpf" inputMode="numeric" placeholder="000.000.000-00" value={cpf} onChange={(e) => setCpf(formatCpf(e.target.value))} autoComplete="off" />
++          {cpf && !cpfOk && cpfDigits(cpf).length === 11 && <p className="text-xs text-destructive">CPF inválido. Confira os números.</p>}
++        </div>
++        {lots.length > 1 && (
++          <div className="space-y-1.5">
++            <Label>Lote</Label>
++            <Select value={lotId} onValueChange={setLotId}>
++              <SelectTrigger><SelectValue placeholder="Escolha o lote" /></SelectTrigger>
++              <SelectContent>
++                {lots.map((l) => <SelectItem key={l.id} value={l.id}>{l.name}</SelectItem>)}
++              </SelectContent>
++            </Select>
++          </div>
++        )}
++        <Button type="submit" className="w-full" disabled={!canSubmit || create.isPending}>
++          {create.isPending ? "Criando..." : "Criar ingresso e gerar QR code"}
++        </Button>
++        <p className="text-xs text-muted-foreground">O convite ocupa 1 vaga do lote e não gera cobrança.</p>
++      </form>
++
++      <div>
++        <h2 className="text-lg font-medium text-foreground">Convites criados</h2>
++        <div className="mt-3 divide-y rounded-2xl border bg-card">
++          {invites.isLoading && <p className="p-4 text-sm text-muted-foreground">Carregando...</p>}
++          {!invites.isLoading && (invites.data ?? []).length === 0 && (
++            <p className="p-6 text-center text-sm text-muted-foreground">Nenhum convite criado neste evento.</p>
++          )}
++          {(invites.data ?? []).map((i) => {
++            const cancelled = i.registration_status === "cancelled" || i.ticket_status === "cancelled";
++            return (
++              <div key={i.registration_id} className="flex flex-wrap items-center justify-between gap-3 p-4">
++                <div className="min-w-0">
++                  <p className="truncate font-medium text-foreground">{i.holder_name}</p>
++                  <p className="text-xs text-muted-foreground">
++                    CPF final {i.cpf_end} · nasc. {dateBR(i.birth_date)} · {i.lot} · {fmtDateTime(i.created_at)}
++                  </p>
++                  <div className="mt-1.5 flex flex-wrap gap-1.5">
++                    <Badge variant={cancelled ? "secondary" : "outline"}>
++                      {cancelled ? "Cancelado" : TICKET_STATUS[i.ticket_status ?? ""] ?? "—"}
++                    </Badge>
++                    {i.short_code && <Badge variant="outline" className="font-mono">{formatShortCode(i.short_code)}</Badge>}
++                  </div>
++                </div>
++                {!cancelled && i.code && i.ticket_status === "valid" && (
++                  <Button
++                    size="sm"
++                    variant="outline"
++                    onClick={() => setShown({ code: i.code!, holderName: i.holder_name, shortCode: i.short_code ?? "", lotName: i.lot })}
++                  >
++                    <QrCode className="h-4 w-4" /> Ver ingresso
++                  </Button>
++                )}
++              </div>
++            );
++          })}
++        </div>
++      </div>
++
++      <TicketImageDialog shown={shown} eventTitle={eventTitle} eventDate={eventDate} onClose={() => setShown(null)} />
++    </div>
++  );
++}
+diff --git a/src/components/events/EventMedia.tsx b/src/components/events/EventMedia.tsx
+index 6962012..3653e18 100644
+--- a/src/components/events/EventMedia.tsx
++++ b/src/components/events/EventMedia.tsx
+@@ -1,4 +1,4 @@
+-import { useEffect, useState } from "react";
++import { useEffect, useRef } from "react";
+ import { ExternalLink, Instagram, Play } from "lucide-react";
+ import { supabase } from "@/integrations/supabase/client";
+ import {
+@@ -13,23 +13,10 @@ import {
+ export const eventMediaUrl = (path: string) =>
+   supabase.storage.from(EVENT_MEDIA_BUCKET).getPublicUrl(path).data.publicUrl;
+ 
+-/** true só quando a tela é de computador/tablet (md ou maior). No servidor e no primeiro desenho é false. */
+-function useIsDesktop() {
+-  const [yes, setYes] = useState(false);
+-  useEffect(() => {
+-    const mql = window.matchMedia("(min-width: 768px)");
+-    const sync = () => setYes(mql.matches);
+-    sync();
+-    mql.addEventListener("change", sync);
+-    return () => mql.removeEventListener("change", sync);
+-  }, []);
+-  return yes;
+-}
+-
+ /**
+  * Miniatura do evento (landing, lista de eventos e painel). Foto e vídeo aparecem de verdade (o vídeo mostra o primeiro
+- * quadro). O Instagram não entrega imagem para outros sites, então ele aparece como um cartão; o post de verdade
+- * abre na página do evento. Sem mídia, não desenha nada.
++ * quadro). O post do Instagram aparece de verdade (o conteúdo do post, sem o cabeçalho), não só o ícone.
++ * Sem mídia, não desenha nada.
+  */
+ export function EventThumb({
+   event,
+@@ -75,31 +62,88 @@ export function EventThumb({
+       </div>
+     );
+   }
++  return media.type === "instagram" ? <InstagramThumb url={media.url} className={className} /> : null;
++}
++
++/**
++ * Miniatura de post do Instagram: mostra o conteúdo do post (foto/capa do reel) usando a página de embed oficial,
++ * recortada para esconder o cabeçalho. O iframe não recebe cliques (o cartão inteiro continua sendo o link do evento).
++ * Se o link não puder ser lido, cai no cartão com o ícone.
++ */
++function InstagramThumb({ url, className = "" }: { url: string; className?: string }) {
++  const post = parseInstagramUrl(url);
++  if (!post) {
++    return (
++      <div
++        className={`relative grid aspect-video w-full place-items-center overflow-hidden bg-gradient-to-br from-fuchsia-600 via-rose-500 to-amber-400 text-white ${className}`}
++        data-testid="event-thumb"
++      >
++        <Instagram className="h-9 w-9" aria-hidden />
++      </div>
++    );
++  }
+   return (
+     <div
+-      className={`${box} grid place-items-center bg-gradient-to-br from-fuchsia-600 via-rose-500 to-amber-400 text-white`}
++      className={`relative aspect-square w-full overflow-hidden bg-white ${className}`}
+       data-testid="event-thumb"
+     >
+-      <div className="flex flex-col items-center gap-1.5">
+-        <Instagram className="h-9 w-9" aria-hidden />
+-        <span className="text-sm font-medium">Post do Instagram</span>
+-      </div>
++      <iframe
++        src={instagramEmbedUrl(post)}
++        title="Post do Instagram do evento"
++        loading="lazy"
++        scrolling="no"
++        tabIndex={-1}
++        aria-hidden
++        referrerPolicy="no-referrer"
++        sandbox="allow-scripts allow-same-origin"
++        className="pointer-events-none absolute left-0 top-[-56px] w-full border-0"
++        style={{ height: "calc(100% + 56px + 220px)" }}
++      />
++      <span className="pointer-events-none absolute right-2 top-2 grid h-7 w-7 place-items-center rounded-full bg-black/55 text-white">
++        <Instagram className="h-4 w-4" aria-hidden />
++      </span>
+     </div>
+   );
+ }
+ 
+ /**
+- * Mídia completa, acima da descrição na página do evento. Só aparece no computador: no celular nada é desenhado nem
+- * baixado (a caixa fica com `hidden` e o conteúdo só é montado quando a tela é larga).
++ * Vídeo da página de inscrição: começa sozinho, sem som (celulares e navegadores só liberam reprodução automática
++ * com o vídeo mudo). Os controles ficam visíveis para a pessoa ligar o som ou pausar.
+  */
++function AutoPlayVideo({ src }: { src: string }) {
++  const ref = useRef<HTMLVideoElement>(null);
++  useEffect(() => {
++    const v = ref.current;
++    if (!v) return;
++    // O atributo "muted" do React nem sempre chega ao elemento; no iOS/Chrome sem isso o play() é bloqueado.
++    v.muted = true;
++    v.defaultMuted = true;
++    const p = v.play();
++    if (p && typeof p.catch === "function") p.catch(() => {});
++  }, [src]);
++  return (
++    <video
++      ref={ref}
++      src={src}
++      controls
++      autoPlay
++      muted
++      playsInline
++      preload="auto"
++      className="max-h-[28rem] w-full rounded-2xl border bg-black"
++      data-testid="event-video"
++    />
++  );
++}
++
++/** Mídia completa, acima da descrição na página do evento. Aparece no celular e no computador. */
+ export function EventMediaFull({ event }: { event: EventMediaFields }) {
+   const media = eventMediaFrom(event);
+-  const desktop = useIsDesktop();
+   if (!media) return null;
+ 
+   return (
+-    <div className="mt-8 hidden md:block" data-testid="event-media-full">
+-      {desktop && media.type === "image" && (
++    <div className="mt-8" data-testid="event-media-full">
++      {media.type === "image" && (
+         <img
+           src={eventMediaUrl(media.path)}
+           alt=""
+@@ -107,16 +151,8 @@ export function EventMediaFull({ event }: { event: EventMediaFields }) {
+           className="max-h-[28rem] w-full rounded-2xl border object-cover"
+         />
+       )}
+-      {desktop && media.type === "video" && (
+-        <video
+-          src={eventMediaUrl(media.path)}
+-          controls
+-          playsInline
+-          preload="metadata"
+-          className="max-h-[28rem] w-full rounded-2xl border bg-black"
+-        />
+-      )}
+-      {desktop && media.type === "instagram" && <InstagramEmbed url={media.url} />}
++      {media.type === "video" && <AutoPlayVideo src={eventMediaUrl(media.path)} />}
++      {media.type === "instagram" && <InstagramEmbed url={media.url} />}
+     </div>
+   );
+ }
+diff --git a/src/components/events/MyTickets.tsx b/src/components/events/MyTickets.tsx
+index 3a46511..43c3602 100644
+--- a/src/components/events/MyTickets.tsx
++++ b/src/components/events/MyTickets.tsx
+@@ -115,6 +115,7 @@ export function MyTickets({ uid }: { uid: string }) {
+         .from("event_registrations")
+         .select("*, events(title, slug, starts_at, location), event_lots(name), event_payments(*), event_tickets(*), event_ticket_removals(*)")
+         .eq("user_id", uid)
++        .eq("is_invite", false)
+         .order("created_at", { ascending: false });
+       if (error) throw error;
+       return data ?? [];
+diff --git a/src/components/events/TicketRemoval.tsx b/src/components/events/TicketRemoval.tsx
+index c1ab0c8..0b9752b 100644
+--- a/src/components/events/TicketRemoval.tsx
++++ b/src/components/events/TicketRemoval.tsx
+@@ -55,9 +55,12 @@ export function TicketRemoval({
+   const remove = useMutation({
+     mutationFn: async () => {
+       const { data, error } = await supabase.rpc("remove_event_tickets", {
++        // Sempre os 4 parâmetros: o Supabase (PostgREST) só encontra a função quando o conjunto de nomes enviado
++        // é igual ao da função no banco. O que não se aplica vai vazio/zero e o banco ignora.
+         _reg: reg.id,
+         _reason: normalizeReason(reason),
+-        ...(issued ? { _ticket_ids: [...picked] } : { _quantity: qty }),
++        _ticket_ids: issued ? [...picked] : [],
++        _quantity: issued ? 0 : qty,
+       });
+       if (error) throw error;
+       return data as { refund_due?: number } | null;
+diff --git a/src/integrations/supabase/types.ts b/src/integrations/supabase/types.ts
+index 24a462f..d6b4162 100644
+--- a/src/integrations/supabase/types.ts
++++ b/src/integrations/supabase/types.ts
+@@ -332,7 +332,9 @@ export type Database = {
+           image_consent: boolean
+           image_consent_at: string | null
+           installments: number
++          invited_by: string | null
+           is_child: boolean
++          is_invite: boolean
+           lot_id: string
+           member_id: string | null
+           quantity: number
+@@ -361,7 +363,9 @@ export type Database = {
+           image_consent?: boolean
+           image_consent_at?: string | null
+           installments?: number
++          invited_by?: string | null
+           is_child?: boolean
++          is_invite?: boolean
+           lot_id: string
+           member_id?: string | null
+           quantity: number
+@@ -390,7 +394,9 @@ export type Database = {
+           image_consent?: boolean
+           image_consent_at?: string | null
+           installments?: number
++          invited_by?: string | null
+           is_child?: boolean
++          is_invite?: boolean
+           lot_id?: string
+           member_id?: string | null
+           quantity?: number
+@@ -1401,6 +1407,17 @@ export type Database = {
+       trash_restore: { Args: { _id: number }; Returns: Json }
+       trash_stats: { Args: never; Returns: Json }
+       release_event_registration: { Args: { _reg: string }; Returns: undefined }
++      create_event_invite: {
++        Args: {
++          _birth_date: string
++          _cpf: string
++          _event: string
++          _lot: string
++          _name: string
++        }
++        Returns: Json
++      }
++      list_event_invites: { Args: { _event: string }; Returns: Json }
+       remove_event_tickets: {
+         Args: {
+           _quantity?: number
+diff --git a/src/lib/church.ts b/src/lib/church.ts
+index fceb427..877671b 100644
+--- a/src/lib/church.ts
++++ b/src/lib/church.ts
+@@ -48,6 +48,7 @@ export const PERMISSION_GROUPS: { label: string; perms: { key: string; label: st
+       { key: "manage_events", label: "Criar e editar eventos, ver inscrições e gráficos" },
+       { key: "verify_event_payments", label: "Conferir pagamentos, parcelas e liberar ingressos" },
+       { key: "checkin_events", label: "Ler QR code e marcar presença nos eventos" },
++      { key: "issue_event_invites", label: "Criar ingresso/convite manual para quem não tem conta (nome, nascimento e CPF)" },
+     ],
+   },
+   {
+diff --git a/src/lib/events.ts b/src/lib/events.ts
+index b32b044..0b348f7 100644
+--- a/src/lib/events.ts
++++ b/src/lib/events.ts
+@@ -68,6 +68,8 @@ const ERRORS: Record<string, string> = {
+   invalid_quantity: "Quantidade de ingressos inválida.",
+   invalid_cpf: "CPF inválido. Confira os números.",
+   limit_exceeded: "Você já atingiu o limite de inscrições por pessoa neste evento.",
++  invalid_invite_name: "Informe o nome completo de quem vai receber o ingresso.",
++  invite_cpf_already_registered: "Já existe ingresso ou inscrição ativa com este CPF neste evento.",
+   sold_out: "As vagas deste lote acabaram (ou não há vagas suficientes para essa quantidade).",
+   invalid_installments: "Número de parcelas não permitido.",
+   cpf_in_use: "Este CPF já está cadastrado em outra conta.",
+@@ -98,6 +100,7 @@ const ERRORS: Record<string, string> = {
+ export function eventError(e: unknown) {
+   const msg = e instanceof Error ? e.message : typeof e === "object" && e && "message" in e ? String((e as { message: unknown }).message) : "";
+   if (msg.includes("events_slug_key")) return "Já existe um evento com esse endereço (slug). Mude o nome ou o endereço.";
++  if (msg.includes("event_registrations_invite_cpf_key")) return ERRORS["invite_cpf_already_registered"]!;
+   if (msg.includes("event_registrations_child_cpf_key")) return ERRORS["child_already_registered"]!;
+   return ERRORS[msg] ?? (msg || "Algo deu errado. Tente novamente.");
+ }
+diff --git a/src/lib/ticket-image.ts b/src/lib/ticket-image.ts
+new file mode 100644
+index 0000000..33cdfec
+--- /dev/null
++++ b/src/lib/ticket-image.ts
+@@ -0,0 +1,132 @@
++import QRCode from "qrcode";
++
++export type TicketImageInput = {
++  /** Conteúdo do QR (o código do ingresso lido pelo check-in). */
++  code: string;
++  holderName: string;
++  eventTitle: string;
++  /** Data/hora do evento já formatada (opcional). */
++  eventDate?: string;
++  /** Código curto (para digitar na entrada). */
++  shortCode?: string;
++  lotName?: string;
++};
++
++export const ticketFileName = (name: string) =>
++  `ingresso-${
++    name
++      .normalize("NFD")
++      .replace(/[\u0300-\u036f]/g, "")
++      .replace(/[^a-zA-Z0-9]+/g, "-")
++      .replace(/^-|-$/g, "")
++      .toLowerCase() || "convidado"
++  }.png`;
++
++function loadImage(src: string): Promise<HTMLImageElement> {
++  return new Promise((resolve, reject) => {
++    const img = new Image();
++    img.onload = () => resolve(img);
++    img.onerror = () => reject(new Error("qr_image_failed"));
++    img.src = src;
++  });
++}
++
++/** Quebra o texto em linhas que cabem em maxWidth (no máximo maxLines; o excesso vira reticências). */
++function wrapLines(ctx: CanvasRenderingContext2D, text: string, maxWidth: number, maxLines: number): string[] {
++  const words = text.split(/\s+/).filter(Boolean);
++  const lines: string[] = [];
++  let cur = "";
++  for (const w of words) {
++    const test = cur ? `${cur} ${w}` : w;
++    if (ctx.measureText(test).width <= maxWidth || !cur) cur = test;
++    else {
++      lines.push(cur);
++      cur = w;
++    }
++  }
++  if (cur) lines.push(cur);
++  if (lines.length > maxLines) {
++    const kept = lines.slice(0, maxLines);
++    kept[maxLines - 1] = `${kept[maxLines - 1]!.replace(/\s*\S*$/, "")}…`;
++    return kept;
++  }
++  return lines;
++}
++
++/**
++ * Desenha o ingresso como imagem PNG (nome do dono, evento, QR code e código curto), pronta para salvar na galeria
++ * e enviar por WhatsApp. Devolve uma data URL.
++ */
++export async function renderTicketPng(i: TicketImageInput): Promise<string> {
++  const W = 900;
++  const H = 1340;
++  const canvas = document.createElement("canvas");
++  canvas.width = W;
++  canvas.height = H;
++  const ctx = canvas.getContext("2d");
++  if (!ctx) throw new Error("canvas_unavailable");
++
++  ctx.fillStyle = "#ffffff";
++  ctx.fillRect(0, 0, W, H);
++
++  // Faixa de cima
++  ctx.fillStyle = "#1f2937";
++  ctx.fillRect(0, 0, W, 210);
++  ctx.fillStyle = "#ffffff";
++  ctx.textAlign = "center";
++  ctx.font = "600 30px system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
++  ctx.fillText("INGRESSO", W / 2, 70);
++  ctx.font = "700 46px system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
++  const titleLines = wrapLines(ctx, i.eventTitle, W - 120, 2);
++  titleLines.forEach((l, n) => ctx.fillText(l, W / 2, 130 + n * 54));
++  if (i.eventDate) {
++    ctx.font = "400 28px system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
++    ctx.fillStyle = "#d1d5db";
++    ctx.fillText(i.eventDate, W / 2, titleLines.length > 1 ? 245 : 190);
++  }
++
++  // Nome do dono do ingresso
++  ctx.fillStyle = "#6b7280";
++  ctx.font = "400 26px system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
++  ctx.fillText("Ingresso de", W / 2, 320);
++  ctx.fillStyle = "#111827";
++  ctx.font = "700 52px system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
++  const nameLines = wrapLines(ctx, i.holderName, W - 100, 2);
++  nameLines.forEach((l, n) => ctx.fillText(l, W / 2, 385 + n * 62));
++  const afterName = 385 + (nameLines.length - 1) * 62;
++
++  // QR code
++  const qrUrl = await QRCode.toDataURL(i.code, { width: 640, margin: 1, errorCorrectionLevel: "M" });
++  const qr = await loadImage(qrUrl);
++  const qrY = afterName + 50;
++  ctx.fillStyle = "#ffffff";
++  ctx.strokeStyle = "#e5e7eb";
++  ctx.lineWidth = 4;
++  ctx.strokeRect(110, qrY - 10, 680, 680);
++  ctx.drawImage(qr, 130, qrY + 10, 640, 640);
++
++  // Código curto
++  const textY = qrY + 720;
++  if (i.shortCode) {
++    const c = i.shortCode.toUpperCase();
++    const pretty = c.length === 8 ? `${c.slice(0, 4)}-${c.slice(4)}` : c;
++    ctx.fillStyle = "#111827";
++    ctx.font = "700 48px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
++    ctx.fillText(pretty, W / 2, textY);
++    ctx.fillStyle = "#6b7280";
++    ctx.font = "400 24px system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
++    ctx.fillText("Se a câmera não ler o QR, informe este código na entrada.", W / 2, textY + 42);
++  }
++  if (i.lotName) {
++    ctx.fillStyle = "#6b7280";
++    ctx.font = "400 24px system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
++    ctx.fillText(i.lotName, W / 2, H - 30);
++  }
++  return canvas.toDataURL("image/png");
++}
++
++/** Converte a data URL em arquivo (para o menu de compartilhar do celular). */
++export async function dataUrlToFile(dataUrl: string, filename: string): Promise<File> {
++  const blob = await (await fetch(dataUrl)).blob();
++  return new File([blob], filename, { type: "image/png" });
++}
+diff --git a/src/routes/_authenticated/painel.evento.$id.tsx b/src/routes/_authenticated/painel.evento.$id.tsx
+index b9532bc..ba4d709 100644
+--- a/src/routes/_authenticated/painel.evento.$id.tsx
++++ b/src/routes/_authenticated/painel.evento.$id.tsx
+@@ -17,6 +17,7 @@ import { EventData } from "@/components/events/EventData";
+ import { registrationAge, religionLabel } from "@/lib/event-data";
+ import { EventForm, draftFrom } from "@/components/events/EventForm";
+ import { TicketRemoval } from "@/components/events/TicketRemoval";
++import { EventInvites } from "@/components/events/EventInvites";
+ import { QrScanner, type ScanFeedbackKind } from "@/components/events/QrScanner";
+ import { formatShortCode } from "@/lib/images";
+ import { playRead, playWarning, unlockAudio } from "@/lib/sounds";
+@@ -46,7 +47,10 @@ function EventAdmin() {
+   const canManage = can("manage_events");
+   const canVerify = canManage || can("verify_event_payments");
+   const canCheckin = canManage || can("checkin_events");
+-  const allowed = canManage || canVerify || canCheckin;
++  const canInvite = canManage || canVerify || can("issue_event_invites");
++  const allowed = canManage || canVerify || canCheckin || canInvite;
++  // Quem só tem a permissão de criar convites não vê resumo/financeiro (o banco também não libera).
++  const onlyInvite = canInvite && !canManage && !canVerify && !canCheckin;
+ 
+   const event = useQuery({
+     queryKey: ["admin-event", id],
+@@ -62,7 +66,7 @@ function EventAdmin() {
+   });
+   const stats = useQuery({
+     queryKey: ["admin-event-stats", id],
+-    enabled: allowed,
++    enabled: allowed && !onlyInvite,
+     queryFn: async () => {
+       const { data, error } = await supabase.rpc("event_admin_stats", { _event: id });
+       if (error) throw error;
+@@ -121,17 +125,29 @@ function EventAdmin() {
+         )}
+       </div>
+ 
+-      <Tabs defaultValue="resumo" className="mt-6">
++      <Tabs defaultValue={onlyInvite ? "convites" : "resumo"} className="mt-6">
+         <TabsList className="flex-wrap">
+-          <TabsTrigger value="resumo">Resumo</TabsTrigger>
++          {!onlyInvite && <TabsTrigger value="resumo">Resumo</TabsTrigger>}
+           {canVerify && <TabsTrigger value="inscricoes">Inscrições</TabsTrigger>}
++          {canInvite && <TabsTrigger value="convites">Convites</TabsTrigger>}
+           {canVerify && <TabsTrigger value="dados">Dados</TabsTrigger>}
+           {canCheckin && <TabsTrigger value="checkin">Check-in</TabsTrigger>}
+           {canManage && <TabsTrigger value="editar">Editar</TabsTrigger>}
+         </TabsList>
+ 
+-        <TabsContent value="resumo"><Summary stats={stats.data} loading={stats.isLoading} /></TabsContent>
++        {!onlyInvite && <TabsContent value="resumo"><Summary stats={stats.data} loading={stats.isLoading} /></TabsContent>}
+         {canVerify && <TabsContent value="inscricoes"><Registrations eventId={id} title={e.title} onChange={refreshAll} /></TabsContent>}
++        {canInvite && (
++          <TabsContent value="convites">
++            <EventInvites
++              eventId={id}
++              eventTitle={e.title}
++              eventDate={fmtDateTime(e.starts_at)}
++              lots={data.lots.map((l) => ({ id: l.id, name: l.name }))}
++              onChange={refreshAll}
++            />
++          </TabsContent>
++        )}
+         {canVerify && <TabsContent value="dados"><EventData eventId={id} title={e.title} askReligion={e.ask_religion} /></TabsContent>}
+         {canCheckin && <TabsContent value="checkin"><CheckIn eventId={id} onChange={refreshAll} /></TabsContent>}
+         {canManage && (
+@@ -319,7 +335,7 @@ function Registrations({ eventId, title, onChange }: { eventId: string; title: s
+               return (
+                 <tr key={r.id} className="border-b last:border-0">
+                   <td className="p-4">
+-                    <p className="font-medium text-foreground">{r.attendee_name}{r.is_child && <Badge variant="outline" className="ml-2">Criança</Badge>}{(r.event_ticket_removals ?? []).length > 0 && <Badge variant="outline" className="ml-2">{(r.event_ticket_removals ?? []).reduce((a, x) => a + x.tickets_removed, 0)} removido(s)</Badge>}</p>
++                    <p className="font-medium text-foreground">{r.attendee_name}{r.is_child && <Badge variant="outline" className="ml-2">Criança</Badge>}{r.is_invite && <Badge variant="outline" className="ml-2">Convite</Badge>}{(r.event_ticket_removals ?? []).length > 0 && <Badge variant="outline" className="ml-2">{(r.event_ticket_removals ?? []).reduce((a, x) => a + x.tickets_removed, 0)} removido(s)</Badge>}</p>
+                     <p className="text-xs text-muted-foreground">{r.is_child ? `Filho(a) de ${r.guardian_name ?? "—"}${r.child_age != null ? ` · ${r.child_age} anos` : ""}` : r.attendee_phone}</p>
+                   </td>
+                   <td className="p-4 text-muted-foreground">{r.event_lots?.name} × {r.quantity}</td>
+diff --git a/src/routes/_authenticated/painel.eventos.tsx b/src/routes/_authenticated/painel.eventos.tsx
+index 81d7790..1592eec 100644
+--- a/src/routes/_authenticated/painel.eventos.tsx
++++ b/src/routes/_authenticated/painel.eventos.tsx
+@@ -21,7 +21,7 @@ function EventsAdmin() {
+   const { can, isLoading } = useAccess();
+   const navigate = useNavigate();
+   const [creating, setCreating] = useState(false);
+-  const allowed = can("manage_events") || can("verify_event_payments") || can("checkin_events");
++  const allowed = can("manage_events") || can("verify_event_payments") || can("checkin_events") || can("issue_event_invites");
+   const events = useQuery({
+     queryKey: ["admin-events"],
+     enabled: allowed,
+diff --git a/src/routes/_authenticated/painel.tsx b/src/routes/_authenticated/painel.tsx
+index ce105bd..b40c592 100644
+--- a/src/routes/_authenticated/painel.tsx
++++ b/src/routes/_authenticated/painel.tsx
+@@ -78,7 +78,7 @@ function PanelLayout() {
+     { to: "/painel/membros", label: "Membros", icon: Users, show: can("view_members") },
+     { to: "/painel/visitantes", label: "Visitantes", icon: UserRoundPlus, show: can("view_members") },
+     { to: "/painel/departamentos", label: "Departamentos", icon: Network, show: canViewDepartments },
+-    { to: "/painel/eventos", label: "Eventos", icon: CalendarDays, show: can("manage_events") || can("verify_event_payments") || can("checkin_events") },
++    { to: "/painel/eventos", label: "Eventos", icon: CalendarDays, show: can("manage_events") || can("verify_event_payments") || can("checkin_events") || can("issue_event_invites") },
+     { to: "/painel/financeiro", label: "Financeiro", icon: Wallet, show: can("view_finance") },
+     {
+       to: "/painel/permissoes",
+diff --git a/src/test/ticket-removal.test.tsx b/src/test/ticket-removal.test.tsx
+index 84d5d7a..79b072b 100644
+--- a/src/test/ticket-removal.test.tsx
++++ b/src/test/ticket-removal.test.tsx
+@@ -80,6 +80,7 @@ describe("remoção de ingressos no painel", () => {
+         _reg: "r1",
+         _reason: "Pessoa desistiu",
+         _ticket_ids: ["t2"],
++        _quantity: 0,
+       }),
+     );
+     await waitFor(() => expect(onChange).toHaveBeenCalled());
+@@ -96,6 +97,7 @@ describe("remoção de ingressos no painel", () => {
+       expect(h.rpc).toHaveBeenCalledWith("remove_event_tickets", {
+         _reg: "r1",
+         _reason: "Duplicada",
++        _ticket_ids: [],
+         _quantity: 2,
+       }),
+     );
+diff --git a/supabase/migrations/20261111150000_event_manual_invites.sql b/supabase/migrations/20261111150000_event_manual_invites.sql
+new file mode 100644
+index 0000000..bcc7e22
+--- /dev/null
++++ b/supabase/migrations/20261111150000_event_manual_invites.sql
+@@ -0,0 +1,107 @@
++-- Ingresso criado manualmente pela liderança (convite): para quem não tem e-mail/conta e pediu um convite.
++-- Pede nome, data de nascimento e CPF; gera 1 ingresso válido com QR code em nome do convidado.
++--
++-- Quem pode criar: CEO, Pastor Presidente (têm todas as permissões), quem tem "manage_events" ou "verify_event_payments"
++-- e quem receber a nova permissão "issue_event_invites" em Usuários e permissões.
++-- O convite ocupa 1 vaga do lote escolhido (respeita a capacidade) e não gera cobrança (valor 0).
++-- A inscrição fica registrada em nome de quem criou (user_id) com is_invite = true, e não aparece em "Meus ingressos"
++-- de quem criou. Na lista de inscrições do evento ela aparece com a etiqueta "Convite".
++-- Idempotente.
++
++alter table public.event_registrations
++  add column if not exists is_invite boolean not null default false,
++  add column if not exists invited_by uuid;
++
++-- Mesma pessoa (CPF) não recebe dois convites/inscrições ativas no mesmo evento.
++create unique index if not exists event_registrations_invite_cpf_key
++  on public.event_registrations (event_id, attendee_cpf)
++  where is_invite and status <> 'cancelled';
++
++create or replace function public.create_event_invite(
++  _event uuid, _lot uuid, _name text, _birth_date date, _cpf text
++)
++returns jsonb
++language plpgsql
++security definer
++set search_path to 'public'
++as $function$
++declare
++  uid uuid := auth.uid();
++  v_name text := regexp_replace(btrim(coalesce(_name, '')), '\s+', ' ', 'g');
++  d text := regexp_replace(coalesce(_cpf, ''), '\D', '', 'g');
++  lt public.event_lots%rowtype;
++  reg uuid;
++  t public.event_tickets%rowtype;
++begin
++  if uid is null then raise exception 'login_required'; end if;
++  if not (public.has_permission(uid, 'manage_events')
++          or public.has_permission(uid, 'verify_event_payments')
++          or public.has_permission(uid, 'issue_event_invites')) then
++    raise exception 'Acesso negado';
++  end if;
++  if char_length(v_name) < 3 or char_length(v_name) > 120 then raise exception 'invalid_invite_name'; end if;
++  if _birth_date is null or _birth_date > current_date or _birth_date < date '1900-01-01' then
++    raise exception 'invalid_birth_date';
++  end if;
++  if not public.is_valid_cpf(d) then raise exception 'invalid_cpf'; end if;
++  if not exists (select 1 from public.events where id = _event) then raise exception 'event_not_found'; end if;
++
++  select * into lt from public.event_lots where id = _lot and event_id = _event for update;
++  if not found then raise exception 'lot_not_found'; end if;
++  if lt.capacity is not null and public.lot_taken(lt.id) + 1 > lt.capacity then raise exception 'sold_out'; end if;
++
++  if exists (select 1 from public.event_registrations r
++              where r.event_id = _event and r.status <> 'cancelled'
++                and regexp_replace(coalesce(r.attendee_cpf, ''), '\D', '', 'g') = d) then
++    raise exception 'invite_cpf_already_registered';
++  end if;
++
++  insert into public.event_registrations (event_id, lot_id, user_id, member_id, attendee_name, attendee_cpf, attendee_birth_date,
++                                          quantity, unit_price, total, installments, status, is_invite, invited_by)
++  values (_event, _lot, uid, null, v_name, d, _birth_date, 1, 0, 0, 1, 'confirmed', true, uid)
++  returning id into reg;
++
++  perform public.issue_event_tickets(reg);
++  select * into t from public.event_tickets where registration_id = reg order by seq limit 1;
++
++  return jsonb_build_object('registration_id', reg, 'ticket_id', t.id, 'code', t.code,
++                            'short_code', t.short_code, 'holder_name', t.holder_name);
++end $function$;
++
++revoke all on function public.create_event_invite(uuid, uuid, text, date, text) from public, anon;
++grant execute on function public.create_event_invite(uuid, uuid, text, date, text) to authenticated, service_role;
++
++-- Lista os convites do evento para quem pode criá-los (CPF só com os 2 últimos dígitos).
++create or replace function public.list_event_invites(_event uuid)
++returns jsonb
++language plpgsql
++stable
++security definer
++set search_path to 'public'
++as $function$
++declare uid uuid := auth.uid();
++begin
++  if uid is null then raise exception 'login_required'; end if;
++  if not (public.has_permission(uid, 'manage_events')
++          or public.has_permission(uid, 'verify_event_payments')
++          or public.has_permission(uid, 'issue_event_invites')) then
++    raise exception 'Acesso negado';
++  end if;
++  return coalesce((
++    select jsonb_agg(jsonb_build_object(
++      'registration_id', r.id, 'ticket_id', t.id, 'code', t.code, 'short_code', t.short_code,
++      'holder_name', r.attendee_name, 'cpf_end', right(regexp_replace(coalesce(r.attendee_cpf, ''), '\D', '', 'g'), 2),
++      'birth_date', r.attendee_birth_date, 'lot', l.name, 'registration_status', r.status,
++      'ticket_status', t.status, 'created_at', r.created_at, 'created_by_me', r.invited_by = uid)
++      order by r.created_at desc)
++    from public.event_registrations r
++    join public.event_lots l on l.id = r.lot_id
++    left join public.event_tickets t on t.registration_id = r.id and t.seq = 1
++    where r.event_id = _event and r.is_invite), '[]'::jsonb);
++end $function$;
++
++revoke all on function public.list_event_invites(uuid) from public, anon;
++grant execute on function public.list_event_invites(uuid) to authenticated, service_role;
++
++-- Faz o Supabase (PostgREST) reconhecer as funções novas/alteradas na hora.
++notify pgrst, 'reload schema';

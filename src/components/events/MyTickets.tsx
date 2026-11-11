@@ -115,6 +115,7 @@ export function MyTickets({ uid }: { uid: string }) {
         .from("event_registrations")
         .select("*, events(title, slug, starts_at, location), event_lots(name), event_payments(*), event_tickets(*), event_ticket_removals(*)")
         .eq("user_id", uid)
+        .eq("is_invite", false)
         .order("created_at", { ascending: false });
       if (error) throw error;
       return data ?? [];

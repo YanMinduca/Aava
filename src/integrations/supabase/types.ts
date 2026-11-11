@@ -332,7 +332,9 @@ export type Database = {
           image_consent: boolean
           image_consent_at: string | null
           installments: number
+          invited_by: string | null
           is_child: boolean
+          is_invite: boolean
           lot_id: string
           member_id: string | null
           quantity: number
@@ -361,7 +363,9 @@ export type Database = {
           image_consent?: boolean
           image_consent_at?: string | null
           installments?: number
+          invited_by?: string | null
           is_child?: boolean
+          is_invite?: boolean
           lot_id: string
           member_id?: string | null
           quantity: number
@@ -390,7 +394,9 @@ export type Database = {
           image_consent?: boolean
           image_consent_at?: string | null
           installments?: number
+          invited_by?: string | null
           is_child?: boolean
+          is_invite?: boolean
           lot_id?: string
           member_id?: string | null
           quantity?: number
@@ -1401,6 +1407,17 @@ export type Database = {
       trash_restore: { Args: { _id: number }; Returns: Json }
       trash_stats: { Args: never; Returns: Json }
       release_event_registration: { Args: { _reg: string }; Returns: undefined }
+      create_event_invite: {
+        Args: {
+          _birth_date: string
+          _cpf: string
+          _event: string
+          _lot: string
+          _name: string
+        }
+        Returns: Json
+      }
+      list_event_invites: { Args: { _event: string }; Returns: Json }
       remove_event_tickets: {
         Args: {
           _quantity?: number

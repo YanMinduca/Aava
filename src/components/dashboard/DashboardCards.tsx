@@ -143,7 +143,7 @@ export function FinanceCards() {
 /** Quantidade de eventos programados e o mais próximo. */
 export function EventsCard() {
   const { can } = useAccess();
-  const staff = can("manage_events") || can("verify_event_payments") || can("checkin_events");
+  const staff = can("manage_events") || can("verify_event_payments") || can("checkin_events") || can("issue_event_invites");
   const events = useQuery({
     queryKey: ["dashboard-events"],
     queryFn: async () => {

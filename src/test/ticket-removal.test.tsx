@@ -80,6 +80,7 @@ describe("remoção de ingressos no painel", () => {
         _reg: "r1",
         _reason: "Pessoa desistiu",
         _ticket_ids: ["t2"],
+        _quantity: 0,
       }),
     );
     await waitFor(() => expect(onChange).toHaveBeenCalled());
@@ -96,6 +97,7 @@ describe("remoção de ingressos no painel", () => {
       expect(h.rpc).toHaveBeenCalledWith("remove_event_tickets", {
         _reg: "r1",
         _reason: "Duplicada",
+        _ticket_ids: [],
         _quantity: 2,
       }),
     );

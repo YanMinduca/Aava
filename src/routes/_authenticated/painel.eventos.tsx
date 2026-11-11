@@ -21,7 +21,7 @@ function EventsAdmin() {
   const { can, isLoading } = useAccess();
   const navigate = useNavigate();
   const [creating, setCreating] = useState(false);
-  const allowed = can("manage_events") || can("verify_event_payments") || can("checkin_events");
+  const allowed = can("manage_events") || can("verify_event_payments") || can("checkin_events") || can("issue_event_invites");
   const events = useQuery({
     queryKey: ["admin-events"],
     enabled: allowed,

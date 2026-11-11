@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef } from "react";
 import { ExternalLink, Instagram, Play } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import {
@@ -13,23 +13,10 @@ import {
 export const eventMediaUrl = (path: string) =>
   supabase.storage.from(EVENT_MEDIA_BUCKET).getPublicUrl(path).data.publicUrl;
 
-/** true só quando a tela é de computador/tablet (md ou maior). No servidor e no primeiro desenho é false. */
-function useIsDesktop() {
-  const [yes, setYes] = useState(false);
-  useEffect(() => {
-    const mql = window.matchMedia("(min-width: 768px)");
-    const sync = () => setYes(mql.matches);
-    sync();
-    mql.addEventListener("change", sync);
-    return () => mql.removeEventListener("change", sync);
-  }, []);
-  return yes;
-}
-
 /**
  * Miniatura do evento (landing, lista de eventos e painel). Foto e vídeo aparecem de verdade (o vídeo mostra o primeiro
- * quadro). O Instagram não entrega imagem para outros sites, então ele aparece como um cartão; o post de verdade
- * abre na página do evento. Sem mídia, não desenha nada.
+ * quadro). O post do Instagram aparece de verdade (o conteúdo do post, sem o cabeçalho), não só o ícone.
+ * Sem mídia, não desenha nada.
  */
 export function EventThumb({
   event,
@@ -75,31 +62,88 @@ export function EventThumb({
       </div>
     );
   }
+  return media.type === "instagram" ? <InstagramThumb url={media.url} className={className} /> : null;
+}
+
+/**
+ * Miniatura de post do Instagram: mostra o conteúdo do post (foto/capa do reel) usando a página de embed oficial,
+ * recortada para esconder o cabeçalho. O iframe não recebe cliques (o cartão inteiro continua sendo o link do evento).
+ * Se o link não puder ser lido, cai no cartão com o ícone.
+ */
+function InstagramThumb({ url, className = "" }: { url: string; className?: string }) {
+  const post = parseInstagramUrl(url);
+  if (!post) {
+    return (
+      <div
+        className={`relative grid aspect-video w-full place-items-center overflow-hidden bg-gradient-to-br from-fuchsia-600 via-rose-500 to-amber-400 text-white ${className}`}
+        data-testid="event-thumb"
+      >
+        <Instagram className="h-9 w-9" aria-hidden />
+      </div>
+    );
+  }
   return (
     <div
-      className={`${box} grid place-items-center bg-gradient-to-br from-fuchsia-600 via-rose-500 to-amber-400 text-white`}
+      className={`relative aspect-square w-full overflow-hidden bg-white ${className}`}
       data-testid="event-thumb"
     >
-      <div className="flex flex-col items-center gap-1.5">
-        <Instagram className="h-9 w-9" aria-hidden />
-        <span className="text-sm font-medium">Post do Instagram</span>
-      </div>
+      <iframe
+        src={instagramEmbedUrl(post)}
+        title="Post do Instagram do evento"
+        loading="lazy"
+        scrolling="no"
+        tabIndex={-1}
+        aria-hidden
+        referrerPolicy="no-referrer"
+        sandbox="allow-scripts allow-same-origin"
+        className="pointer-events-none absolute left-0 top-[-56px] w-full border-0"
+        style={{ height: "calc(100% + 56px + 220px)" }}
+      />
+      <span className="pointer-events-none absolute right-2 top-2 grid h-7 w-7 place-items-center rounded-full bg-black/55 text-white">
+        <Instagram className="h-4 w-4" aria-hidden />
+      </span>
     </div>
   );
 }
 
 /**
- * Mídia completa, acima da descrição na página do evento. Só aparece no computador: no celular nada é desenhado nem
- * baixado (a caixa fica com `hidden` e o conteúdo só é montado quando a tela é larga).
+ * Vídeo da página de inscrição: começa sozinho, sem som (celulares e navegadores só liberam reprodução automática
+ * com o vídeo mudo). Os controles ficam visíveis para a pessoa ligar o som ou pausar.
  */
+function AutoPlayVideo({ src }: { src: string }) {
+  const ref = useRef<HTMLVideoElement>(null);
+  useEffect(() => {
+    const v = ref.current;
+    if (!v) return;
+    // O atributo "muted" do React nem sempre chega ao elemento; no iOS/Chrome sem isso o play() é bloqueado.
+    v.muted = true;
+    v.defaultMuted = true;
+    const p = v.play();
+    if (p && typeof p.catch === "function") p.catch(() => {});
+  }, [src]);
+  return (
+    <video
+      ref={ref}
+      src={src}
+      controls
+      autoPlay
+      muted
+      playsInline
+      preload="auto"
+      className="max-h-[28rem] w-full rounded-2xl border bg-black"
+      data-testid="event-video"
+    />
+  );
+}
+
+/** Mídia completa, acima da descrição na página do evento. Aparece no celular e no computador. */
 export function EventMediaFull({ event }: { event: EventMediaFields }) {
   const media = eventMediaFrom(event);
-  const desktop = useIsDesktop();
   if (!media) return null;
 
   return (
-    <div className="mt-8 hidden md:block" data-testid="event-media-full">
-      {desktop && media.type === "image" && (
+    <div className="mt-8" data-testid="event-media-full">
+      {media.type === "image" && (
         <img
           src={eventMediaUrl(media.path)}
           alt=""
@@ -107,16 +151,8 @@ export function EventMediaFull({ event }: { event: EventMediaFields }) {
           className="max-h-[28rem] w-full rounded-2xl border object-cover"
         />
       )}
-      {desktop && media.type === "video" && (
-        <video
-          src={eventMediaUrl(media.path)}
-          controls
-          playsInline
-          preload="metadata"
-          className="max-h-[28rem] w-full rounded-2xl border bg-black"
-        />
-      )}
-      {desktop && media.type === "instagram" && <InstagramEmbed url={media.url} />}
+      {media.type === "video" && <AutoPlayVideo src={eventMediaUrl(media.path)} />}
+      {media.type === "instagram" && <InstagramEmbed url={media.url} />}
     </div>
   );
 }

@@ -68,6 +68,8 @@ const ERRORS: Record<string, string> = {
   invalid_quantity: "Quantidade de ingressos inválida.",
   invalid_cpf: "CPF inválido. Confira os números.",
   limit_exceeded: "Você já atingiu o limite de inscrições por pessoa neste evento.",
+  invalid_invite_name: "Informe o nome completo de quem vai receber o ingresso.",
+  invite_cpf_already_registered: "Já existe ingresso ou inscrição ativa com este CPF neste evento.",
   sold_out: "As vagas deste lote acabaram (ou não há vagas suficientes para essa quantidade).",
   invalid_installments: "Número de parcelas não permitido.",
   cpf_in_use: "Este CPF já está cadastrado em outra conta.",
@@ -98,6 +100,7 @@ const ERRORS: Record<string, string> = {
 export function eventError(e: unknown) {
   const msg = e instanceof Error ? e.message : typeof e === "object" && e && "message" in e ? String((e as { message: unknown }).message) : "";
   if (msg.includes("events_slug_key")) return "Já existe um evento com esse endereço (slug). Mude o nome ou o endereço.";
+  if (msg.includes("event_registrations_invite_cpf_key")) return ERRORS["invite_cpf_already_registered"]!;
   if (msg.includes("event_registrations_child_cpf_key")) return ERRORS["child_already_registered"]!;
   return ERRORS[msg] ?? (msg || "Algo deu errado. Tente novamente.");
 }

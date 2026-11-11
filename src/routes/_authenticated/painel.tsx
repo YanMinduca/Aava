@@ -78,7 +78,7 @@ function PanelLayout() {
     { to: "/painel/membros", label: "Membros", icon: Users, show: can("view_members") },
     { to: "/painel/visitantes", label: "Visitantes", icon: UserRoundPlus, show: can("view_members") },
     { to: "/painel/departamentos", label: "Departamentos", icon: Network, show: canViewDepartments },
-    { to: "/painel/eventos", label: "Eventos", icon: CalendarDays, show: can("manage_events") || can("verify_event_payments") || can("checkin_events") },
+    { to: "/painel/eventos", label: "Eventos", icon: CalendarDays, show: can("manage_events") || can("verify_event_payments") || can("checkin_events") || can("issue_event_invites") },
     { to: "/painel/financeiro", label: "Financeiro", icon: Wallet, show: can("view_finance") },
     {
       to: "/painel/permissoes",
