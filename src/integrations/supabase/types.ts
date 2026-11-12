@@ -1424,6 +1424,7 @@ export type Database = {
         }
         Returns: Json
       }
+      link_event_invite: { Args: { _reg: string; _user?: string }; Returns: Json }
       search_invite_accounts: { Args: { _q: string }; Returns: Json }
       list_event_invites: { Args: { _event: string }; Returns: Json }
       remove_event_tickets: {

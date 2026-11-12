@@ -1,0 +1,365 @@
+From 9a013afcb5cccb61fdec6c484bb8fc98a2c10e6f Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 12 Nov 2026 23:19:18 +0000
+Subject: [PATCH] =?UTF-8?q?feat(eventos):=20vincular,=20trocar=20ou=20remo?=
+ =?UTF-8?q?ver=20conta=20de=20convites=20j=C3=A1=20criados?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ src/components/events/EventInvites.tsx        | 213 +++++++++++++-----
+ src/integrations/supabase/types.ts            |   1 +
+ src/lib/events.ts                             |   2 +
+ ...61112140000_event_invite_link_existing.sql |  46 ++++
+ 4 files changed, 202 insertions(+), 60 deletions(-)
+ create mode 100644 supabase/migrations/20261112140000_event_invite_link_existing.sql
+
+diff --git a/src/components/events/EventInvites.tsx b/src/components/events/EventInvites.tsx
+index 3bf6611..0e319d1 100644
+--- a/src/components/events/EventInvites.tsx
++++ b/src/components/events/EventInvites.tsx
+@@ -130,6 +130,133 @@ function TicketImageDialog({
+   );
+ }
+ 
++/** Busca uma conta já cadastrada (nome, CPF, telefone ou e-mail) para vincular ao ingresso. */
++function AccountPicker({
++  account,
++  onChange,
++  hint,
++  idSuffix = "",
++}: {
++  account: Account | null;
++  onChange: (a: Account | null) => void;
++  hint: { linked: string; none: string };
++  idSuffix?: string;
++}) {
++  const [accountSearch, setAccountSearch] = useState("");
++  const debouncedSearch = useDebounced(accountSearch.trim(), 400);
++  const setAccount = onChange;
++  const accounts = useQuery({
++    queryKey: ["invite-accounts", debouncedSearch],
++    enabled: !account && debouncedSearch.length >= 3,
++    queryFn: async () => {
++      const { data, error } = await supabase.rpc("search_invite_accounts", { _q: debouncedSearch });
++      if (error) throw error;
++      return (data ?? []) as unknown as Account[];
++    },
++  });
++
++  return (
++    <div className="space-y-1.5 rounded-xl border border-dashed p-3">
++      <Label htmlFor={`invite-account${idSuffix}`} className="flex items-center gap-1.5">
++        <Link2 className="h-4 w-4 text-primary" aria-hidden /> Vincular a uma conta (opcional)
++      </Label>
++      {account ? (
++        <div className="flex items-center justify-between gap-2 rounded-lg bg-primary-soft px-3 py-2 text-sm">
++          <div className="min-w-0">
++            <p className="truncate font-medium text-foreground">{account.full_name}</p>
++            <p className="truncate text-xs text-muted-foreground">{[account.email, account.cpf_end ? `CPF final ${account.cpf_end}` : null].filter(Boolean).join(" · ")}</p>
++          </div>
++          <Button type="button" size="icon" variant="ghost" aria-label="Remover vínculo" onClick={() => setAccount(null)}>
++            <X className="h-4 w-4" />
++          </Button>
++        </div>
++      ) : (
++        <>
++          <div className="relative">
++            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
++            <Input id={`invite-account${idSuffix}`} className="pl-9" placeholder="Buscar por nome, CPF, telefone ou e-mail" value={accountSearch} onChange={(e) => setAccountSearch(e.target.value)} autoComplete="off" />
++          </div>
++          {debouncedSearch.length >= 3 && accountSearch.trim().length >= 3 && (
++            <div className="divide-y rounded-lg border bg-background text-sm">
++              {accounts.isFetching && <p className="p-3 text-muted-foreground">Buscando...</p>}
++              {!accounts.isFetching && accounts.isError && <p className="p-3 text-destructive">Não foi possível buscar. Tente de novo.</p>}
++              {!accounts.isFetching && !accounts.isError && (accounts.data ?? []).length === 0 && <p className="p-3 text-muted-foreground">Nenhuma conta encontrada.</p>}
++              {!accounts.isFetching && (accounts.data ?? []).map((a) => (
++                <button key={a.user_id} type="button" className="block w-full px-3 py-2 text-left hover:bg-muted" onClick={() => { setAccount(a); setAccountSearch(""); }}>
++                  <span className="block truncate font-medium text-foreground">{a.full_name}</span>
++                  <span className="block truncate text-xs text-muted-foreground">{[a.email, a.cpf_end ? `CPF final ${a.cpf_end}` : null].filter(Boolean).join(" · ")}</span>
++                </button>
++              ))}
++            </div>
++          )}
++        </>
++      )}
++      <p className="text-xs text-muted-foreground">
++        {account ? hint.linked : hint.none}
++      </p>
++    </div>
++  );
++}
++
++/** Vincula (ou troca/remove o vínculo de) um convite que já foi criado. */
++function LinkInviteDialog({
++  invite,
++  onClose,
++  onDone,
++}: {
++  invite: Invite | null;
++  onClose: () => void;
++  onDone: () => void;
++}) {
++  const [account, setAccount] = useState<Account | null>(null);
++
++  useEffect(() => {
++    setAccount(null);
++  }, [invite?.registration_id]);
++
++  const save = useMutation({
++    mutationFn: async (user: string | null) => {
++      const { error } = await supabase.rpc("link_event_invite", user ? { _reg: invite!.registration_id, _user: user } : { _reg: invite!.registration_id });
++      if (error) throw error;
++    },
++    onSuccess: (_d, user) => {
++      toast.success(user ? "Ingresso vinculado à conta" : "Vínculo removido");
++      onDone();
++      onClose();
++    },
++    onError: (e) => toast.error(eventError(e)),
++  });
++
++  return (
++    <Dialog open={!!invite} onOpenChange={(o) => !o && !save.isPending && onClose()}>
++      <DialogContent className="max-w-md">
++        <DialogHeader>
++          <DialogTitle>Vincular ingresso de {invite?.holder_name}</DialogTitle>
++          <DialogDescription>
++            {invite?.linked_name ? `Hoje está vinculado à conta de ${invite.linked_name}. Escolha outra conta para trocar ou remova o vínculo.` : "Escolha a conta cadastrada que vai receber este ingresso."}
++          </DialogDescription>
++        </DialogHeader>
++        <AccountPicker
++          idSuffix="-existing"
++          account={account}
++          onChange={setAccount}
++          hint={{ linked: "A pessoa vai ver este ingresso em “Meus ingressos” ao entrar no painel.", none: "Busque a conta pelo nome, CPF, telefone ou e-mail." }}
++        />
++        <div className="flex flex-wrap justify-end gap-2">
++          {invite?.linked_name && (
++            <Button type="button" variant="ghost" disabled={save.isPending} onClick={() => confirm("Remover o vínculo? O ingresso some de “Meus ingressos” da conta.") && save.mutate(null)}>
++              Remover vínculo
++            </Button>
++          )}
++          <Button type="button" disabled={!account || save.isPending} onClick={() => account && save.mutate(account.user_id)}>
++            {save.isPending ? "Salvando..." : "Vincular"}
++          </Button>
++        </div>
++      </DialogContent>
++    </Dialog>
++  );
++}
++
+ /** Aba "Convites": cria ingresso para quem não tem conta (nome, nascimento e CPF) e lista os convites do evento. */
+ export function EventInvites({
+   eventId,
+@@ -155,10 +282,9 @@ export function EventInvites({
+   const [religion, setReligion] = useState("");
+   const [institution, setInstitution] = useState("");
+   const [account, setAccount] = useState<Account | null>(null);
+-  const [accountSearch, setAccountSearch] = useState("");
+-  const debouncedSearch = useDebounced(accountSearch.trim(), 400);
+   const [lotId, setLotId] = useState(lots[0]?.id ?? "");
+   const [shown, setShown] = useState<Shown | null>(null);
++  const [linking, setLinking] = useState<Invite | null>(null);
+ 
+   useEffect(() => {
+     if (!lotId && lots[0]) setLotId(lots[0].id);
+@@ -173,16 +299,6 @@ export function EventInvites({
+     },
+   });
+ 
+-  const accounts = useQuery({
+-    queryKey: ["invite-accounts", debouncedSearch],
+-    enabled: !account && debouncedSearch.length >= 3,
+-    queryFn: async () => {
+-      const { data, error } = await supabase.rpc("search_invite_accounts", { _q: debouncedSearch });
+-      if (error) throw error;
+-      return (data ?? []) as unknown as Account[];
+-    },
+-  });
+-
+   const cpfOk = isValidCpf(cpf);
+   const nameOk = name.trim().replace(/\s+/g, " ").length >= 3;
+   const birthOk = !!birth && birth <= new Date().toISOString().slice(0, 10) && birth >= "1900-01-01";
+@@ -220,7 +336,6 @@ export function EventInvites({
+       setReligion("");
+       setInstitution("");
+       setAccount(null);
+-      setAccountSearch("");
+       qc.invalidateQueries({ queryKey: ["event-invites", eventId] });
+       qc.invalidateQueries({ queryKey: ["admin-regs", eventId] });
+       onChange();
+@@ -280,45 +395,7 @@ export function EventInvites({
+             </div>
+           </>
+         )}
+-        <div className="space-y-1.5 rounded-xl border border-dashed p-3">
+-          <Label htmlFor="invite-account" className="flex items-center gap-1.5">
+-            <Link2 className="h-4 w-4 text-primary" aria-hidden /> Vincular a uma conta (opcional)
+-          </Label>
+-          {account ? (
+-            <div className="flex items-center justify-between gap-2 rounded-lg bg-primary-soft px-3 py-2 text-sm">
+-              <div className="min-w-0">
+-                <p className="truncate font-medium text-foreground">{account.full_name}</p>
+-                <p className="truncate text-xs text-muted-foreground">{[account.email, account.cpf_end ? `CPF final ${account.cpf_end}` : null].filter(Boolean).join(" · ")}</p>
+-              </div>
+-              <Button type="button" size="icon" variant="ghost" aria-label="Remover vínculo" onClick={() => setAccount(null)}>
+-                <X className="h-4 w-4" />
+-              </Button>
+-            </div>
+-          ) : (
+-            <>
+-              <div className="relative">
+-                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
+-                <Input id="invite-account" className="pl-9" placeholder="Buscar por nome, CPF, telefone ou e-mail" value={accountSearch} onChange={(e) => setAccountSearch(e.target.value)} autoComplete="off" />
+-              </div>
+-              {debouncedSearch.length >= 3 && accountSearch.trim().length >= 3 && (
+-                <div className="divide-y rounded-lg border bg-background text-sm">
+-                  {accounts.isFetching && <p className="p-3 text-muted-foreground">Buscando...</p>}
+-                  {!accounts.isFetching && accounts.isError && <p className="p-3 text-destructive">Não foi possível buscar. Tente de novo.</p>}
+-                  {!accounts.isFetching && !accounts.isError && (accounts.data ?? []).length === 0 && <p className="p-3 text-muted-foreground">Nenhuma conta encontrada.</p>}
+-                  {!accounts.isFetching && (accounts.data ?? []).map((a) => (
+-                    <button key={a.user_id} type="button" className="block w-full px-3 py-2 text-left hover:bg-muted" onClick={() => { setAccount(a); setAccountSearch(""); }}>
+-                      <span className="block truncate font-medium text-foreground">{a.full_name}</span>
+-                      <span className="block truncate text-xs text-muted-foreground">{[a.email, a.cpf_end ? `CPF final ${a.cpf_end}` : null].filter(Boolean).join(" · ")}</span>
+-                    </button>
+-                  ))}
+-                </div>
+-              )}
+-            </>
+-          )}
+-          <p className="text-xs text-muted-foreground">
+-            {account ? "A pessoa vai ver este ingresso em “Meus ingressos” ao entrar no painel." : "Sem vínculo, o ingresso fica só com você, para salvar a imagem e enviar."}
+-          </p>
+-        </div>
++        <AccountPicker account={account} onChange={setAccount} hint={{ linked: "A pessoa vai ver este ingresso em “Meus ingressos” ao entrar no painel.", none: "Sem vínculo, o ingresso fica só com você, para salvar a imagem e enviar." }} />
+         {lots.length > 1 && (
+           <div className="space-y-1.5">
+             <Label>Lote</Label>
+@@ -365,14 +442,21 @@ export function EventInvites({
+                     {i.short_code && <Badge variant="outline" className="font-mono">{formatShortCode(i.short_code)}</Badge>}
+                   </div>
+                 </div>
+-                {!cancelled && i.code && i.ticket_status === "valid" && (
+-                  <Button
+-                    size="sm"
+-                    variant="outline"
+-                    onClick={() => setShown({ code: i.code!, holderName: i.holder_name, shortCode: i.short_code ?? "", lotName: i.lot })}
+-                  >
+-                    <QrCode className="h-4 w-4" /> Ver ingresso
+-                  </Button>
++                {!cancelled && (
++                  <div className="flex flex-wrap gap-2">
++                    <Button size="sm" variant="outline" onClick={() => setLinking(i)}>
++                      <Link2 className="h-4 w-4" /> {i.linked_name ? "Alterar vínculo" : "Vincular conta"}
++                    </Button>
++                    {i.code && i.ticket_status === "valid" && (
++                      <Button
++                        size="sm"
++                        variant="outline"
++                        onClick={() => setShown({ code: i.code!, holderName: i.holder_name, shortCode: i.short_code ?? "", lotName: i.lot })}
++                      >
++                        <QrCode className="h-4 w-4" /> Ver ingresso
++                      </Button>
++                    )}
++                  </div>
+                 )}
+               </div>
+             );
+@@ -380,6 +464,15 @@ export function EventInvites({
+         </div>
+       </div>
+ 
++      <LinkInviteDialog
++        invite={linking}
++        onClose={() => setLinking(null)}
++        onDone={() => {
++          qc.invalidateQueries({ queryKey: ["event-invites", eventId] });
++          qc.invalidateQueries({ queryKey: ["admin-regs", eventId] });
++          onChange();
++        }}
++      />
+       <TicketImageDialog shown={shown} eventTitle={eventTitle} eventDate={eventDate} onClose={() => setShown(null)} />
+     </div>
+   );
+diff --git a/src/integrations/supabase/types.ts b/src/integrations/supabase/types.ts
+index 590aa89..e48ce5b 100644
+--- a/src/integrations/supabase/types.ts
++++ b/src/integrations/supabase/types.ts
+@@ -1424,6 +1424,7 @@ export type Database = {
+         }
+         Returns: Json
+       }
++      link_event_invite: { Args: { _reg: string; _user?: string }; Returns: Json }
+       search_invite_accounts: { Args: { _q: string }; Returns: Json }
+       list_event_invites: { Args: { _event: string }; Returns: Json }
+       remove_event_tickets: {
+diff --git a/src/lib/events.ts b/src/lib/events.ts
+index b0bfe38..8c077d1 100644
+--- a/src/lib/events.ts
++++ b/src/lib/events.ts
+@@ -69,6 +69,8 @@ const ERRORS: Record<string, string> = {
+   invalid_cpf: "CPF inválido. Confira os números.",
+   limit_exceeded: "Você já atingiu o limite de inscrições por pessoa neste evento.",
+   invalid_invite_name: "Informe o nome completo de quem vai receber o ingresso.",
++  invite_not_found: "Convite não encontrado.",
++  invite_cancelled: "Este convite foi cancelado e não pode ser vinculado.",
+   account_not_found: "Essa conta não foi encontrada. Busque de novo ou deixe sem vínculo.",
+   invite_cpf_already_registered: "Já existe ingresso ou inscrição ativa com este CPF neste evento.",
+   sold_out: "As vagas deste lote acabaram (ou não há vagas suficientes para essa quantidade).",
+diff --git a/supabase/migrations/20261112140000_event_invite_link_existing.sql b/supabase/migrations/20261112140000_event_invite_link_existing.sql
+new file mode 100644
+index 0000000..a4e5e92
+--- /dev/null
++++ b/supabase/migrations/20261112140000_event_invite_link_existing.sql
+@@ -0,0 +1,46 @@
++-- Vincular (ou trocar/remover o vínculo de) um convite que já foi criado.
++-- Vincular: a inscrição passa a ser da conta escolhida (user_id) e aparece em "Meus ingressos" dela.
++-- Remover vínculo: volta para quem criou o convite (invited_by) e some de "Meus ingressos" da conta.
++-- Só convites (is_invite) e só os que não estão cancelados. Mesma permissão de criar convites.
++-- Idempotente.
++
++create or replace function public.link_event_invite(_reg uuid, _user uuid default null)
++returns jsonb
++language plpgsql
++security definer
++set search_path to 'public'
++as $function$
++declare
++  uid uuid := auth.uid();
++  r public.event_registrations%rowtype;
++  v_name text;
++begin
++  if uid is null then raise exception 'login_required'; end if;
++  if not (public.has_permission(uid, 'manage_events')
++          or public.has_permission(uid, 'verify_event_payments')
++          or public.has_permission(uid, 'issue_event_invites')) then
++    raise exception 'Acesso negado';
++  end if;
++
++  select * into r from public.event_registrations where id = _reg and is_invite for update;
++  if not found then raise exception 'invite_not_found'; end if;
++  if r.status = 'cancelled' then raise exception 'invite_cancelled'; end if;
++
++  if _user is null then
++    update public.event_registrations
++       set user_id = coalesce(r.invited_by, r.user_id), account_linked = false
++     where id = _reg;
++    return jsonb_build_object('registration_id', _reg, 'linked_name', null);
++  end if;
++
++  select m.full_name into v_name from public.members m where m.user_id = _user limit 1;
++  if v_name is null then raise exception 'account_not_found'; end if;
++
++  update public.event_registrations set user_id = _user, account_linked = true where id = _reg;
++  return jsonb_build_object('registration_id', _reg, 'linked_name', v_name);
++end $function$;
++
++revoke all on function public.link_event_invite(uuid, uuid) from public, anon;
++grant execute on function public.link_event_invite(uuid, uuid) to authenticated, service_role;
++
++notify pgrst, 'reload schema';
+-- 
+2.43.0
+

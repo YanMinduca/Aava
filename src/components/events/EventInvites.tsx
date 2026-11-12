@@ -130,6 +130,133 @@ function TicketImageDialog({
   );
 }
 
+/** Busca uma conta já cadastrada (nome, CPF, telefone ou e-mail) para vincular ao ingresso. */
+function AccountPicker({
+  account,
+  onChange,
+  hint,
+  idSuffix = "",
+}: {
+  account: Account | null;
+  onChange: (a: Account | null) => void;
+  hint: { linked: string; none: string };
+  idSuffix?: string;
+}) {
+  const [accountSearch, setAccountSearch] = useState("");
+  const debouncedSearch = useDebounced(accountSearch.trim(), 400);
+  const setAccount = onChange;
+  const accounts = useQuery({
+    queryKey: ["invite-accounts", debouncedSearch],
+    enabled: !account && debouncedSearch.length >= 3,
+    queryFn: async () => {
+      const { data, error } = await supabase.rpc("search_invite_accounts", { _q: debouncedSearch });
+      if (error) throw error;
+      return (data ?? []) as unknown as Account[];
+    },
+  });
+
+  return (
+    <div className="space-y-1.5 rounded-xl border border-dashed p-3">
+      <Label htmlFor={`invite-account${idSuffix}`} className="flex items-center gap-1.5">
+        <Link2 className="h-4 w-4 text-primary" aria-hidden /> Vincular a uma conta (opcional)
+      </Label>
+      {account ? (
+        <div className="flex items-center justify-between gap-2 rounded-lg bg-primary-soft px-3 py-2 text-sm">
+          <div className="min-w-0">
+            <p className="truncate font-medium text-foreground">{account.full_name}</p>
+            <p className="truncate text-xs text-muted-foreground">{[account.email, account.cpf_end ? `CPF final ${account.cpf_end}` : null].filter(Boolean).join(" · ")}</p>
+          </div>
+          <Button type="button" size="icon" variant="ghost" aria-label="Remover vínculo" onClick={() => setAccount(null)}>
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+      ) : (
+        <>
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
+            <Input id={`invite-account${idSuffix}`} className="pl-9" placeholder="Buscar por nome, CPF, telefone ou e-mail" value={accountSearch} onChange={(e) => setAccountSearch(e.target.value)} autoComplete="off" />
+          </div>
+          {debouncedSearch.length >= 3 && accountSearch.trim().length >= 3 && (
+            <div className="divide-y rounded-lg border bg-background text-sm">
+              {accounts.isFetching && <p className="p-3 text-muted-foreground">Buscando...</p>}
+              {!accounts.isFetching && accounts.isError && <p className="p-3 text-destructive">Não foi possível buscar. Tente de novo.</p>}
+              {!accounts.isFetching && !accounts.isError && (accounts.data ?? []).length === 0 && <p className="p-3 text-muted-foreground">Nenhuma conta encontrada.</p>}
+              {!accounts.isFetching && (accounts.data ?? []).map((a) => (
+                <button key={a.user_id} type="button" className="block w-full px-3 py-2 text-left hover:bg-muted" onClick={() => { setAccount(a); setAccountSearch(""); }}>
+                  <span className="block truncate font-medium text-foreground">{a.full_name}</span>
+                  <span className="block truncate text-xs text-muted-foreground">{[a.email, a.cpf_end ? `CPF final ${a.cpf_end}` : null].filter(Boolean).join(" · ")}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+      <p className="text-xs text-muted-foreground">
+        {account ? hint.linked : hint.none}
+      </p>
+    </div>
+  );
+}
+
+/** Vincula (ou troca/remove o vínculo de) um convite que já foi criado. */
+function LinkInviteDialog({
+  invite,
+  onClose,
+  onDone,
+}: {
+  invite: Invite | null;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [account, setAccount] = useState<Account | null>(null);
+
+  useEffect(() => {
+    setAccount(null);
+  }, [invite?.registration_id]);
+
+  const save = useMutation({
+    mutationFn: async (user: string | null) => {
+      const { error } = await supabase.rpc("link_event_invite", user ? { _reg: invite!.registration_id, _user: user } : { _reg: invite!.registration_id });
+      if (error) throw error;
+    },
+    onSuccess: (_d, user) => {
+      toast.success(user ? "Ingresso vinculado à conta" : "Vínculo removido");
+      onDone();
+      onClose();
+    },
+    onError: (e) => toast.error(eventError(e)),
+  });
+
+  return (
+    <Dialog open={!!invite} onOpenChange={(o) => !o && !save.isPending && onClose()}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Vincular ingresso de {invite?.holder_name}</DialogTitle>
+          <DialogDescription>
+            {invite?.linked_name ? `Hoje está vinculado à conta de ${invite.linked_name}. Escolha outra conta para trocar ou remova o vínculo.` : "Escolha a conta cadastrada que vai receber este ingresso."}
+          </DialogDescription>
+        </DialogHeader>
+        <AccountPicker
+          idSuffix="-existing"
+          account={account}
+          onChange={setAccount}
+          hint={{ linked: "A pessoa vai ver este ingresso em “Meus ingressos” ao entrar no painel.", none: "Busque a conta pelo nome, CPF, telefone ou e-mail." }}
+        />
+        <div className="flex flex-wrap justify-end gap-2">
+          {invite?.linked_name && (
+            <Button type="button" variant="ghost" disabled={save.isPending} onClick={() => confirm("Remover o vínculo? O ingresso some de “Meus ingressos” da conta.") && save.mutate(null)}>
+              Remover vínculo
+            </Button>
+          )}
+          <Button type="button" disabled={!account || save.isPending} onClick={() => account && save.mutate(account.user_id)}>
+            {save.isPending ? "Salvando..." : "Vincular"}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 /** Aba "Convites": cria ingresso para quem não tem conta (nome, nascimento e CPF) e lista os convites do evento. */
 export function EventInvites({
   eventId,
@@ -155,10 +282,9 @@ export function EventInvites({
   const [religion, setReligion] = useState("");
   const [institution, setInstitution] = useState("");
   const [account, setAccount] = useState<Account | null>(null);
-  const [accountSearch, setAccountSearch] = useState("");
-  const debouncedSearch = useDebounced(accountSearch.trim(), 400);
   const [lotId, setLotId] = useState(lots[0]?.id ?? "");
   const [shown, setShown] = useState<Shown | null>(null);
+  const [linking, setLinking] = useState<Invite | null>(null);
 
   useEffect(() => {
     if (!lotId && lots[0]) setLotId(lots[0].id);
@@ -170,16 +296,6 @@ export function EventInvites({
       const { data, error } = await supabase.rpc("list_event_invites", { _event: eventId });
       if (error) throw error;
       return (data ?? []) as unknown as Invite[];
-    },
-  });
-
-  const accounts = useQuery({
-    queryKey: ["invite-accounts", debouncedSearch],
-    enabled: !account && debouncedSearch.length >= 3,
-    queryFn: async () => {
-      const { data, error } = await supabase.rpc("search_invite_accounts", { _q: debouncedSearch });
-      if (error) throw error;
-      return (data ?? []) as unknown as Account[];
     },
   });
 
@@ -220,7 +336,6 @@ export function EventInvites({
       setReligion("");
       setInstitution("");
       setAccount(null);
-      setAccountSearch("");
       qc.invalidateQueries({ queryKey: ["event-invites", eventId] });
       qc.invalidateQueries({ queryKey: ["admin-regs", eventId] });
       onChange();
@@ -280,45 +395,7 @@ export function EventInvites({
             </div>
           </>
         )}
-        <div className="space-y-1.5 rounded-xl border border-dashed p-3">
-          <Label htmlFor="invite-account" className="flex items-center gap-1.5">
-            <Link2 className="h-4 w-4 text-primary" aria-hidden /> Vincular a uma conta (opcional)
-          </Label>
-          {account ? (
-            <div className="flex items-center justify-between gap-2 rounded-lg bg-primary-soft px-3 py-2 text-sm">
-              <div className="min-w-0">
-                <p className="truncate font-medium text-foreground">{account.full_name}</p>
-                <p className="truncate text-xs text-muted-foreground">{[account.email, account.cpf_end ? `CPF final ${account.cpf_end}` : null].filter(Boolean).join(" · ")}</p>
-              </div>
-              <Button type="button" size="icon" variant="ghost" aria-label="Remover vínculo" onClick={() => setAccount(null)}>
-                <X className="h-4 w-4" />
-              </Button>
-            </div>
-          ) : (
-            <>
-              <div className="relative">
-                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
-                <Input id="invite-account" className="pl-9" placeholder="Buscar por nome, CPF, telefone ou e-mail" value={accountSearch} onChange={(e) => setAccountSearch(e.target.value)} autoComplete="off" />
-              </div>
-              {debouncedSearch.length >= 3 && accountSearch.trim().length >= 3 && (
-                <div className="divide-y rounded-lg border bg-background text-sm">
-                  {accounts.isFetching && <p className="p-3 text-muted-foreground">Buscando...</p>}
-                  {!accounts.isFetching && accounts.isError && <p className="p-3 text-destructive">Não foi possível buscar. Tente de novo.</p>}
-                  {!accounts.isFetching && !accounts.isError && (accounts.data ?? []).length === 0 && <p className="p-3 text-muted-foreground">Nenhuma conta encontrada.</p>}
-                  {!accounts.isFetching && (accounts.data ?? []).map((a) => (
-                    <button key={a.user_id} type="button" className="block w-full px-3 py-2 text-left hover:bg-muted" onClick={() => { setAccount(a); setAccountSearch(""); }}>
-                      <span className="block truncate font-medium text-foreground">{a.full_name}</span>
-                      <span className="block truncate text-xs text-muted-foreground">{[a.email, a.cpf_end ? `CPF final ${a.cpf_end}` : null].filter(Boolean).join(" · ")}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </>
-          )}
-          <p className="text-xs text-muted-foreground">
-            {account ? "A pessoa vai ver este ingresso em “Meus ingressos” ao entrar no painel." : "Sem vínculo, o ingresso fica só com você, para salvar a imagem e enviar."}
-          </p>
-        </div>
+        <AccountPicker account={account} onChange={setAccount} hint={{ linked: "A pessoa vai ver este ingresso em “Meus ingressos” ao entrar no painel.", none: "Sem vínculo, o ingresso fica só com você, para salvar a imagem e enviar." }} />
         {lots.length > 1 && (
           <div className="space-y-1.5">
             <Label>Lote</Label>
@@ -365,14 +442,21 @@ export function EventInvites({
                     {i.short_code && <Badge variant="outline" className="font-mono">{formatShortCode(i.short_code)}</Badge>}
                   </div>
                 </div>
-                {!cancelled && i.code && i.ticket_status === "valid" && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => setShown({ code: i.code!, holderName: i.holder_name, shortCode: i.short_code ?? "", lotName: i.lot })}
-                  >
-                    <QrCode className="h-4 w-4" /> Ver ingresso
-                  </Button>
+                {!cancelled && (
+                  <div className="flex flex-wrap gap-2">
+                    <Button size="sm" variant="outline" onClick={() => setLinking(i)}>
+                      <Link2 className="h-4 w-4" /> {i.linked_name ? "Alterar vínculo" : "Vincular conta"}
+                    </Button>
+                    {i.code && i.ticket_status === "valid" && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setShown({ code: i.code!, holderName: i.holder_name, shortCode: i.short_code ?? "", lotName: i.lot })}
+                      >
+                        <QrCode className="h-4 w-4" /> Ver ingresso
+                      </Button>
+                    )}
+                  </div>
                 )}
               </div>
             );
@@ -380,6 +464,15 @@ export function EventInvites({
         </div>
       </div>
 
+      <LinkInviteDialog
+        invite={linking}
+        onClose={() => setLinking(null)}
+        onDone={() => {
+          qc.invalidateQueries({ queryKey: ["event-invites", eventId] });
+          qc.invalidateQueries({ queryKey: ["admin-regs", eventId] });
+          onChange();
+        }}
+      />
       <TicketImageDialog shown={shown} eventTitle={eventTitle} eventDate={eventDate} onClose={() => setShown(null)} />
     </div>
   );
