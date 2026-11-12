@@ -1,0 +1,420 @@
+From 284def2eae85ecbfd4b1760f208b12d5430ddbd1 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 12 Nov 2026 23:11:29 +0000
+Subject: [PATCH] =?UTF-8?q?feat(eventos):=20convite=20pode=20ser=20vincula?=
+ =?UTF-8?q?do=20a=20uma=20conta=20j=C3=A1=20cadastrada?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ src/components/events/EventInvites.tsx        |  62 +++++-
+ src/components/events/MyTickets.tsx           |   8 +-
+ src/integrations/supabase/types.ts            |   5 +
+ src/lib/events.ts                             |   1 +
+ ...261112130000_event_invite_link_account.sql | 179 ++++++++++++++++++
+ 5 files changed, 253 insertions(+), 2 deletions(-)
+ create mode 100644 supabase/migrations/20261112130000_event_invite_link_account.sql
+
+diff --git a/src/components/events/EventInvites.tsx b/src/components/events/EventInvites.tsx
+index 6d0f467..3bf6611 100644
+--- a/src/components/events/EventInvites.tsx
++++ b/src/components/events/EventInvites.tsx
+@@ -1,7 +1,7 @@
+ import { useEffect, useState } from "react";
+ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+ import { toast } from "sonner";
+-import { Download, QrCode, Share2, UserPlus } from "lucide-react";
++import { Download, Link2, QrCode, Search, Share2, UserPlus, X } from "lucide-react";
+ import { supabase } from "@/integrations/supabase/client";
+ import { Badge } from "@/components/ui/badge";
+ import { Button } from "@/components/ui/button";
+@@ -12,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
+ import { RELIGIONS, religionLabel } from "@/lib/event-data";
+ import { eventError, fmtDateTime, formatCpf, isValidCpf, cpfDigits, TICKET_STATUS } from "@/lib/events";
+ import { dateBR } from "@/lib/church";
++import { useDebounced } from "@/lib/use-debounced";
+ import { formatShortCode } from "@/lib/images";
+ import { dataUrlToFile, renderTicketPng, ticketFileName } from "@/lib/ticket-image";
+ 
+@@ -37,6 +38,7 @@ type Invite = {
+   phone: string | null;
+   religion: string | null;
+   institution: string | null;
++  linked_name: string | null;
+   lot: string;
+   registration_status: string;
+   ticket_status: string | null;
+@@ -44,6 +46,8 @@ type Invite = {
+   created_by_me: boolean;
+ };
+ 
++type Account = { user_id: string; full_name: string; email: string | null; cpf_end: string };
++
+ type Shown = { code: string; holderName: string; shortCode: string; lotName: string };
+ 
+ /** Ingresso pronto para salvar/enviar: imagem com o nome do dono e o QR code. */
+@@ -150,6 +154,9 @@ export function EventInvites({
+   const [phone, setPhone] = useState("");
+   const [religion, setReligion] = useState("");
+   const [institution, setInstitution] = useState("");
++  const [account, setAccount] = useState<Account | null>(null);
++  const [accountSearch, setAccountSearch] = useState("");
++  const debouncedSearch = useDebounced(accountSearch.trim(), 400);
+   const [lotId, setLotId] = useState(lots[0]?.id ?? "");
+   const [shown, setShown] = useState<Shown | null>(null);
+ 
+@@ -166,6 +173,16 @@ export function EventInvites({
+     },
+   });
+ 
++  const accounts = useQuery({
++    queryKey: ["invite-accounts", debouncedSearch],
++    enabled: !account && debouncedSearch.length >= 3,
++    queryFn: async () => {
++      const { data, error } = await supabase.rpc("search_invite_accounts", { _q: debouncedSearch });
++      if (error) throw error;
++      return (data ?? []) as unknown as Account[];
++    },
++  });
++
+   const cpfOk = isValidCpf(cpf);
+   const nameOk = name.trim().replace(/\s+/g, " ").length >= 3;
+   const birthOk = !!birth && birth <= new Date().toISOString().slice(0, 10) && birth >= "1900-01-01";
+@@ -182,6 +199,7 @@ export function EventInvites({
+         _birth_date: birth,
+         _cpf: cpfDigits(cpf),
+         _phone: phone.trim(),
++        ...(account ? { _user: account.user_id } : {}),
+         ...(askReligion ? { _religion: religion, _institution: institution.trim().replace(/\s+/g, " ") } : {}),
+       });
+       if (error) throw error;
+@@ -201,6 +219,8 @@ export function EventInvites({
+       setPhone("");
+       setReligion("");
+       setInstitution("");
++      setAccount(null);
++      setAccountSearch("");
+       qc.invalidateQueries({ queryKey: ["event-invites", eventId] });
+       qc.invalidateQueries({ queryKey: ["admin-regs", eventId] });
+       onChange();
+@@ -260,6 +280,45 @@ export function EventInvites({
+             </div>
+           </>
+         )}
++        <div className="space-y-1.5 rounded-xl border border-dashed p-3">
++          <Label htmlFor="invite-account" className="flex items-center gap-1.5">
++            <Link2 className="h-4 w-4 text-primary" aria-hidden /> Vincular a uma conta (opcional)
++          </Label>
++          {account ? (
++            <div className="flex items-center justify-between gap-2 rounded-lg bg-primary-soft px-3 py-2 text-sm">
++              <div className="min-w-0">
++                <p className="truncate font-medium text-foreground">{account.full_name}</p>
++                <p className="truncate text-xs text-muted-foreground">{[account.email, account.cpf_end ? `CPF final ${account.cpf_end}` : null].filter(Boolean).join(" · ")}</p>
++              </div>
++              <Button type="button" size="icon" variant="ghost" aria-label="Remover vínculo" onClick={() => setAccount(null)}>
++                <X className="h-4 w-4" />
++              </Button>
++            </div>
++          ) : (
++            <>
++              <div className="relative">
++                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
++                <Input id="invite-account" className="pl-9" placeholder="Buscar por nome, CPF, telefone ou e-mail" value={accountSearch} onChange={(e) => setAccountSearch(e.target.value)} autoComplete="off" />
++              </div>
++              {debouncedSearch.length >= 3 && accountSearch.trim().length >= 3 && (
++                <div className="divide-y rounded-lg border bg-background text-sm">
++                  {accounts.isFetching && <p className="p-3 text-muted-foreground">Buscando...</p>}
++                  {!accounts.isFetching && accounts.isError && <p className="p-3 text-destructive">Não foi possível buscar. Tente de novo.</p>}
++                  {!accounts.isFetching && !accounts.isError && (accounts.data ?? []).length === 0 && <p className="p-3 text-muted-foreground">Nenhuma conta encontrada.</p>}
++                  {!accounts.isFetching && (accounts.data ?? []).map((a) => (
++                    <button key={a.user_id} type="button" className="block w-full px-3 py-2 text-left hover:bg-muted" onClick={() => { setAccount(a); setAccountSearch(""); }}>
++                      <span className="block truncate font-medium text-foreground">{a.full_name}</span>
++                      <span className="block truncate text-xs text-muted-foreground">{[a.email, a.cpf_end ? `CPF final ${a.cpf_end}` : null].filter(Boolean).join(" · ")}</span>
++                    </button>
++                  ))}
++                </div>
++              )}
++            </>
++          )}
++          <p className="text-xs text-muted-foreground">
++            {account ? "A pessoa vai ver este ingresso em “Meus ingressos” ao entrar no painel." : "Sem vínculo, o ingresso fica só com você, para salvar a imagem e enviar."}
++          </p>
++        </div>
+         {lots.length > 1 && (
+           <div className="space-y-1.5">
+             <Label>Lote</Label>
+@@ -298,6 +357,7 @@ export function EventInvites({
+                       {[i.phone, i.religion ? religionLabel(i.religion) : null, i.institution].filter(Boolean).join(" · ")}
+                     </p>
+                   )}
++                  {i.linked_name && <p className="text-xs text-muted-foreground">Vinculado à conta de {i.linked_name}</p>}
+                   <div className="mt-1.5 flex flex-wrap gap-1.5">
+                     <Badge variant={cancelled ? "secondary" : "outline"}>
+                       {cancelled ? "Cancelado" : TICKET_STATUS[i.ticket_status ?? ""] ?? "—"}
+diff --git a/src/components/events/MyTickets.tsx b/src/components/events/MyTickets.tsx
+index 43c3602..e5f95d4 100644
+--- a/src/components/events/MyTickets.tsx
++++ b/src/components/events/MyTickets.tsx
+@@ -115,7 +115,8 @@ export function MyTickets({ uid }: { uid: string }) {
+         .from("event_registrations")
+         .select("*, events(title, slug, starts_at, location), event_lots(name), event_payments(*), event_tickets(*), event_ticket_removals(*)")
+         .eq("user_id", uid)
+-        .eq("is_invite", false)
++        // Ingresso de convite só aparece para quem foi vinculado a ele (quem criou o convite não vê o dos outros)
++        .or("is_invite.eq.false,account_linked.eq.true")
+         .order("created_at", { ascending: false });
+       if (error) throw error;
+       return data ?? [];
+@@ -195,6 +196,11 @@ export function MyTickets({ uid }: { uid: string }) {
+                     <CalendarDays className="h-4 w-4" /> {r.events ? fmtDateTime(r.events.starts_at) : ""}
+                     {r.events?.location ? ` · ${r.events.location}` : ""}
+                   </p>
++                  {r.is_invite && (
++                    <p className="mt-1 text-sm font-medium text-foreground">
++                      Ingresso de {r.attendee_name} <Badge variant="outline" className="ml-1">Convite</Badge>
++                    </p>
++                  )}
+                   {r.is_child && (
+                     <p className="mt-1 text-sm font-medium text-foreground">
+                       Ingresso de {r.attendee_name} <Badge variant="outline" className="ml-1">Filho(a)</Badge>
+diff --git a/src/integrations/supabase/types.ts b/src/integrations/supabase/types.ts
+index b5498a6..590aa89 100644
+--- a/src/integrations/supabase/types.ts
++++ b/src/integrations/supabase/types.ts
+@@ -334,6 +334,7 @@ export type Database = {
+           installments: number
+           invited_by: string | null
+           is_child: boolean
++          account_linked: boolean
+           is_invite: boolean
+           lot_id: string
+           member_id: string | null
+@@ -365,6 +366,7 @@ export type Database = {
+           installments?: number
+           invited_by?: string | null
+           is_child?: boolean
++          account_linked?: boolean
+           is_invite?: boolean
+           lot_id: string
+           member_id?: string | null
+@@ -396,6 +398,7 @@ export type Database = {
+           installments?: number
+           invited_by?: string | null
+           is_child?: boolean
++          account_linked?: boolean
+           is_invite?: boolean
+           lot_id?: string
+           member_id?: string | null
+@@ -1417,9 +1420,11 @@ export type Database = {
+           _name: string
+           _phone: string
+           _religion?: string
++          _user?: string
+         }
+         Returns: Json
+       }
++      search_invite_accounts: { Args: { _q: string }; Returns: Json }
+       list_event_invites: { Args: { _event: string }; Returns: Json }
+       remove_event_tickets: {
+         Args: {
+diff --git a/src/lib/events.ts b/src/lib/events.ts
+index 0b348f7..b0bfe38 100644
+--- a/src/lib/events.ts
++++ b/src/lib/events.ts
+@@ -69,6 +69,7 @@ const ERRORS: Record<string, string> = {
+   invalid_cpf: "CPF inválido. Confira os números.",
+   limit_exceeded: "Você já atingiu o limite de inscrições por pessoa neste evento.",
+   invalid_invite_name: "Informe o nome completo de quem vai receber o ingresso.",
++  account_not_found: "Essa conta não foi encontrada. Busque de novo ou deixe sem vínculo.",
+   invite_cpf_already_registered: "Já existe ingresso ou inscrição ativa com este CPF neste evento.",
+   sold_out: "As vagas deste lote acabaram (ou não há vagas suficientes para essa quantidade).",
+   invalid_installments: "Número de parcelas não permitido.",
+diff --git a/supabase/migrations/20261112130000_event_invite_link_account.sql b/supabase/migrations/20261112130000_event_invite_link_account.sql
+new file mode 100644
+index 0000000..0008c13
+--- /dev/null
++++ b/supabase/migrations/20261112130000_event_invite_link_account.sql
+@@ -0,0 +1,179 @@
++-- Convite pode ser vinculado (opcional) a uma conta já cadastrada.
++-- Quando vinculado, a inscrição passa a ser da conta escolhida (user_id), então a pessoa vê o ingresso em
++-- "Meus ingressos" como quem se inscreveu sozinha (as regras de leitura/remoção já se baseiam em user_id).
++-- invited_by continua sendo quem criou o convite. account_linked = true marca que o convite tem dono de conta;
++-- sem vínculo, o convite segue escondido de "Meus ingressos" de quem o criou.
++-- member_id fica vazio de propósito: os dados do ingresso são os informados pela liderança.
++-- Idempotente.
++
++alter table public.event_registrations
++  add column if not exists account_linked boolean not null default false;
++
++drop function if exists public.create_event_invite(uuid, uuid, text, date, text, text, text, text);
++
++create or replace function public.create_event_invite(
++  _event uuid, _lot uuid, _name text, _birth_date date, _cpf text, _phone text,
++  _religion text default null, _institution text default null, _user uuid default null
++)
++returns jsonb
++language plpgsql
++security definer
++set search_path to 'public'
++as $function$
++declare
++  uid uuid := auth.uid();
++  v_name text := regexp_replace(btrim(coalesce(_name, '')), '\s+', ' ', 'g');
++  d text := regexp_replace(coalesce(_cpf, ''), '\D', '', 'g');
++  v_phone text := btrim(coalesce(_phone, ''));
++  phone_digits text := regexp_replace(coalesce(_phone, ''), '\D', '', 'g');
++  v_religion text;
++  v_institution text;
++  ev public.events%rowtype;
++  lt public.event_lots%rowtype;
++  reg uuid;
++  t public.event_tickets%rowtype;
++begin
++  if uid is null then raise exception 'login_required'; end if;
++  if not (public.has_permission(uid, 'manage_events')
++          or public.has_permission(uid, 'verify_event_payments')
++          or public.has_permission(uid, 'issue_event_invites')) then
++    raise exception 'Acesso negado';
++  end if;
++  if char_length(v_name) < 3 or char_length(v_name) > 120 then raise exception 'invalid_invite_name'; end if;
++  if _birth_date is null or _birth_date > current_date or _birth_date < date '1900-01-01' then
++    raise exception 'invalid_birth_date';
++  end if;
++  if not public.is_valid_cpf(d) then raise exception 'invalid_cpf'; end if;
++  if char_length(phone_digits) < 10 or char_length(phone_digits) > 13 then raise exception 'invalid_phone'; end if;
++
++  -- Conta vinculada (opcional): precisa ser uma conta que existe e tem cadastro.
++  if _user is not null and not exists (select 1 from public.members m where m.user_id = _user) then
++    raise exception 'account_not_found';
++  end if;
++
++  select * into ev from public.events where id = _event;
++  if not found then raise exception 'event_not_found'; end if;
++
++  if ev.ask_religion then
++    if _religion is null or _religion not in ('evangelico', 'catolico', 'espirita', 'matriz_africana', 'outros') then
++      raise exception 'invalid_religion';
++    end if;
++    v_institution := btrim(coalesce(_institution, ''));
++    if v_institution = '' or char_length(v_institution) > 120 then raise exception 'invalid_institution'; end if;
++    v_religion := _religion;
++  else
++    v_religion := null;
++    v_institution := null;
++  end if;
++
++  select * into lt from public.event_lots where id = _lot and event_id = _event for update;
++  if not found then raise exception 'lot_not_found'; end if;
++  if lt.capacity is not null and public.lot_taken(lt.id) + 1 > lt.capacity then raise exception 'sold_out'; end if;
++
++  if exists (select 1 from public.event_registrations r
++              where r.event_id = _event and r.status <> 'cancelled'
++                and regexp_replace(coalesce(r.attendee_cpf, ''), '\D', '', 'g') = d) then
++    raise exception 'invite_cpf_already_registered';
++  end if;
++
++  insert into public.event_registrations (event_id, lot_id, user_id, member_id, attendee_name, attendee_cpf, attendee_birth_date,
++                                          attendee_phone, attendee_religion, attendee_institution,
++                                          quantity, unit_price, total, installments, status, is_invite, invited_by, account_linked)
++  values (_event, _lot, coalesce(_user, uid), null, v_name, d, _birth_date,
++          v_phone, v_religion, v_institution,
++          1, 0, 0, 1, 'confirmed', true, uid, _user is not null)
++  returning id into reg;
++
++  perform public.issue_event_tickets(reg);
++  select * into t from public.event_tickets where registration_id = reg order by seq limit 1;
++
++  return jsonb_build_object('registration_id', reg, 'ticket_id', t.id, 'code', t.code,
++                            'short_code', t.short_code, 'holder_name', t.holder_name);
++end $function$;
++
++revoke all on function public.create_event_invite(uuid, uuid, text, date, text, text, text, text, uuid) from public, anon;
++grant execute on function public.create_event_invite(uuid, uuid, text, date, text, text, text, text, uuid) to authenticated, service_role;
++
++-- Busca de contas já cadastradas para vincular (nome, CPF, telefone ou e-mail). Só quem pode criar convites.
++-- Devolve poucos dados: nome, e-mail parcialmente escondido e os 2 últimos dígitos do CPF.
++create or replace function public.search_invite_accounts(_q text)
++returns jsonb
++language plpgsql
++stable
++security definer
++set search_path to 'public'
++as $function$
++declare
++  uid uuid := auth.uid();
++  q text := btrim(coalesce(_q, ''));
++  qd text := regexp_replace(btrim(coalesce(_q, '')), '\D', '', 'g');
++  pat text;
++begin
++  if uid is null then raise exception 'login_required'; end if;
++  if not (public.has_permission(uid, 'manage_events')
++          or public.has_permission(uid, 'verify_event_payments')
++          or public.has_permission(uid, 'issue_event_invites')) then
++    raise exception 'Acesso negado';
++  end if;
++  if char_length(q) < 3 then return '[]'::jsonb; end if;
++  pat := '%' || replace(replace(replace(q, '\', '\\'), '%', '\%'), '_', '\_') || '%';
++
++  return coalesce((
++    select jsonb_agg(jsonb_build_object(
++      'user_id', s.user_id, 'full_name', s.full_name,
++      'email', case when s.email is null then null
++                    else left(s.email, 2) || '***' || coalesce(substring(s.email from '@.*$'), '') end,
++      'cpf_end', right(regexp_replace(coalesce(s.cpf, ''), '\D', '', 'g'), 2)) order by s.full_name)
++    from (
++      select m.user_id, m.full_name, m.cpf, coalesce(m.email, u.email) as email
++        from public.members m
++        left join auth.users u on u.id = m.user_id
++       where m.user_id is not null
++         and (m.full_name ilike pat
++              or coalesce(m.email, u.email, '') ilike pat
++              or (char_length(qd) >= 4
++                  and (regexp_replace(coalesce(m.cpf, ''), '\D', '', 'g') like '%' || qd || '%'
++                       or regexp_replace(coalesce(m.phone, ''), '\D', '', 'g') like '%' || qd || '%')))
++       order by m.full_name
++       limit 8) s), '[]'::jsonb);
++end $function$;
++
++revoke all on function public.search_invite_accounts(text) from public, anon;
++grant execute on function public.search_invite_accounts(text) to authenticated, service_role;
++
++-- A lista de convites passa a dizer a qual conta o ingresso está vinculado.
++create or replace function public.list_event_invites(_event uuid)
++returns jsonb
++language plpgsql
++stable
++security definer
++set search_path to 'public'
++as $function$
++declare uid uuid := auth.uid();
++begin
++  if uid is null then raise exception 'login_required'; end if;
++  if not (public.has_permission(uid, 'manage_events')
++          or public.has_permission(uid, 'verify_event_payments')
++          or public.has_permission(uid, 'issue_event_invites')) then
++    raise exception 'Acesso negado';
++  end if;
++  return coalesce((
++    select jsonb_agg(jsonb_build_object(
++      'registration_id', r.id, 'ticket_id', t.id, 'code', t.code, 'short_code', t.short_code,
++      'holder_name', r.attendee_name, 'cpf_end', right(regexp_replace(coalesce(r.attendee_cpf, ''), '\D', '', 'g'), 2),
++      'birth_date', r.attendee_birth_date, 'phone', r.attendee_phone,
++      'religion', r.attendee_religion, 'institution', r.attendee_institution,
++      'linked_name', case when r.account_linked then (select m.full_name from public.members m where m.user_id = r.user_id limit 1) end,
++      'lot', l.name, 'registration_status', r.status,
++      'ticket_status', t.status, 'created_at', r.created_at, 'created_by_me', r.invited_by = uid)
++      order by r.created_at desc)
++    from public.event_registrations r
++    join public.event_lots l on l.id = r.lot_id
++    left join public.event_tickets t on t.registration_id = r.id and t.seq = 1
++    where r.event_id = _event and r.is_invite), '[]'::jsonb);
++end $function$;
++
++revoke all on function public.list_event_invites(uuid) from public, anon;
++grant execute on function public.list_event_invites(uuid) to authenticated, service_role;
++
++notify pgrst, 'reload schema';
+-- 
+2.43.0
+
