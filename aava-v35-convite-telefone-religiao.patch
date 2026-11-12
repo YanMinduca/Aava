@@ -1,0 +1,314 @@
+From d1458f21b2acbf073022ac2c9c8481ff4fe97e78 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 12 Nov 2026 16:27:45 +0000
+Subject: [PATCH] =?UTF-8?q?feat(eventos):=20convite=20pede=20telefone=20e,?=
+ =?UTF-8?q?=20se=20o=20evento=20pedir=20religi=C3=A3o,=20religi=C3=A3o=20e?=
+ =?UTF-8?q?=20institui=C3=A7=C3=A3o?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ src/components/events/EventInvites.tsx        |  55 +++++++-
+ src/integrations/supabase/types.ts            |   3 +
+ .../_authenticated/painel.evento.$id.tsx      |   1 +
+ ...12120000_event_invite_contact_religion.sql | 125 ++++++++++++++++++
+ 4 files changed, 183 insertions(+), 1 deletion(-)
+ create mode 100644 supabase/migrations/20261112120000_event_invite_contact_religion.sql
+
+diff --git a/src/components/events/EventInvites.tsx b/src/components/events/EventInvites.tsx
+index cc8095e..6d0f467 100644
+--- a/src/components/events/EventInvites.tsx
++++ b/src/components/events/EventInvites.tsx
+@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
+ import { Label } from "@/components/ui/label";
+ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
++import { RELIGIONS, religionLabel } from "@/lib/event-data";
+ import { eventError, fmtDateTime, formatCpf, isValidCpf, cpfDigits, TICKET_STATUS } from "@/lib/events";
+ import { dateBR } from "@/lib/church";
+ import { formatShortCode } from "@/lib/images";
+@@ -16,6 +17,15 @@ import { dataUrlToFile, renderTicketPng, ticketFileName } from "@/lib/ticket-ima
+ 
+ type Lot = { id: string; name: string };
+ 
++/** Máscara de telefone brasileiro: (11) 90000-0000 ou (11) 0000-0000. */
++function formatPhoneBR(v: string) {
++  const d = v.replace(/\D/g, "").slice(0, 11);
++  if (d.length <= 2) return d;
++  if (d.length <= 6) return `(${d.slice(0, 2)}) ${d.slice(2)}`;
++  if (d.length <= 10) return `(${d.slice(0, 2)}) ${d.slice(2, 6)}-${d.slice(6)}`;
++  return `(${d.slice(0, 2)}) ${d.slice(2, 7)}-${d.slice(7)}`;
++}
++
+ type Invite = {
+   registration_id: string;
+   ticket_id: string | null;
+@@ -24,6 +34,9 @@ type Invite = {
+   holder_name: string;
+   cpf_end: string;
+   birth_date: string | null;
++  phone: string | null;
++  religion: string | null;
++  institution: string | null;
+   lot: string;
+   registration_status: string;
+   ticket_status: string | null;
+@@ -119,18 +132,24 @@ export function EventInvites({
+   eventTitle,
+   eventDate,
+   lots,
++  askReligion,
+   onChange,
+ }: {
+   eventId: string;
+   eventTitle: string;
+   eventDate: string;
+   lots: Lot[];
++  /** O evento pergunta religião e instituição? (mesma regra da inscrição) */
++  askReligion: boolean;
+   onChange: () => void;
+ }) {
+   const qc = useQueryClient();
+   const [name, setName] = useState("");
+   const [birth, setBirth] = useState("");
+   const [cpf, setCpf] = useState("");
++  const [phone, setPhone] = useState("");
++  const [religion, setReligion] = useState("");
++  const [institution, setInstitution] = useState("");
+   const [lotId, setLotId] = useState(lots[0]?.id ?? "");
+   const [shown, setShown] = useState<Shown | null>(null);
+ 
+@@ -150,7 +169,9 @@ export function EventInvites({
+   const cpfOk = isValidCpf(cpf);
+   const nameOk = name.trim().replace(/\s+/g, " ").length >= 3;
+   const birthOk = !!birth && birth <= new Date().toISOString().slice(0, 10) && birth >= "1900-01-01";
+-  const canSubmit = nameOk && birthOk && cpfOk && !!lotId;
++  const phoneOk = phone.replace(/\D/g, "").length >= 10 && phone.replace(/\D/g, "").length <= 13;
++  const religionOk = !askReligion || (!!religion && institution.trim().length > 0);
++  const canSubmit = nameOk && birthOk && cpfOk && phoneOk && religionOk && !!lotId;
+ 
+   const create = useMutation({
+     mutationFn: async () => {
+@@ -160,6 +181,8 @@ export function EventInvites({
+         _name: name.trim().replace(/\s+/g, " "),
+         _birth_date: birth,
+         _cpf: cpfDigits(cpf),
++        _phone: phone.trim(),
++        ...(askReligion ? { _religion: religion, _institution: institution.trim().replace(/\s+/g, " ") } : {}),
+       });
+       if (error) throw error;
+       return data as unknown as { holder_name: string; code: string; short_code: string };
+@@ -175,6 +198,9 @@ export function EventInvites({
+       setName("");
+       setBirth("");
+       setCpf("");
++      setPhone("");
++      setReligion("");
++      setInstitution("");
+       qc.invalidateQueries({ queryKey: ["event-invites", eventId] });
+       qc.invalidateQueries({ queryKey: ["admin-regs", eventId] });
+       onChange();
+@@ -212,6 +238,28 @@ export function EventInvites({
+           <Input id="invite-cpf" inputMode="numeric" placeholder="000.000.000-00" value={cpf} onChange={(e) => setCpf(formatCpf(e.target.value))} autoComplete="off" />
+           {cpf && !cpfOk && cpfDigits(cpf).length === 11 && <p className="text-xs text-destructive">CPF inválido. Confira os números.</p>}
+         </div>
++        <div className="space-y-1.5">
++          <Label htmlFor="invite-phone">Telefone / WhatsApp</Label>
++          <Input id="invite-phone" type="tel" inputMode="tel" placeholder="(11) 90000-0000" value={phone} onChange={(e) => setPhone(formatPhoneBR(e.target.value))} autoComplete="off" maxLength={16} />
++          {phone && !phoneOk && <p className="text-xs text-destructive">Informe o telefone com DDD.</p>}
++        </div>
++        {askReligion && (
++          <>
++            <div className="space-y-1.5">
++              <Label>Religião</Label>
++              <Select value={religion} onValueChange={setReligion}>
++                <SelectTrigger><SelectValue placeholder="Escolha a religião" /></SelectTrigger>
++                <SelectContent>
++                  {RELIGIONS.map((r) => <SelectItem key={r.value} value={r.value}>{r.label}</SelectItem>)}
++                </SelectContent>
++              </Select>
++            </div>
++            <div className="space-y-1.5">
++              <Label htmlFor="invite-institution">Instituição religiosa</Label>
++              <Input id="invite-institution" maxLength={120} placeholder='Ex.: nome da igreja, paróquia, centro… ou "Nenhuma"' value={institution} onChange={(e) => setInstitution(e.target.value)} autoComplete="off" />
++            </div>
++          </>
++        )}
+         {lots.length > 1 && (
+           <div className="space-y-1.5">
+             <Label>Lote</Label>
+@@ -245,6 +293,11 @@ export function EventInvites({
+                   <p className="text-xs text-muted-foreground">
+                     CPF final {i.cpf_end} · nasc. {dateBR(i.birth_date)} · {i.lot} · {fmtDateTime(i.created_at)}
+                   </p>
++                  {(i.phone || i.religion || i.institution) && (
++                    <p className="text-xs text-muted-foreground">
++                      {[i.phone, i.religion ? religionLabel(i.religion) : null, i.institution].filter(Boolean).join(" · ")}
++                    </p>
++                  )}
+                   <div className="mt-1.5 flex flex-wrap gap-1.5">
+                     <Badge variant={cancelled ? "secondary" : "outline"}>
+                       {cancelled ? "Cancelado" : TICKET_STATUS[i.ticket_status ?? ""] ?? "—"}
+diff --git a/src/integrations/supabase/types.ts b/src/integrations/supabase/types.ts
+index d6b4162..b5498a6 100644
+--- a/src/integrations/supabase/types.ts
++++ b/src/integrations/supabase/types.ts
+@@ -1412,8 +1412,11 @@ export type Database = {
+           _birth_date: string
+           _cpf: string
+           _event: string
++          _institution?: string
+           _lot: string
+           _name: string
++          _phone: string
++          _religion?: string
+         }
+         Returns: Json
+       }
+diff --git a/src/routes/_authenticated/painel.evento.$id.tsx b/src/routes/_authenticated/painel.evento.$id.tsx
+index ba4d709..89c542a 100644
+--- a/src/routes/_authenticated/painel.evento.$id.tsx
++++ b/src/routes/_authenticated/painel.evento.$id.tsx
+@@ -144,6 +144,7 @@ function EventAdmin() {
+               eventTitle={e.title}
+               eventDate={fmtDateTime(e.starts_at)}
+               lots={data.lots.map((l) => ({ id: l.id, name: l.name }))}
++              askReligion={e.ask_religion !== false}
+               onChange={refreshAll}
+             />
+           </TabsContent>
+diff --git a/supabase/migrations/20261112120000_event_invite_contact_religion.sql b/supabase/migrations/20261112120000_event_invite_contact_religion.sql
+new file mode 100644
+index 0000000..e813d52
+--- /dev/null
++++ b/supabase/migrations/20261112120000_event_invite_contact_religion.sql
+@@ -0,0 +1,125 @@
++-- Convite (ingresso criado pela liderança) passa a pedir também:
++--   * Telefone (sempre);
++--   * Religião e instituição religiosa — só quando o evento está com "pedir religião" ligado (events.ask_religion).
++-- Os valores de religião são os mesmos da inscrição normal: evangelico, catolico, espirita, matriz_africana, outros.
++-- Os dados vão para as colunas que a inscrição já usa (attendee_phone, attendee_religion, attendee_institution),
++-- então aparecem na lista de inscrições, na exportação XLS e nos gráficos de perfil do público.
++-- A assinatura de create_event_invite muda (3 parâmetros novos), então a versão antiga é removida.
++-- Idempotente.
++
++drop function if exists public.create_event_invite(uuid, uuid, text, date, text);
++
++create or replace function public.create_event_invite(
++  _event uuid, _lot uuid, _name text, _birth_date date, _cpf text, _phone text,
++  _religion text default null, _institution text default null
++)
++returns jsonb
++language plpgsql
++security definer
++set search_path to 'public'
++as $function$
++declare
++  uid uuid := auth.uid();
++  v_name text := regexp_replace(btrim(coalesce(_name, '')), '\s+', ' ', 'g');
++  d text := regexp_replace(coalesce(_cpf, ''), '\D', '', 'g');
++  v_phone text := btrim(coalesce(_phone, ''));
++  phone_digits text := regexp_replace(coalesce(_phone, ''), '\D', '', 'g');
++  v_religion text;
++  v_institution text;
++  ev public.events%rowtype;
++  lt public.event_lots%rowtype;
++  reg uuid;
++  t public.event_tickets%rowtype;
++begin
++  if uid is null then raise exception 'login_required'; end if;
++  if not (public.has_permission(uid, 'manage_events')
++          or public.has_permission(uid, 'verify_event_payments')
++          or public.has_permission(uid, 'issue_event_invites')) then
++    raise exception 'Acesso negado';
++  end if;
++  if char_length(v_name) < 3 or char_length(v_name) > 120 then raise exception 'invalid_invite_name'; end if;
++  if _birth_date is null or _birth_date > current_date or _birth_date < date '1900-01-01' then
++    raise exception 'invalid_birth_date';
++  end if;
++  if not public.is_valid_cpf(d) then raise exception 'invalid_cpf'; end if;
++  if char_length(phone_digits) < 10 or char_length(phone_digits) > 13 then raise exception 'invalid_phone'; end if;
++
++  select * into ev from public.events where id = _event;
++  if not found then raise exception 'event_not_found'; end if;
++
++  -- Religião e instituição só são pedidas (e guardadas) quando o evento está com "pedir religião" ligado.
++  if ev.ask_religion then
++    if _religion is null or _religion not in ('evangelico', 'catolico', 'espirita', 'matriz_africana', 'outros') then
++      raise exception 'invalid_religion';
++    end if;
++    v_institution := btrim(coalesce(_institution, ''));
++    if v_institution = '' or char_length(v_institution) > 120 then raise exception 'invalid_institution'; end if;
++    v_religion := _religion;
++  else
++    v_religion := null;
++    v_institution := null;
++  end if;
++
++  select * into lt from public.event_lots where id = _lot and event_id = _event for update;
++  if not found then raise exception 'lot_not_found'; end if;
++  if lt.capacity is not null and public.lot_taken(lt.id) + 1 > lt.capacity then raise exception 'sold_out'; end if;
++
++  if exists (select 1 from public.event_registrations r
++              where r.event_id = _event and r.status <> 'cancelled'
++                and regexp_replace(coalesce(r.attendee_cpf, ''), '\D', '', 'g') = d) then
++    raise exception 'invite_cpf_already_registered';
++  end if;
++
++  insert into public.event_registrations (event_id, lot_id, user_id, member_id, attendee_name, attendee_cpf, attendee_birth_date,
++                                          attendee_phone, attendee_religion, attendee_institution,
++                                          quantity, unit_price, total, installments, status, is_invite, invited_by)
++  values (_event, _lot, uid, null, v_name, d, _birth_date,
++          v_phone, v_religion, v_institution,
++          1, 0, 0, 1, 'confirmed', true, uid)
++  returning id into reg;
++
++  perform public.issue_event_tickets(reg);
++  select * into t from public.event_tickets where registration_id = reg order by seq limit 1;
++
++  return jsonb_build_object('registration_id', reg, 'ticket_id', t.id, 'code', t.code,
++                            'short_code', t.short_code, 'holder_name', t.holder_name);
++end $function$;
++
++revoke all on function public.create_event_invite(uuid, uuid, text, date, text, text, text, text) from public, anon;
++grant execute on function public.create_event_invite(uuid, uuid, text, date, text, text, text, text) to authenticated, service_role;
++
++-- A lista de convites passa a devolver telefone, religião e instituição (CPF continua só com os 2 últimos dígitos).
++create or replace function public.list_event_invites(_event uuid)
++returns jsonb
++language plpgsql
++stable
++security definer
++set search_path to 'public'
++as $function$
++declare uid uuid := auth.uid();
++begin
++  if uid is null then raise exception 'login_required'; end if;
++  if not (public.has_permission(uid, 'manage_events')
++          or public.has_permission(uid, 'verify_event_payments')
++          or public.has_permission(uid, 'issue_event_invites')) then
++    raise exception 'Acesso negado';
++  end if;
++  return coalesce((
++    select jsonb_agg(jsonb_build_object(
++      'registration_id', r.id, 'ticket_id', t.id, 'code', t.code, 'short_code', t.short_code,
++      'holder_name', r.attendee_name, 'cpf_end', right(regexp_replace(coalesce(r.attendee_cpf, ''), '\D', '', 'g'), 2),
++      'birth_date', r.attendee_birth_date, 'phone', r.attendee_phone,
++      'religion', r.attendee_religion, 'institution', r.attendee_institution,
++      'lot', l.name, 'registration_status', r.status,
++      'ticket_status', t.status, 'created_at', r.created_at, 'created_by_me', r.invited_by = uid)
++      order by r.created_at desc)
++    from public.event_registrations r
++    join public.event_lots l on l.id = r.lot_id
++    left join public.event_tickets t on t.registration_id = r.id and t.seq = 1
++    where r.event_id = _event and r.is_invite), '[]'::jsonb);
++end $function$;
++
++revoke all on function public.list_event_invites(uuid) from public, anon;
++grant execute on function public.list_event_invites(uuid) to authenticated, service_role;
++
++notify pgrst, 'reload schema';
+-- 
+2.43.0
+

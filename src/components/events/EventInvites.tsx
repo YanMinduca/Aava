@@ -9,12 +9,22 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { RELIGIONS, religionLabel } from "@/lib/event-data";
 import { eventError, fmtDateTime, formatCpf, isValidCpf, cpfDigits, TICKET_STATUS } from "@/lib/events";
 import { dateBR } from "@/lib/church";
 import { formatShortCode } from "@/lib/images";
 import { dataUrlToFile, renderTicketPng, ticketFileName } from "@/lib/ticket-image";
 
 type Lot = { id: string; name: string };
+
+/** Máscara de telefone brasileiro: (11) 90000-0000 ou (11) 0000-0000. */
+function formatPhoneBR(v: string) {
+  const d = v.replace(/\D/g, "").slice(0, 11);
+  if (d.length <= 2) return d;
+  if (d.length <= 6) return `(${d.slice(0, 2)}) ${d.slice(2)}`;
+  if (d.length <= 10) return `(${d.slice(0, 2)}) ${d.slice(2, 6)}-${d.slice(6)}`;
+  return `(${d.slice(0, 2)}) ${d.slice(2, 7)}-${d.slice(7)}`;
+}
 
 type Invite = {
   registration_id: string;
@@ -24,6 +34,9 @@ type Invite = {
   holder_name: string;
   cpf_end: string;
   birth_date: string | null;
+  phone: string | null;
+  religion: string | null;
+  institution: string | null;
   lot: string;
   registration_status: string;
   ticket_status: string | null;
@@ -119,18 +132,24 @@ export function EventInvites({
   eventTitle,
   eventDate,
   lots,
+  askReligion,
   onChange,
 }: {
   eventId: string;
   eventTitle: string;
   eventDate: string;
   lots: Lot[];
+  /** O evento pergunta religião e instituição? (mesma regra da inscrição) */
+  askReligion: boolean;
   onChange: () => void;
 }) {
   const qc = useQueryClient();
   const [name, setName] = useState("");
   const [birth, setBirth] = useState("");
   const [cpf, setCpf] = useState("");
+  const [phone, setPhone] = useState("");
+  const [religion, setReligion] = useState("");
+  const [institution, setInstitution] = useState("");
   const [lotId, setLotId] = useState(lots[0]?.id ?? "");
   const [shown, setShown] = useState<Shown | null>(null);
 
@@ -150,7 +169,9 @@ export function EventInvites({
   const cpfOk = isValidCpf(cpf);
   const nameOk = name.trim().replace(/\s+/g, " ").length >= 3;
   const birthOk = !!birth && birth <= new Date().toISOString().slice(0, 10) && birth >= "1900-01-01";
-  const canSubmit = nameOk && birthOk && cpfOk && !!lotId;
+  const phoneOk = phone.replace(/\D/g, "").length >= 10 && phone.replace(/\D/g, "").length <= 13;
+  const religionOk = !askReligion || (!!religion && institution.trim().length > 0);
+  const canSubmit = nameOk && birthOk && cpfOk && phoneOk && religionOk && !!lotId;
 
   const create = useMutation({
     mutationFn: async () => {
@@ -160,6 +181,8 @@ export function EventInvites({
         _name: name.trim().replace(/\s+/g, " "),
         _birth_date: birth,
         _cpf: cpfDigits(cpf),
+        _phone: phone.trim(),
+        ...(askReligion ? { _religion: religion, _institution: institution.trim().replace(/\s+/g, " ") } : {}),
       });
       if (error) throw error;
       return data as unknown as { holder_name: string; code: string; short_code: string };
@@ -175,6 +198,9 @@ export function EventInvites({
       setName("");
       setBirth("");
       setCpf("");
+      setPhone("");
+      setReligion("");
+      setInstitution("");
       qc.invalidateQueries({ queryKey: ["event-invites", eventId] });
       qc.invalidateQueries({ queryKey: ["admin-regs", eventId] });
       onChange();
@@ -212,6 +238,28 @@ export function EventInvites({
           <Input id="invite-cpf" inputMode="numeric" placeholder="000.000.000-00" value={cpf} onChange={(e) => setCpf(formatCpf(e.target.value))} autoComplete="off" />
           {cpf && !cpfOk && cpfDigits(cpf).length === 11 && <p className="text-xs text-destructive">CPF inválido. Confira os números.</p>}
         </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="invite-phone">Telefone / WhatsApp</Label>
+          <Input id="invite-phone" type="tel" inputMode="tel" placeholder="(11) 90000-0000" value={phone} onChange={(e) => setPhone(formatPhoneBR(e.target.value))} autoComplete="off" maxLength={16} />
+          {phone && !phoneOk && <p className="text-xs text-destructive">Informe o telefone com DDD.</p>}
+        </div>
+        {askReligion && (
+          <>
+            <div className="space-y-1.5">
+              <Label>Religião</Label>
+              <Select value={religion} onValueChange={setReligion}>
+                <SelectTrigger><SelectValue placeholder="Escolha a religião" /></SelectTrigger>
+                <SelectContent>
+                  {RELIGIONS.map((r) => <SelectItem key={r.value} value={r.value}>{r.label}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="invite-institution">Instituição religiosa</Label>
+              <Input id="invite-institution" maxLength={120} placeholder='Ex.: nome da igreja, paróquia, centro… ou "Nenhuma"' value={institution} onChange={(e) => setInstitution(e.target.value)} autoComplete="off" />
+            </div>
+          </>
+        )}
         {lots.length > 1 && (
           <div className="space-y-1.5">
             <Label>Lote</Label>
@@ -245,6 +293,11 @@ export function EventInvites({
                   <p className="text-xs text-muted-foreground">
                     CPF final {i.cpf_end} · nasc. {dateBR(i.birth_date)} · {i.lot} · {fmtDateTime(i.created_at)}
                   </p>
+                  {(i.phone || i.religion || i.institution) && (
+                    <p className="text-xs text-muted-foreground">
+                      {[i.phone, i.religion ? religionLabel(i.religion) : null, i.institution].filter(Boolean).join(" · ")}
+                    </p>
+                  )}
                   <div className="mt-1.5 flex flex-wrap gap-1.5">
                     <Badge variant={cancelled ? "secondary" : "outline"}>
                       {cancelled ? "Cancelado" : TICKET_STATUS[i.ticket_status ?? ""] ?? "—"}
