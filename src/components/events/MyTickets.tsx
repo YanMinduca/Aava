@@ -115,7 +115,8 @@ export function MyTickets({ uid }: { uid: string }) {
         .from("event_registrations")
         .select("*, events(title, slug, starts_at, location), event_lots(name), event_payments(*), event_tickets(*), event_ticket_removals(*)")
         .eq("user_id", uid)
-        .eq("is_invite", false)
+        // Ingresso de convite só aparece para quem foi vinculado a ele (quem criou o convite não vê o dos outros)
+        .or("is_invite.eq.false,account_linked.eq.true")
         .order("created_at", { ascending: false });
       if (error) throw error;
       return data ?? [];
@@ -195,6 +196,11 @@ export function MyTickets({ uid }: { uid: string }) {
                     <CalendarDays className="h-4 w-4" /> {r.events ? fmtDateTime(r.events.starts_at) : ""}
                     {r.events?.location ? ` · ${r.events.location}` : ""}
                   </p>
+                  {r.is_invite && (
+                    <p className="mt-1 text-sm font-medium text-foreground">
+                      Ingresso de {r.attendee_name} <Badge variant="outline" className="ml-1">Convite</Badge>
+                    </p>
+                  )}
                   {r.is_child && (
                     <p className="mt-1 text-sm font-medium text-foreground">
                       Ingresso de {r.attendee_name} <Badge variant="outline" className="ml-1">Filho(a)</Badge>

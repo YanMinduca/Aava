@@ -334,6 +334,7 @@ export type Database = {
           installments: number
           invited_by: string | null
           is_child: boolean
+          account_linked: boolean
           is_invite: boolean
           lot_id: string
           member_id: string | null
@@ -365,6 +366,7 @@ export type Database = {
           installments?: number
           invited_by?: string | null
           is_child?: boolean
+          account_linked?: boolean
           is_invite?: boolean
           lot_id: string
           member_id?: string | null
@@ -396,6 +398,7 @@ export type Database = {
           installments?: number
           invited_by?: string | null
           is_child?: boolean
+          account_linked?: boolean
           is_invite?: boolean
           lot_id?: string
           member_id?: string | null
@@ -1417,9 +1420,11 @@ export type Database = {
           _name: string
           _phone: string
           _religion?: string
+          _user?: string
         }
         Returns: Json
       }
+      search_invite_accounts: { Args: { _q: string }; Returns: Json }
       list_event_invites: { Args: { _event: string }; Returns: Json }
       remove_event_tickets: {
         Args: {
