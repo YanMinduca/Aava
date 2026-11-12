@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Download, QrCode, Share2, UserPlus } from "lucide-react";
+import { Download, Link2, QrCode, Search, Share2, UserPlus, X } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -12,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { RELIGIONS, religionLabel } from "@/lib/event-data";
 import { eventError, fmtDateTime, formatCpf, isValidCpf, cpfDigits, TICKET_STATUS } from "@/lib/events";
 import { dateBR } from "@/lib/church";
+import { useDebounced } from "@/lib/use-debounced";
 import { formatShortCode } from "@/lib/images";
 import { dataUrlToFile, renderTicketPng, ticketFileName } from "@/lib/ticket-image";
 
@@ -37,12 +38,15 @@ type Invite = {
   phone: string | null;
   religion: string | null;
   institution: string | null;
+  linked_name: string | null;
   lot: string;
   registration_status: string;
   ticket_status: string | null;
   created_at: string;
   created_by_me: boolean;
 };
+
+type Account = { user_id: string; full_name: string; email: string | null; cpf_end: string };
 
 type Shown = { code: string; holderName: string; shortCode: string; lotName: string };
 
@@ -150,6 +154,9 @@ export function EventInvites({
   const [phone, setPhone] = useState("");
   const [religion, setReligion] = useState("");
   const [institution, setInstitution] = useState("");
+  const [account, setAccount] = useState<Account | null>(null);
+  const [accountSearch, setAccountSearch] = useState("");
+  const debouncedSearch = useDebounced(accountSearch.trim(), 400);
   const [lotId, setLotId] = useState(lots[0]?.id ?? "");
   const [shown, setShown] = useState<Shown | null>(null);
 
@@ -163,6 +170,16 @@ export function EventInvites({
       const { data, error } = await supabase.rpc("list_event_invites", { _event: eventId });
       if (error) throw error;
       return (data ?? []) as unknown as Invite[];
+    },
+  });
+
+  const accounts = useQuery({
+    queryKey: ["invite-accounts", debouncedSearch],
+    enabled: !account && debouncedSearch.length >= 3,
+    queryFn: async () => {
+      const { data, error } = await supabase.rpc("search_invite_accounts", { _q: debouncedSearch });
+      if (error) throw error;
+      return (data ?? []) as unknown as Account[];
     },
   });
 
@@ -182,6 +199,7 @@ export function EventInvites({
         _birth_date: birth,
         _cpf: cpfDigits(cpf),
         _phone: phone.trim(),
+        ...(account ? { _user: account.user_id } : {}),
         ...(askReligion ? { _religion: religion, _institution: institution.trim().replace(/\s+/g, " ") } : {}),
       });
       if (error) throw error;
@@ -201,6 +219,8 @@ export function EventInvites({
       setPhone("");
       setReligion("");
       setInstitution("");
+      setAccount(null);
+      setAccountSearch("");
       qc.invalidateQueries({ queryKey: ["event-invites", eventId] });
       qc.invalidateQueries({ queryKey: ["admin-regs", eventId] });
       onChange();
@@ -260,6 +280,45 @@ export function EventInvites({
             </div>
           </>
         )}
+        <div className="space-y-1.5 rounded-xl border border-dashed p-3">
+          <Label htmlFor="invite-account" className="flex items-center gap-1.5">
+            <Link2 className="h-4 w-4 text-primary" aria-hidden /> Vincular a uma conta (opcional)
+          </Label>
+          {account ? (
+            <div className="flex items-center justify-between gap-2 rounded-lg bg-primary-soft px-3 py-2 text-sm">
+              <div className="min-w-0">
+                <p className="truncate font-medium text-foreground">{account.full_name}</p>
+                <p className="truncate text-xs text-muted-foreground">{[account.email, account.cpf_end ? `CPF final ${account.cpf_end}` : null].filter(Boolean).join(" · ")}</p>
+              </div>
+              <Button type="button" size="icon" variant="ghost" aria-label="Remover vínculo" onClick={() => setAccount(null)}>
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+          ) : (
+            <>
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
+                <Input id="invite-account" className="pl-9" placeholder="Buscar por nome, CPF, telefone ou e-mail" value={accountSearch} onChange={(e) => setAccountSearch(e.target.value)} autoComplete="off" />
+              </div>
+              {debouncedSearch.length >= 3 && accountSearch.trim().length >= 3 && (
+                <div className="divide-y rounded-lg border bg-background text-sm">
+                  {accounts.isFetching && <p className="p-3 text-muted-foreground">Buscando...</p>}
+                  {!accounts.isFetching && accounts.isError && <p className="p-3 text-destructive">Não foi possível buscar. Tente de novo.</p>}
+                  {!accounts.isFetching && !accounts.isError && (accounts.data ?? []).length === 0 && <p className="p-3 text-muted-foreground">Nenhuma conta encontrada.</p>}
+                  {!accounts.isFetching && (accounts.data ?? []).map((a) => (
+                    <button key={a.user_id} type="button" className="block w-full px-3 py-2 text-left hover:bg-muted" onClick={() => { setAccount(a); setAccountSearch(""); }}>
+                      <span className="block truncate font-medium text-foreground">{a.full_name}</span>
+                      <span className="block truncate text-xs text-muted-foreground">{[a.email, a.cpf_end ? `CPF final ${a.cpf_end}` : null].filter(Boolean).join(" · ")}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+          <p className="text-xs text-muted-foreground">
+            {account ? "A pessoa vai ver este ingresso em “Meus ingressos” ao entrar no painel." : "Sem vínculo, o ingresso fica só com você, para salvar a imagem e enviar."}
+          </p>
+        </div>
         {lots.length > 1 && (
           <div className="space-y-1.5">
             <Label>Lote</Label>
@@ -298,6 +357,7 @@ export function EventInvites({
                       {[i.phone, i.religion ? religionLabel(i.religion) : null, i.institution].filter(Boolean).join(" · ")}
                     </p>
                   )}
+                  {i.linked_name && <p className="text-xs text-muted-foreground">Vinculado à conta de {i.linked_name}</p>}
                   <div className="mt-1.5 flex flex-wrap gap-1.5">
                     <Badge variant={cancelled ? "secondary" : "outline"}>
                       {cancelled ? "Cancelado" : TICKET_STATUS[i.ticket_status ?? ""] ?? "—"}
