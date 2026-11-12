@@ -144,6 +144,7 @@ function EventAdmin() {
               eventTitle={e.title}
               eventDate={fmtDateTime(e.starts_at)}
               lots={data.lots.map((l) => ({ id: l.id, name: l.name }))}
+              askReligion={e.ask_religion !== false}
               onChange={refreshAll}
             />
           </TabsContent>

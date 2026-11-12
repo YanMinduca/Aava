@@ -1412,8 +1412,11 @@ export type Database = {
           _birth_date: string
           _cpf: string
           _event: string
+          _institution?: string
           _lot: string
           _name: string
+          _phone: string
+          _religion?: string
         }
         Returns: Json
       }
