@@ -69,6 +69,8 @@ const ERRORS: Record<string, string> = {
   invalid_cpf: "CPF inválido. Confira os números.",
   limit_exceeded: "Você já atingiu o limite de inscrições por pessoa neste evento.",
   invalid_invite_name: "Informe o nome completo de quem vai receber o ingresso.",
+  invite_not_found: "Convite não encontrado.",
+  invite_cancelled: "Este convite foi cancelado e não pode ser vinculado.",
   account_not_found: "Essa conta não foi encontrada. Busque de novo ou deixe sem vínculo.",
   invite_cpf_already_registered: "Já existe ingresso ou inscrição ativa com este CPF neste evento.",
   sold_out: "As vagas deste lote acabaram (ou não há vagas suficientes para essa quantidade).",
