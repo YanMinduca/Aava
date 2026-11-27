@@ -17,7 +17,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { RELIGIONS } from "@/lib/event-data";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
-  asksReligion, eventError, fmtDate, formatCpf, isValidBirthDate, isValidCpf, lotIsOpen, moneyBR, registrationIsOpen,
+  asksReligion, eventError, fmtDate, formatCpf, isValidBirthDate, isValidCpf, isValidEventDocument, normalizeEventDocument, lotIsOpen, moneyBR, registrationIsOpen,
   type PublicEventDetail, type PublicLot,
 } from "@/lib/events";
 
@@ -48,7 +48,7 @@ function EventRegistrationMain({ detail }: { detail: PublicEventDetail }) {
     queryFn: async () => {
       const { data } = await supabase
         .from("members")
-        .select("id, full_name, cpf, phone, birth_date, status, approval_status")
+        .select("id, full_name, cpf, rg, id_doc_type, id_doc_number, phone, birth_date, status, approval_status")
         .eq("user_id", uid!)
         .maybeSingle();
       return data;
@@ -67,6 +67,7 @@ function EventRegistrationMain({ detail }: { detail: PublicEventDetail }) {
   const [lotId, setLotId] = useState("");
   const [qty, setQty] = useState(1);
   const [cpf, setCpf] = useState("");
+  const [docType, setDocType] = useState("cpf");
   const [installments, setInstallments] = useState(1);
   const [imageConsent, setImageConsent] = useState(false);
   const [privacyOk, setPrivacyOk] = useState(false);
@@ -75,10 +76,16 @@ function EventRegistrationMain({ detail }: { detail: PublicEventDetail }) {
   const [institution, setInstitution] = useState("");
   const [religion, setReligion] = useState("");
   const [visitor, setVisitor] = useState({ name: "", cpf: "", phone: "", birthDate: "" });
+  const [visitorDocType, setVisitorDocType] = useState("cpf");
 
   useEffect(() => {
-    if (profile.data?.cpf) setCpf(formatCpf(profile.data.cpf));
-  }, [profile.data?.cpf]);
+    if (profile.data?.id_doc_type && profile.data?.id_doc_number) {
+      setDocType(profile.data.id_doc_type);
+      setCpf(profile.data.id_doc_number);
+    } else if (profile.data?.rg) {
+      setDocType("rg"); setCpf(profile.data.rg);
+    } else if (profile.data?.cpf) { setDocType("cpf"); setCpf(formatCpf(profile.data.cpf)); }
+  }, [profile.data?.cpf, profile.data?.rg, profile.data?.id_doc_type, profile.data?.id_doc_number]);
   useEffect(() => {
     if (!uid) return;
     supabase.auth.getUser().then(({ data }) => {
@@ -89,7 +96,7 @@ function EventRegistrationMain({ detail }: { detail: PublicEventDetail }) {
 
   const createVisitor = useMutation({
     mutationFn: async () => {
-      const { error } = await supabase.rpc("ensure_visitor_profile", { _name: visitor.name, _cpf: visitor.cpf, _phone: visitor.phone, _birth_date: visitor.birthDate });
+      const { error } = await supabase.rpc("ensure_visitor_profile", { _name: visitor.name, _cpf: visitorDocType === "cpf" ? visitor.cpf : "", _phone: visitor.phone, _birth_date: visitor.birthDate, _id_type: visitorDocType, _id_number: normalizeEventDocument(visitorDocType, visitor.cpf) });
       if (error) throw error;
     },
     onSuccess: () => {
@@ -126,8 +133,8 @@ function EventRegistrationMain({ detail }: { detail: PublicEventDetail }) {
 
   const register = useMutation({
     mutationFn: async () => {
-      if (event.limit_per_person && !isValidCpf(cpf)) throw new Error("invalid_cpf");
-      if (cpf && !isValidCpf(cpf)) throw new Error("invalid_cpf");
+      if (event.limit_per_person && !isValidEventDocument(docType, cpf)) throw new Error(docType === "cpf" ? "invalid_cpf" : "invalid_document");
+      if (cpf && !isValidEventDocument(docType, cpf)) throw new Error(docType === "cpf" ? "invalid_cpf" : "invalid_document");
       if (event.require_image_consent && !imageConsent) throw new Error("image_consent_required");
       if (!isMember) {
         if (!institution.trim()) throw new Error("invalid_institution");
@@ -139,7 +146,7 @@ function EventRegistrationMain({ detail }: { detail: PublicEventDetail }) {
         if (bErr) throw bErr;
       }
       const { error } = await supabase.rpc("register_for_event", {
-        _event: event.id, _lot: lotId, _quantity: qty, _cpf: cpf, _installments: installments,
+        _event: event.id, _lot: lotId, _quantity: qty, _cpf: docType === "cpf" ? cpf : "", _id_type: docType, _id_number: normalizeEventDocument(docType, cpf), _installments: installments,
         _image_consent: event.require_image_consent && imageConsent,
         ...(isMember ? {} : { _institution: institution.trim(), ...(askReligion ? { _religion: religion } : {}) }),
       });
@@ -210,8 +217,8 @@ function EventRegistrationMain({ detail }: { detail: PublicEventDetail }) {
           className="mt-5 space-y-4"
           onSubmit={(e) => {
             e.preventDefault();
-            if (!isValidCpf(visitor.cpf)) {
-              toast.error(eventError(new Error("invalid_cpf")));
+            if (!isValidEventDocument(visitorDocType, visitor.cpf)) {
+              toast.error(eventError(new Error(visitorDocType === "cpf" ? "invalid_cpf" : "invalid_document")));
               return;
             }
             if (!isValidBirthDate(visitor.birthDate)) {
@@ -228,13 +235,13 @@ function EventRegistrationMain({ detail }: { detail: PublicEventDetail }) {
           }}
         >
           <div className="space-y-1.5"><Label>Nome completo *</Label><Input required value={visitor.name} onChange={(e) => setVisitor({ ...visitor, name: e.target.value })} /></div>
-          <div className="space-y-1.5"><Label>CPF *</Label><Input required inputMode="numeric" placeholder="000.000.000-00" value={visitor.cpf} onChange={(e) => setVisitor({ ...visitor, cpf: formatCpf(e.target.value) })} /></div>
+          <div className="space-y-1.5"><Label>Tipo de identificação *</Label><Select value={visitorDocType} onValueChange={(v) => { setVisitorDocType(v); setVisitor({ ...visitor, cpf: "" }); }}><SelectTrigger><SelectValue placeholder="Selecione" /></SelectTrigger><SelectContent><SelectItem value="cpf">CPF</SelectItem><SelectItem value="rg">RG</SelectItem><SelectItem value="cnh">CNH</SelectItem><SelectItem value="passaporte">Passaporte</SelectItem><SelectItem value="outro">Outro documento</SelectItem></SelectContent></Select><Input required inputMode={visitorDocType === "cpf" ? "numeric" : "text"} placeholder={visitorDocType === "cpf" ? "000.000.000-00" : "Número do documento"} value={visitor.cpf} onChange={(e) => setVisitor({ ...visitor, cpf: visitorDocType === "cpf" ? formatCpf(e.target.value) : e.target.value.toUpperCase() })} /></div>
           <div className="space-y-1.5"><Label>Telefone / WhatsApp *</Label><Input required inputMode="tel" value={visitor.phone} onChange={(e) => setVisitor({ ...visitor, phone: e.target.value })} /></div>
           <div className="space-y-1.5"><Label>Data de nascimento *</Label><Input required type="date" max={new Date().toISOString().slice(0, 10)} value={visitor.birthDate} onChange={(e) => setVisitor({ ...visitor, birthDate: e.target.value })} /></div>
           <PrivacyConsent
             checked={privacyOk}
             onCheckedChange={setPrivacyOk}
-            note="Usamos seu nome, CPF, telefone e data de nascimento para controlar vagas, pagamentos e a entrada no evento."
+            note="Usamos seu nome, documento de identificação, telefone e data de nascimento para controlar vagas, pagamentos e a entrada no evento."
           />
           <Button type="submit" className="w-full" disabled={createVisitor.isPending}>Continuar</Button>
         </form>
@@ -327,11 +334,12 @@ function EventRegistrationMain({ detail }: { detail: PublicEventDetail }) {
           <div className="space-y-1.5">
             <Label>Quantidade de ingressos</Label>
             <Input type="number" min={1} max={maxQty} value={qty} onChange={(e) => setQty(Math.max(1, Math.min(maxQty, Number(e.target.value) || 1)))} />
-            {event.limit_per_person && <p className="text-xs text-muted-foreground">Limite de {event.max_per_person} por pessoa (controlado pelo CPF).</p>}
+            {event.limit_per_person && <p className="text-xs text-muted-foreground">Limite de {event.max_per_person} por pessoa (controlado pelo documento informado).</p>}
           </div>
           <div className="space-y-1.5">
-            <Label>CPF{event.limit_per_person ? " *" : " (opcional)"}</Label>
-            <Input inputMode="numeric" placeholder="000.000.000-00" required={event.limit_per_person} value={cpf} onChange={(e) => setCpf(formatCpf(e.target.value))} />
+            <Label>Tipo de identificação{event.limit_per_person ? " *" : " (opcional)"}</Label>
+            <Select value={docType} onValueChange={(v) => { setDocType(v); setCpf(""); }}><SelectTrigger><SelectValue placeholder="Selecione" /></SelectTrigger><SelectContent><SelectItem value="cpf">CPF</SelectItem><SelectItem value="rg">RG</SelectItem><SelectItem value="cnh">CNH</SelectItem><SelectItem value="passaporte">Passaporte</SelectItem><SelectItem value="outro">Outro documento</SelectItem></SelectContent></Select>
+            <Input inputMode={docType === "cpf" ? "numeric" : "text"} placeholder={docType === "cpf" ? "000.000.000-00" : "Número do documento"} required={event.limit_per_person} value={cpf} onChange={(e) => setCpf(docType === "cpf" ? formatCpf(e.target.value) : e.target.value.toUpperCase())} />
           </div>
         </div>
 
