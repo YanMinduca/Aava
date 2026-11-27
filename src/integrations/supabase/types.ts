@@ -318,6 +318,8 @@ export type Database = {
         Row: {
           attendee_birth_date: string | null
           attendee_cpf: string | null
+          attendee_doc_type: string
+          attendee_doc_number: string | null
           attendee_email: string | null
           attendee_institution: string | null
           attendee_name: string
@@ -350,6 +352,8 @@ export type Database = {
         Insert: {
           attendee_birth_date?: string | null
           attendee_cpf?: string | null
+          attendee_doc_type?: string
+          attendee_doc_number?: string | null
           attendee_email?: string | null
           attendee_institution?: string | null
           attendee_name: string
@@ -887,6 +891,8 @@ export type Database = {
           church_role_id: string | null
           city: string | null
           cpf: string | null
+          id_doc_type: string | null
+          id_doc_number: string | null
           created_at: string
           department: string | null
           email: string | null
@@ -921,6 +927,8 @@ export type Database = {
           church_role_id?: string | null
           city?: string | null
           cpf?: string | null
+          id_doc_type?: string | null
+          id_doc_number?: string | null
           created_at?: string
           department?: string | null
           email?: string | null
@@ -1321,7 +1329,7 @@ export type Database = {
         }[]
       }
       ensure_visitor_profile: {
-        Args: { _birth_date?: string; _cpf: string; _name: string; _phone: string }
+        Args: { _birth_date?: string; _cpf: string; _id_number?: string; _id_type?: string; _name: string; _phone: string }
         Returns: string
       }
       set_my_birth_date: { Args: { _birth_date: string }; Returns: undefined }
@@ -1372,6 +1380,8 @@ export type Database = {
           _lot: string
           _quantity: number
           _religion?: string
+          _id_number?: string
+          _id_type?: string
         }
         Returns: string
       }
@@ -1421,6 +1431,8 @@ export type Database = {
           _phone: string
           _religion?: string
           _user?: string
+          _id_number?: string
+          _id_type?: string
         }
         Returns: Json
       }

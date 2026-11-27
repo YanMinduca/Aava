@@ -37,6 +37,20 @@ export function isValidCpf(v: string) {
   return calc(9) === Number(d[9]) && calc(10) === Number(d[10]);
 }
 
+/** Normaliza o documento informado para uso em inscrições e convites de eventos. */
+export function normalizeEventDocument(type: string, value: string) {
+  return type === "cpf"
+    ? cpfDigits(value)
+    : value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+/** Validação básica de CPF ou documento alternativo. Documentos alternativos aceitam 5–20 letras/números. */
+export function isValidEventDocument(type: string, value: string) {
+  if (type === "cpf") return isValidCpf(value);
+  if (!["rg", "cnh", "passaporte", "outro"].includes(type)) return false;
+  const normalized = normalizeEventDocument(type, value);
+  return normalized.length >= 5 && normalized.length <= 20 && !/^(.)\1+$/.test(normalized);
+}
+
 /** Data de nascimento (yyyy-mm-dd): obrigatória, não pode ser futura nem anterior a 120 anos. */
 export function isValidBirthDate(v: string) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
@@ -67,6 +81,11 @@ const ERRORS: Record<string, string> = {
   members_only: "Este lote é exclusivo para membros.",
   invalid_quantity: "Quantidade de ingressos inválida.",
   invalid_cpf: "CPF inválido. Confira os números.",
+  invalid_document: "Documento inválido. Confira o tipo e o número informado.",
+  invalid_id_type: "Selecione um tipo de identificação válido.",
+  document_in_use: "Este documento já está cadastrado em outra conta.",
+  document_belongs_to_member: "Este documento já consta no cadastro de um membro. Entre com a conta de membro.",
+  invite_document_already_registered: "Já existe ingresso ou inscrição ativa com este documento neste evento.",
   limit_exceeded: "Você já atingiu o limite de inscrições por pessoa neste evento.",
   invalid_invite_name: "Informe o nome completo de quem vai receber o ingresso.",
   invite_not_found: "Convite não encontrado.",
