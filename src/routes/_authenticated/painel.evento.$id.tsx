@@ -265,6 +265,7 @@ function Summary({ stats, loading }: { stats: Stats | undefined; loading: boolea
 }
 
 /* ------------------------------ Inscrições ------------------------------ */
+const EVENT_DOC_LABEL: Record<string, string> = { cpf: "CPF", rg: "RG", cnh: "CNH", passaporte: "Passaporte", outro: "Outro documento" };
 function Registrations({ eventId, title, onChange }: { eventId: string; title: string; onChange: () => void }) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("todas");
@@ -292,9 +293,9 @@ function Registrations({ eventId, title, onChange }: { eventId: string; title: s
   const open = (regs.data ?? []).find((r) => r.id === openId) ?? null;
 
   function exportXls() {
-    const head = ["Nome", "Tipo", "Responsável", "CPF", "Data de nascimento", "Idade", "Religião", "Instituição", "Telefone", "E-mail", "Lote", "Quantidade", "Total (R$)", "Parcelas pagas", "Situação", "Uso de imagem", "Inscrito em"];
+    const head = ["Nome", "Tipo", "Responsável", "Tipo de identificação", "Documento", "Data de nascimento", "Idade", "Religião", "Instituição", "Telefone", "E-mail", "Lote", "Quantidade", "Total (R$)", "Parcelas pagas", "Situação", "Uso de imagem", "Inscrito em"];
     const rows = list.map((r) => [
-      r.attendee_name, r.is_child ? "Criança" : "Adulto", r.is_child ? (r.guardian_name ?? "") : "", r.attendee_cpf ?? "", dateBR(r.attendee_birth_date), registrationAge(r) ?? "", r.is_child ? "" : religionLabel(r.attendee_religion), r.attendee_institution ?? "", r.attendee_phone ?? "", r.attendee_email ?? "", r.event_lots?.name ?? "", r.quantity, Number(r.total),
+      r.attendee_name, r.is_child ? "Criança" : "Adulto", r.is_child ? (r.guardian_name ?? "") : "", EVENT_DOC_LABEL[r.attendee_doc_type] ?? "CPF", r.attendee_doc_number ?? r.attendee_cpf ?? "", dateBR(r.attendee_birth_date), registrationAge(r) ?? "", r.is_child ? "" : religionLabel(r.attendee_religion), r.attendee_institution ?? "", r.attendee_phone ?? "", r.attendee_email ?? "", r.event_lots?.name ?? "", r.quantity, Number(r.total),
       `${(r.event_payments ?? []).filter((p) => p.status === "paid").length}/${(r.event_payments ?? []).length}`,
       REGISTRATION_STATUS[r.status] ?? r.status, r.image_consent ? `Autorizado em ${fmtDateTime(r.image_consent_at)}` : "Não solicitado/sem aceite", fmtDateTime(r.created_at),
     ]);
@@ -304,7 +305,7 @@ function Registrations({ eventId, title, onChange }: { eventId: string; title: s
   return (
     <div className="mt-4">
       <div className="flex flex-wrap items-end gap-3">
-        <div className="space-y-1.5"><Label>Buscar</Label><Input placeholder="Nome ou CPF" value={search} onChange={(e) => setSearch(e.target.value)} className="w-56" /></div>
+        <div className="space-y-1.5"><Label>Buscar</Label><Input placeholder="Nome ou documento" value={search} onChange={(e) => setSearch(e.target.value)} className="w-56" /></div>
         <div className="space-y-1.5">
           <Label>Situação</Label>
           <Select value={filter} onValueChange={setFilter}>
@@ -391,7 +392,7 @@ function RegistrationDetail({ reg, onChange }: { reg: RegRow; onChange: () => vo
       <div className="space-y-5 text-sm">
         <div className="grid gap-1 text-muted-foreground">
           <p>{reg.event_lots?.name} × {reg.quantity} · {reg.total > 0 ? moneyBR(reg.total) : "Gratuito"}</p>
-          <p>CPF{reg.is_child ? " da criança" : ""}: {reg.attendee_cpf || "—"} · Tel.{reg.is_child ? " do responsável" : ""}: {reg.attendee_phone || "—"}</p>
+          <p>{EVENT_DOC_LABEL[reg.attendee_doc_type] ?? "CPF"}{reg.is_child ? " da criança" : ""}: {reg.attendee_doc_number || reg.attendee_cpf || "—"} · Tel.{reg.is_child ? " do responsável" : ""}: {reg.attendee_phone || "—"}</p>
           {reg.is_child ? (
             <>
               <p>Inscrição de criança · Responsável: {reg.guardian_name || "—"}</p>
