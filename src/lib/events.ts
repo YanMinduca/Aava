@@ -48,7 +48,7 @@ export function isValidEventDocument(type: string, value: string) {
   if (type === "cpf") return isValidCpf(value);
   if (!["rg", "cnh", "passaporte", "outro"].includes(type)) return false;
   const normalized = normalizeEventDocument(type, value);
-  return normalized.length >= 5 && normalized.length <= 20 && !/^(.)\\1+$/.test(normalized);
+  return normalized.length >= 5 && normalized.length <= 20 && !/^(.)\1+$/.test(normalized);
 }
 
 /** Data de nascimento (yyyy-mm-dd): obrigatória, não pode ser futura nem anterior a 120 anos. */
