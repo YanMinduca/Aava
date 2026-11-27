@@ -10,7 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { RELIGIONS, religionLabel } from "@/lib/event-data";
-import { eventError, fmtDateTime, formatCpf, isValidCpf, cpfDigits, TICKET_STATUS } from "@/lib/events";
+import { eventError, fmtDateTime, formatCpf, isValidCpf, cpfDigits, TICKET_STATUS, isValidEventDocument, normalizeEventDocument } from "@/lib/events";
 import { dateBR } from "@/lib/church";
 import { useDebounced } from "@/lib/use-debounced";
 import { formatShortCode } from "@/lib/images";
@@ -34,6 +34,8 @@ type Invite = {
   short_code: string | null;
   holder_name: string;
   cpf_end: string;
+  doc_type: string;
+  doc_end: string;
   birth_date: string | null;
   phone: string | null;
   religion: string | null;
@@ -278,6 +280,7 @@ export function EventInvites({
   const [name, setName] = useState("");
   const [birth, setBirth] = useState("");
   const [cpf, setCpf] = useState("");
+  const [docType, setDocType] = useState("cpf");
   const [phone, setPhone] = useState("");
   const [religion, setReligion] = useState("");
   const [institution, setInstitution] = useState("");
@@ -299,7 +302,7 @@ export function EventInvites({
     },
   });
 
-  const cpfOk = isValidCpf(cpf);
+  const cpfOk = isValidEventDocument(docType, cpf);
   const nameOk = name.trim().replace(/\s+/g, " ").length >= 3;
   const birthOk = !!birth && birth <= new Date().toISOString().slice(0, 10) && birth >= "1900-01-01";
   const phoneOk = phone.replace(/\D/g, "").length >= 10 && phone.replace(/\D/g, "").length <= 13;
@@ -313,7 +316,9 @@ export function EventInvites({
         _lot: lotId,
         _name: name.trim().replace(/\s+/g, " "),
         _birth_date: birth,
-        _cpf: cpfDigits(cpf),
+        _cpf: docType === "cpf" ? cpfDigits(cpf) : "",
+        _id_type: docType,
+        _id_number: normalizeEventDocument(docType, cpf),
         _phone: phone.trim(),
         ...(account ? { _user: account.user_id } : {}),
         ...(askReligion ? { _religion: religion, _institution: institution.trim().replace(/\s+/g, " ") } : {}),
@@ -332,6 +337,7 @@ export function EventInvites({
       setName("");
       setBirth("");
       setCpf("");
+      setDocType("cpf");
       setPhone("");
       setReligion("");
       setInstitution("");
@@ -369,9 +375,15 @@ export function EventInvites({
           <Input id="invite-birth" type="date" value={birth} onChange={(e) => setBirth(e.target.value)} max={new Date().toISOString().slice(0, 10)} />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="invite-cpf">CPF</Label>
-          <Input id="invite-cpf" inputMode="numeric" placeholder="000.000.000-00" value={cpf} onChange={(e) => setCpf(formatCpf(e.target.value))} autoComplete="off" />
-          {cpf && !cpfOk && cpfDigits(cpf).length === 11 && <p className="text-xs text-destructive">CPF inválido. Confira os números.</p>}
+          <Label htmlFor="invite-cpf">Tipo de identificação</Label>
+          <Select value={docType} onValueChange={(v) => { setDocType(v); setCpf(""); }}>
+            <SelectTrigger id="invite-doc-type"><SelectValue placeholder="Selecione o documento" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="cpf">CPF</SelectItem><SelectItem value="rg">RG</SelectItem><SelectItem value="cnh">CNH</SelectItem><SelectItem value="passaporte">Passaporte</SelectItem><SelectItem value="outro">Outro documento</SelectItem>
+            </SelectContent>
+          </Select>
+          <Input id="invite-cpf" inputMode={docType === "cpf" ? "numeric" : "text"} placeholder={docType === "cpf" ? "000.000.000-00" : "Número do documento"} value={cpf} onChange={(e) => setCpf(docType === "cpf" ? formatCpf(e.target.value) : e.target.value.toUpperCase())} autoComplete="off" />
+          {cpf && !cpfOk && <p className="text-xs text-destructive">{docType === "cpf" ? "CPF inválido. Confira os números." : "Informe um documento válido (5 a 20 letras ou números)."}</p>}
         </div>
         <div className="space-y-1.5">
           <Label htmlFor="invite-phone">Telefone / WhatsApp</Label>
@@ -427,7 +439,7 @@ export function EventInvites({
                 <div className="min-w-0">
                   <p className="truncate font-medium text-foreground">{i.holder_name}</p>
                   <p className="text-xs text-muted-foreground">
-                    CPF final {i.cpf_end} · nasc. {dateBR(i.birth_date)} · {i.lot} · {fmtDateTime(i.created_at)}
+                    {i.doc_type === "cpf" ? `CPF final ${i.cpf_end}` : `${({rg:"RG",cnh:"CNH",passaporte:"Passaporte",outro:"Outro"} as Record<string,string>)[i.doc_type] ?? "Documento"} final ${i.doc_end}`} · nasc. {dateBR(i.birth_date)} · {i.lot} · {fmtDateTime(i.created_at)}
                   </p>
                   {(i.phone || i.religion || i.institution) && (
                     <p className="text-xs text-muted-foreground">
